@@ -1,0 +1,188 @@
+name: Feature Request
+description: Suggest a new feature or enhancement for the P2 Magnetic Imaging Tile system
+title: "[FEATURE] "
+labels: ["enhancement"]
+assignees: []
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting a feature! Please provide details about your idea to help us understand and evaluate it.
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: Feature Category
+      description: What type of feature is this?
+      options:
+        - Performance Optimization
+        - Display Enhancement
+        - New Visualization Mode
+        - Hardware Support
+        - User Interface
+        - Data Export/Analysis
+        - Configuration Options
+        - Diagnostic Tools
+        - Documentation
+        - Development Tools
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority Level
+      description: How important is this feature to you?
+      options:
+        - High - Critical for project success
+        - Medium - Would significantly improve functionality
+        - Low - Nice to have enhancement
+    validations:
+      required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Feature Summary
+      description: Brief description of the proposed feature
+      placeholder: A one-line summary of what you'd like to see added
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem Statement
+      description: What problem does this feature solve?
+      placeholder: |
+        Is your feature request related to a problem? Please describe.
+        Example: "I'm always frustrated when..." or "It would be useful to..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution
+      description: Describe the solution you'd like
+      placeholder: |
+        A clear and concise description of what you want to happen.
+        Include specific details about:
+        - How it should work
+        - What the user experience should be
+        - Technical requirements (if known)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Affected Components
+      description: Which parts of the system would this feature involve?
+      multiple: true
+      options:
+        - Sensor Data Acquisition
+        - ADC Interface (Internal P2)
+        - ADC Interface (External AD7940)
+        - OLED Display System
+        - HDMI Display System
+        - SPI Communication
+        - Frame Rate Optimization
+        - Memory Management
+        - Pin Configuration
+        - Control Interface
+        - Data Processing
+        - Visualization Engine
+        - Build System
+        - Documentation
+    validations:
+      required: true
+
+  - type: textarea
+    id: performance_impact
+    attributes:
+      label: Performance Considerations
+      description: How might this feature affect frame rates or system performance?
+      placeholder: |
+        Consider:
+        - Frame rate impact (positive/negative/neutral)
+        - Memory usage changes
+        - Processing overhead
+        - Real-time constraints
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternative Solutions
+      description: Describe alternatives you've considered
+      placeholder: |
+        What other approaches could solve this problem?
+        Why is your proposed solution preferred?
+
+  - type: dropdown
+    id: hardware_impact
+    attributes:
+      label: Hardware Requirements
+      description: Would this feature require additional hardware?
+      options:
+        - No additional hardware needed
+        - Additional pins required
+        - External components needed
+        - Different display type needed
+        - New sensor interface required
+        - Significant hardware changes
+        - Unknown/Need investigation
+    validations:
+      required: true
+
+  - type: textarea
+    id: use_cases
+    attributes:
+      label: Use Cases
+      description: Describe specific scenarios where this feature would be useful
+      placeholder: |
+        Examples:
+        - Scientific research applications
+        - Educational demonstrations
+        - Industrial quality control
+        - Hobbyist projects
+        - Performance benchmarking
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Implementation Scope
+      description: How complex do you think this feature would be to implement?
+      options:
+        - Simple - Small code change
+        - Moderate - New functionality but well-defined
+        - Complex - Significant system changes
+        - Major - Fundamental architecture changes
+        - Unknown - Need technical analysis
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance_criteria
+    attributes:
+      label: Acceptance Criteria
+      description: How would you know this feature is working correctly?
+      placeholder: |
+        Define success criteria:
+        - What specific behavior should be observed?
+        - What measurements or tests would validate it?
+        - What edge cases need to be handled?
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional Context
+      description: Add any other context, mockups, or examples
+      placeholder: |
+        - Links to similar implementations
+        - References to research papers
+        - Mockups or diagrams
+        - Related GitHub issues
+        - Community discussions

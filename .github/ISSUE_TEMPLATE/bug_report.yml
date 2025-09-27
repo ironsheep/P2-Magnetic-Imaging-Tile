@@ -1,0 +1,140 @@
+name: Bug Report
+description: Report a bug or issue with the P2 Magnetic Imaging Tile system
+title: "[BUG] "
+labels: ["bug"]
+assignees: []
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug! Please fill out the information below to help us investigate the issue.
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which part of the system is affected?
+      options:
+        - Sensor Data Acquisition
+        - OLED Display Output
+        - HDMI Display Output
+        - SPI Communication
+        - ADC Interface (Internal P2)
+        - ADC Interface (External AD7940)
+        - Frame Rate Performance
+        - Memory Management
+        - Pin Configuration
+        - Build System
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: hardware
+    attributes:
+      label: Hardware Configuration
+      description: What hardware setup are you using?
+      options:
+        - P2 + Magnetic Tile + OLED (minimal setup)
+        - P2 + Magnetic Tile + OLED + HDMI
+        - P2 + Magnetic Tile only (no display)
+        - Custom pin configuration
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: A clear and concise description of what the bug is
+      placeholder: Describe what happened and what you expected to happen
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: Steps to reproduce the behavior
+      placeholder: |
+        1. Connect hardware using pinout from README
+        2. Compile and load program
+        3. Power on device
+        4. Observe behavior...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen?
+      placeholder: Describe the expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: What actually happened?
+      placeholder: Describe what actually occurred
+    validations:
+      required: true
+
+  - type: dropdown
+    id: frequency
+    attributes:
+      label: How often does this occur?
+      options:
+        - Always
+        - Frequently
+        - Sometimes
+        - Rarely
+        - Once
+    validations:
+      required: true
+
+  - type: textarea
+    id: performance
+    attributes:
+      label: Performance Impact
+      description: If applicable, describe any performance issues (frame rate, delays, etc.)
+      placeholder: |
+        - Expected frame rate: XX fps
+        - Actual frame rate: XX fps
+        - Display lag: XX ms
+        - Other performance observations...
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Development Environment
+      description: What tools and environment are you using?
+      placeholder: |
+        - P2 Board: (e.g., P2 Edge, P2 Eval, custom)
+        - Compiler: (e.g., PNut v43, FlexProp v6.0.0)
+        - OLED Display Model: (e.g., SSD1306 128x128)
+        - Pin Group Used: (e.g., Pin Group 48)
+        - OS: (e.g., Windows 11, macOS, Linux)
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Debug Output/Logs
+      description: If available, paste any debug console output or error messages
+      render: shell
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional Context
+      description: Add any other context about the problem here
+      placeholder: |
+        - Magnetic sources tested with
+        - Environmental conditions
+        - Any modifications to hardware/software
+        - Related issues or forum discussions
