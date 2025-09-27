@@ -1,9 +1,8 @@
 # P2 Magnetic Imaging Tile
 
 ![Project Maintenance][maintenance-shield]
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**Developer:** stephen@ironsheep.biz
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 A Propeller 2 (P2) implementation for interfacing with the SparkFun Magnetic Imaging Tile V3, providing real-time magnetic field visualization and high-speed data acquisition.
 
@@ -18,6 +17,7 @@ The SparkFun Magnetic Imaging Tile V3 is an 8×8 array of Hall effect sensors ca
 ## Hardware Components
 
 ### SparkFun Magnetic Imaging Tile V3
+
 - 64 Hall effect sensors arranged in 8×8 grid (4mm spacing)
 - 4 subtiles for efficient readout organization
 - Hardware multiplexer for sequential sensor selection
@@ -26,6 +26,7 @@ The SparkFun Magnetic Imaging Tile V3 is an 8×8 array of Hall effect sensors ca
 ### Propeller 2 Interface
 
 #### Pin Connections
+
 **Pin Group**: 48 (P48-P55)
 
 ```
@@ -44,12 +45,14 @@ GND    | Ground          | BLACK      | Ground connection
 ## Features
 
 ### Data Acquisition
+
 - **Low-Cost Design**: Minimal hardware components for cost-effective implementation
 - **Dual ADC Support**: P2 internal ADC and external AD7940 14-bit ADC for performance comparison
 - **Maximum Frame Rate Testing**: Benchmark P2 performance limits with this sensor configuration
 - **Frame Buffering**: Extensive buffering using P2's 512KB Hub RAM
 
 ### Visualization
+
 - **Primary Display**: 128×128 OLED (SPI) for compact real-time visualization
 - **Secondary Display**: HDMI output for expanded visualization
 - **Debug Logging**: Serial output for driver verification and troubleshooting
@@ -58,6 +61,7 @@ GND    | Ground          | BLACK      | Ground connection
 - **Background Calibration**: Adaptive baseline correction for improved accuracy
 
 ### Communication
+
 - **SPI Interface**: Direct hardware connection for sensor data and display output
 - **Control Interface**: TBD - possibly debug console for device control
 - **Live Display**: Real-time magnetic field visualization without external commands
@@ -77,6 +81,7 @@ GND    | Ground          | BLACK      | Ground connection
 ## Data Format
 
 ### Frame Structure
+
 Each frame contains 64 sensor readings arranged as an 8×8 grid, processed internally and displayed directly on the OLED screen:
 
 ```
@@ -85,6 +90,7 @@ Each frame contains 64 sensor readings arranged as an 8×8 grid, processed inter
 ...
 [7,0] [7,1] [7,2] [7,3] [7,4] [7,5] [7,6] [7,7]
 ```
+
 - 64 sensor values per frame
 - Real-time color mapping for OLED display
 - Internal processing without external data output
@@ -115,12 +121,14 @@ Detailed technical documentation is available in the `DOCs/` directory:
 ## Applications
 
 ### Scientific Research
+
 - Real-time magnetic field visualization
 - Motor and transformer analysis
 - Permanent magnet characterization
 - Electromagnetic interference detection
 
 ### Educational Use
+
 - Physics demonstrations
 - STEM outreach activities
 - Interactive magnetic field exploration
