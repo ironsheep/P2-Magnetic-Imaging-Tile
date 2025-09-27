@@ -148,9 +148,10 @@ Detailed technical documentation is available in the `DOCs/` directory:
 - Propeller 2 development board
   - [P2 Edge Module with Breakout Board Bundle](https://www.parallax.com/product/p2-edge-module-with-p2-edge-breakout-board-bundle/)
   - [Propeller 2 Mini Starter Bundle](https://www.parallax.com/product/propeller-2-mini-starter-bundle/)
-- SparkFun Magnetic Imaging Tile V3
+- SparkFun Magnetic Imaging Tile V3 - [SparkFun](https://www.sparkfun.com/sparkfun-magnetic-imaging-tile-8x8.html)
 - 128×128 OLED display (SPI interface) - [Amazon](https://www.amazon.com/dp/B07V579YK2)
-- HDMI display capability (optional secondary display)
+- HDMI display capability (optional secondary display) - [Amazon](https://www.amazon.com/HMTECH-Raspberry-800x480-Dual-Speaker-Non-Touch/dp/B0C6963887)
+  - [P2 Eval Digital Video Out Add-on Board](https://www.parallax.com/product/p2-eval-digital-video-out-add-on-board/) (HDMI adapter for P2)
 
 ### Software Tools
 - Propeller 2 development environment
