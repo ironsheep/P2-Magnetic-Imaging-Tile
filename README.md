@@ -4,7 +4,11 @@ A Propeller 2 (P2) implementation for interfacing with the SparkFun Magnetic Ima
 
 ## Overview
 
-The SparkFun Magnetic Imaging Tile V3 is an 8×8 array of Hall effect sensors capable of visualizing magnetic fields in real-time. This project implements a complete P2-based interface system that can capture magnetic field data at rates up to 2000 fps and provide real-time visualization through VGA/HDMI output.
+The SparkFun Magnetic Imaging Tile V3 is an 8×8 array of Hall effect sensors capable of visualizing magnetic fields in real-time. This project creates a complete P2-based interface system with two primary objectives:
+
+**Primary Purpose**: Create a low-hardware-cost magnetic field visualizer using minimal components (P2 + magnetic tile + OLED display)
+
+**Secondary Purpose**: Determine the maximum achievable frame rate using Propeller 2 hardware with this sensor configuration
 
 ## Hardware Components
 
@@ -35,48 +39,50 @@ GND    | Ground          | BLACK      | Ground connection
 ## Features
 
 ### Data Acquisition
-- **Multiple ADC Support**: P2 internal ADC and external AD7940 14-bit ADC
-- **High-Speed Capture**: Up to 2000 fps frame rates
-- **Flexible Modes**: Live streaming, high-speed burst capture, single pixel testing
+- **Low-Cost Design**: Minimal hardware components for cost-effective implementation
+- **Dual ADC Support**: P2 internal ADC and external AD7940 14-bit ADC for performance comparison
+- **Maximum Frame Rate Testing**: Benchmark P2 performance limits with this sensor configuration
 - **Frame Buffering**: Extensive buffering using P2's 512KB Hub RAM
 
 ### Visualization
-- **Real-Time Display**: VGA/HDMI output for live magnetic field visualization
+- **Primary Display**: 128×128 OLED (SPI) for compact real-time visualization
+- **Secondary Display**: HDMI output for expanded visualization
+- **Debug Logging**: Serial output for driver verification and troubleshooting
 - **Dual Sensitivity**: Normal and 10× amplified displays
 - **Color Mapping**: Bipolar visualization (red for negative, green for positive fields)
 - **Background Calibration**: Adaptive baseline correction for improved accuracy
 
 ### Communication
-- **Serial Interface**: 115200 baud bidirectional communication
-- **Command Protocol**: Single character commands for mode control
-- **Data Output**: Space-separated ASCII format compatible with existing tools
+- **SPI Interface**: Direct hardware connection for sensor data and display output
+- **Control Interface**: TBD - possibly debug console for device control
+- **Live Display**: Real-time magnetic field visualization without external commands
 
 ## Operational Modes
 
-| Mode | Command | Description | Frame Rate |
-|------|---------|-------------|------------|
-| Live | L | Continuous real-time streaming | Limited by serial bandwidth |
-| High-Speed 1 | 1 | Maximum speed burst capture | ~2000 Hz |
-| High-Speed 2 | 2 | Controlled rate capture | ~1000 Hz |
-| High-Speed 3 | 3 | Controlled rate capture | ~500 Hz |
-| High-Speed 4 | 4 | Controlled rate capture | ~250 Hz |
-| Stop | S | Idle/standby mode | - |
-| Pixel Test | P | Single sensor diagnostic | - |
+**Initial Implementation**: Live continuous scanning with real-time OLED display
+
+| Mode | Description | Frame Rate |
+|------|-------------|------------|
+| Live Scan | Continuous real-time magnetic field visualization | Limited by display refresh |
+| High-Speed | Maximum speed capture and display | Up to 2000 Hz |
+| Debug | Single sensor diagnostic via debug console | Variable |
+
+*Note: Command interface for mode switching is under development*
 
 ## Data Format
 
 ### Frame Structure
-Each frame contains 64 sensor readings arranged as an 8×8 grid:
+Each frame contains 64 sensor readings arranged as an 8×8 grid, processed internally and displayed directly on the OLED screen:
+
 ```
-val0 val1 val2 val3 val4 val5 val6 val7
-val8 val9 val10 val11 val12 val13 val14 val15
+[0,0] [0,1] [0,2] [0,3] [0,4] [0,5] [0,6] [0,7]
+[1,0] [1,1] [1,2] [1,3] [1,4] [1,5] [1,6] [1,7]
 ...
-val56 val57 val58 val59 val60 val61 val62 val63
-*
+[7,0] [7,1] [7,2] [7,3] [7,4] [7,5] [7,6] [7,7]
 ```
-- 8 space-separated values per line (one row)
-- 8 lines per frame
-- Asterisk (*) marks frame completion
+- 64 sensor values per frame
+- Real-time color mapping for OLED display
+- Internal processing without external data output
 
 ## Project Status
 
@@ -126,22 +132,23 @@ Detailed technical documentation is available in the `DOCs/` directory:
 ### Hardware
 - Propeller 2 development board
 - SparkFun Magnetic Imaging Tile V3
-- VGA/HDMI display capability
-- Serial communication interface
+- 128×128 OLED display (SPI interface)
+- HDMI display capability (optional secondary display)
 
 ### Software Tools
 - Propeller 2 development environment
 - PNut or FlexProp compiler
 - Serial terminal application
-- Optional: Processing IDE for PC-based visualization
+- Debug console for development and diagnostics
 
 ## Getting Started
 
 1. **Hardware Setup**: Connect the magnetic imaging tile to P2 using the pinout above
-2. **Compile Code**: Use PNut or FlexProp to compile the P2 source code (when available)
-3. **Load Program**: Upload the compiled binary to P2
-4. **Connect Display**: Attach VGA/HDMI monitor for real-time visualization
-5. **Test Communication**: Use serial terminal at 115200 baud to send commands
+2. **Display Setup**: Connect 128×128 OLED display via SPI for primary visualization
+3. **Compile Code**: Use PNut or FlexProp to compile the P2 source code (when available)
+4. **Load Program**: Upload the compiled binary to P2
+5. **Operation**: Device will automatically start live scanning and display magnetic fields
+6. **Optional**: Connect HDMI display for secondary visualization
 
 ## Contributing
 
