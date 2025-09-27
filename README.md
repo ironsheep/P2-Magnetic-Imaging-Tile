@@ -183,9 +183,9 @@ This project is licensed under the MIT License. See the [LICENSE](LICENSE) file 
 
 ## Acknowledgments
 
-- SparkFun Electronics for the Magnetic Imaging Tile hardware design
-- Parallax Inc. for the Propeller 2 microcontroller
-- Original Arduino implementation authors for reference documentation
+- [SparkFun Electronics](https://www.sparkfun.com/) for the Magnetic Imaging Tile hardware design
+- [Parallax Inc.](https://www.parallax.com/) for the Propeller 2 microcontroller
+- [Original Arduino implementation authors](https://github.com/sparkfun/SparkFun_Magnetic_Imaging_Tile) for reference documentation
 
 ## Contact
 
