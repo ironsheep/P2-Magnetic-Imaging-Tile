@@ -1,5 +1,10 @@
 # P2 Magnetic Imaging Tile
 
+![Project Maintenance][maintenance-shield]
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+**Developer:** stephen@ironsheep.biz
+
 A Propeller 2 (P2) implementation for interfacing with the SparkFun Magnetic Imaging Tile V3, providing real-time magnetic field visualization and high-speed data acquisition.
 
 ## Overview
@@ -175,3 +180,5 @@ This project is licensed under the MIT License. See the [LICENSE](LICENSE) file 
 **Organization**: Iron Sheep Productions LLC
 
 For questions, issues, or contributions, please use the project's issue tracking system.
+
+[maintenance-shield]: https://img.shields.io/badge/maintainer-stephen%40ironsheep%2ebiz-blue.svg?style=for-the-badge
