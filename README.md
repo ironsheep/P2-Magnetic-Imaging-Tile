@@ -23,6 +23,8 @@ The SparkFun Magnetic Imaging Tile V3 is an 8×8 array of Hall effect sensors ca
 - Hardware multiplexer for sequential sensor selection
 - AD7940 14-bit external ADC for high-precision measurements
 
+**Where to Buy**: [SparkFun Magnetic Imaging Tile 8x8](https://www.sparkfun.com/sparkfun-magnetic-imaging-tile-8x8.html)
+
 ### Propeller 2 Interface
 
 #### Pin Connections
@@ -144,8 +146,10 @@ Detailed technical documentation is available in the `DOCs/` directory:
 
 ### Hardware
 - Propeller 2 development board
+  - [P2 Edge Module with Breakout Board Bundle](https://www.parallax.com/product/p2-edge-module-with-p2-edge-breakout-board-bundle/)
+  - [Propeller 2 Mini Starter Bundle](https://www.parallax.com/product/propeller-2-mini-starter-bundle/)
 - SparkFun Magnetic Imaging Tile V3
-- 128×128 OLED display (SPI interface)
+- 128×128 OLED display (SPI interface) - [Amazon](https://www.amazon.com/dp/B07V579YK2)
 - HDMI display capability (optional secondary display)
 
 ### Software Tools
