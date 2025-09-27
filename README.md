@@ -145,7 +145,7 @@ Detailed technical documentation is available in the `DOCs/` directory:
 ## Development Requirements
 
 ### Hardware
-- Propeller 2 development board
+- Propeller 2 development board (choose one):
   - [P2 Edge Module with Breakout Board Bundle](https://www.parallax.com/product/p2-edge-module-with-p2-edge-breakout-board-bundle/)
   - [Propeller 2 Mini Starter Bundle](https://www.parallax.com/product/propeller-2-mini-starter-bundle/)
 - SparkFun Magnetic Imaging Tile V3 - [SparkFun](https://www.sparkfun.com/sparkfun-magnetic-imaging-tile-8x8.html)
