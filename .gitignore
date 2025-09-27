@@ -208,3 +208,4 @@ __marimo__/
 .DS_Store
 CLAUDE.md
 /.history
+.vscode/settings.json
