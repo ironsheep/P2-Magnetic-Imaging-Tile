@@ -1,0 +1,12 @@
+Magnetic Tile Board:
+	Pinout:
+		- GND - GND - gound - BLACK
+		- p+6 - AOUT - analog in from board (current hall sensor)  - YELLOW
+			- we can do our own ADC
+		- p+4 - SCLK - AD7940 - GREEN
+		- p+2- MISO - AD7940 - BLUE
+		- p+0 - CS - AD7940 - VIOLET
+		- p+3 - CLRb - sensor array - GRAY
+		- p+1 - CCLK- sensor array - WHITE
+		- 3.3v - VCC - power - REDa
+	
