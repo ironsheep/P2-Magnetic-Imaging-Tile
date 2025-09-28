@@ -209,3 +209,5 @@ __marimo__/
 CLAUDE.md
 /.history
 .vscode/settings.json
+*.obj
+*.bin

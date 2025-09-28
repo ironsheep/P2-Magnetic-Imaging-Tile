@@ -1,5 +1,4 @@
 '' =================================================================================================
-''
 ''   File....... tile_sensor.spin2
 ''   Purpose.... Magnetic Imaging Tile sensor interface with background acquisition
 ''   Author..... Stephen M Moraco
@@ -14,11 +13,11 @@
 CON { tile sensor constants }
 
     ' Pin assignments (relative to pin group)
-    PIN_CS          = 0                 ' +0 - AD7940 Chip Select (VIOLET)
+    PIN_CS          = 0                 ' +0 - AD7680 Chip Select (VIOLET)
     PIN_CCLK        = 1                 ' +1 - Counter Clock (WHITE)
-    PIN_MISO        = 2                 ' +2 - AD7940 Data Input (BLUE)
+    PIN_MISO        = 2                 ' +2 - AD7680 Data Input (BLUE)
     PIN_CLRB        = 3                 ' +3 - Counter Clear (GRAY)
-    PIN_SCLK        = 4                 ' +4 - AD7940 SPI Clock (GREEN)
+    PIN_SCLK        = 4                 ' +4 - AD7680 SPI Clock (GREEN)
     PIN_AOUT        = 6                 ' +6 - Analog Input (YELLOW)
 
     ' Sensor array configuration
@@ -27,13 +26,20 @@ CON { tile sensor constants }
     SENSORS_PER_SUBTILE = 16            ' 4x4 per subtile
 
     ' ADC configuration
-    ADC_BITS = 14                       ' AD7940 is 14-bit ADC
+    ADC_BITS = 16                       ' AD7680 is 16-bit ADC
     ADC_MAX_VALUE = (1 << ADC_BITS) - 1 ' Maximum ADC reading
+    SPI_TRANSFER_BITS = 24              ' Total SPI transfer size (4 leading + 16 data + 4 trailing)
+    SPI_DATA_BITS = 20                  ' Minimum transfer (4 leading + 16 data)
 
     ' Timing constants (in system clocks)
     SPI_CLOCK_DELAY = 10                ' Delay between SPI clock edges
     COUNTER_SETUP_DELAY = 50            ' Delay after counter operations
     SENSOR_SETTLE_DELAY = 20            ' Delay for sensor to settle
+
+    ' Smart Pin SPI configuration
+    SPI_CLOCK_FREQ = 10_000_000          ' 10 MHz SPI clock
+
+    ' Note: P_SYNC_RX, P_SYNC_TX and other smart pin constants are built-in
 
     ' Subtile reading order (based on hardware layout)
     ' Documentation specifies: subtileOrder[] = {0, 2, 1, 3}
@@ -119,7 +125,7 @@ PUB start(base_pin_group, queue_obj) : success
     ' Configure GPIO pins
     setup_gpio()
 
-    ' Start background cog
+    ' Start background cog with parameter block
     cog_id := coginit(NEWCOG, @sensor_cog_entry, @pin_group)
 
     ' Return success based on cog_id validity
@@ -210,21 +216,29 @@ PUB debug_frame_mapping() | subtile, sensor, frame_pos
 
         repeat sensor from 0 to 15
             frame_pos := get_frame_position(subtile, sensor)
-            debug("  Sensor ", udec(sensor), " → Frame[", udec(frame_pos), "] (row ", udec(frame_pos / 8), ", col ", udec(frame_pos // 8), ")")
+            debug("  Sensor ", udec(sensor), " -> Frame[", udec(frame_pos), "] (row ", udec(frame_pos / 8), ", col ", udec(frame_pos // 8), ")")
 
-        debug("")
+        debug(" ")
 
-PRI setup_gpio()
-'' Configure GPIO pins for sensor interface with appropriate drive modes
+PRI setup_gpio() | spi_config
+'' Configure pins for sensor interface with smart pin modes for SPI
 '' @returns nothing - initializes all sensor interface pins
 
-    ' Set pin directions
+    ' Set pin directions for counter control
     pinstart(abs_pin_cs, P_HIGH_1MA, 0, 0)      ' CS output
     pinstart(abs_pin_cclk, P_HIGH_1MA, 0, 0)    ' CCLK output
     pinstart(abs_pin_clrb, P_HIGH_1MA, 0, 0)    ' CLRb output
-    pinstart(abs_pin_sclk, P_HIGH_1MA, 0, 0)    ' SCLK output
 
-    ' MISO and AOUT are inputs (default)
+    ' Configure smart pins for SPI
+    ' MISO pin as sync serial receive (data input)
+    pinf(abs_pin_miso)                       ' Float pin first
+    wrpin(abs_pin_miso, P_SYNC_RX)           ' Set sync serial receive mode (built-in constant)
+    wxpin(abs_pin_miso, 24)                  ' 24 bits per transfer (4 leading + 16 data + 4 trailing)
+
+    ' SCLK pin as transition output for clock generation
+    pinf(abs_pin_sclk)                       ' Float pin first
+    wrpin(abs_pin_sclk, P_TRANSITION) ' Set as transition output for clock (built-in constant)
+    wxpin(abs_pin_sclk, clkfreq / SPI_CLOCK_FREQ / 2) ' Set clock period
 
     ' Set initial pin states
     pinh(abs_pin_cs)                    ' CS high (inactive)
@@ -237,32 +251,26 @@ DAT { background cog code }
                         ORG     0
 
 sensor_cog_entry
-                        ' Get parameter pointer
+                        ' Get parameter pointer (points to pin_group)
                         mov     param_ptr, ptra
 
                         ' Load pin configuration
                         rdlong  pin_group_base, param_ptr
-                        add     param_ptr, #4
 
-                        ' Calculate absolute pin numbers
-                        mov     cs_pin, pin_group_base
-                        add     cs_pin, #PIN_CS
+                        ' Calculate acquisition_mode address (offset from pin_group)
+                        mov     acq_mode_ptr, param_ptr
+                        add     acq_mode_ptr, #12        ' Skip frame_count(4) + error_count(4) + acquisition_mode offset
 
-                        mov     cclk_pin, pin_group_base
-                        add     cclk_pin, #PIN_CCLK
-
-                        mov     miso_pin, pin_group_base
-                        add     miso_pin, #PIN_MISO
-
-                        mov     clrb_pin, pin_group_base
-                        add     clrb_pin, #PIN_CLRB
-
-                        mov     sclk_pin, pin_group_base
-                        add     sclk_pin, #PIN_SCLK
+                        ' Add base to all pin offsets (initialized at compile time)
+                        add     cs_pin, pin_group_base
+                        add     cclk_pin, pin_group_base
+                        add     miso_pin, pin_group_base
+                        add     clrb_pin, pin_group_base
+                        add     sclk_pin, pin_group_base
 
 acquisition_loop
                         ' Check acquisition mode - continue unless explicitly stopped
-                        rdlong  temp, #acquisition_mode
+                        rdlong  temp, acq_mode_ptr
                         cmp     temp, #MODE_STOPPED wz
                 if_z    jmp     #acquisition_loop
 
@@ -276,13 +284,15 @@ acquisition_loop
                         ' Commit frame to queue
                         call    #commit_frame_buffer
 
-                        ' Update frame count
-                        rdlong  temp, #frame_count
+                        ' Update frame count (using offset from param_ptr)
+                        mov     temp2, param_ptr
+                        add     temp2, #4                ' frame_count is at offset 4
+                        rdlong  temp, temp2
                         add     temp, #1
-                        wrlong  temp, #frame_count
+                        wrlong  temp, temp2
 
                         ' Add timing control based on target frame rate
-                        call    #frame_rate_control
+                        ' call    #frame_rate_control    ' Commented out for now
 
                         jmp     #acquisition_loop
 
@@ -314,25 +324,25 @@ capture_frame
 
 capture_subtile_loop
                         ' Get current subtile number from subtile_order array
-                        mov     temp, subtile_idx
-                        add     temp, #subtile_order
+                        mov     temp, ##@subtile_order
+                        add     temp, subtile_idx
                         rdbyte  current_subtile, temp
 
                         ' Get frame buffer offset for this subtile
-                        mov     temp, current_subtile
-                        add     temp, #subtile_offset
+                        mov     temp, ##@subtile_offset
+                        add     temp, current_subtile
                         rdbyte  frame_offset, temp
 
                         ' Read 16 sensors from current subtile
                         mov     sensor_in_subtile, #0
 
 capture_sensor_loop
-                        ' Read sensor value via AD7940
-                        call    #read_ad7940
+                        ' Read sensor value via AD7680
+                        call    #read_ad7680
 
                         ' Map sensor position using pixel_order lookup
-                        mov     temp, sensor_in_subtile
-                        add     temp, #pixel_order
+                        mov     temp, ##@pixel_order
+                        add     temp, sensor_in_subtile
                         rdbyte  pixel_pos, temp
 
                         ' Calculate final frame buffer position
@@ -377,56 +387,53 @@ advance_sensor_counter
                         waitx   #COUNTER_SETUP_DELAY
 advance_sensor_counter_ret ret
 
-read_ad7940
+read_ad7680
+                        ' Smart pin SPI read
                         ' Start conversion (CS low)
                         drvl    cs_pin
                         waitx   #SENSOR_SETTLE_DELAY
 
-                        ' Read 14 bits via SPI
-                        mov     sensor_value, #0
-                        mov     bit_count, #14
+                        ' Start smart pin SPI transfer
+                        dirl    miso_pin                ' Reset smart pin
+                        dirh    miso_pin                ' Enable smart pin
+                        wypin   #0, sclk_pin            ' Start clock generation
 
-spi_read_loop
-                        ' Clock high
-                        drvh    sclk_pin
-                        waitx   #SPI_CLOCK_DELAY
+                        ' Wait for 24 bits to be received
+                        waitx   #48                     ' Wait for 24 clock cycles at configured rate
 
-                        ' Read MISO bit
-                        testp   miso_pin wc
-                        rcl     sensor_value, #1
-
-                        ' Clock low
-                        drvl    sclk_pin
-                        waitx   #SPI_CLOCK_DELAY
-
-                        djnz    bit_count, #spi_read_loop
+                        ' Read received data (24 bits: 4 leading zeros + 16 data bits + 4 trailing)
+                        rdpin   sensor_value, miso_pin
+                        shr     sensor_value, #4       ' Shift right to remove 4 trailing zeros
+                        and     sensor_value, ##$FFFF   ' Mask to get 16-bit value
 
                         ' End conversion (CS high)
                         drvh    cs_pin
-                        waitx   #SPI_CLOCK_DELAY
 
-read_ad7940_ret         ret
+read_ad7680_ret         ret
 
-frame_rate_control
-                        ' Calculate delay needed for target frame rate
-                        rdlong  temp, #frame_rate_target
-                        tjz     temp, #frame_rate_control_ret
-
-                        ' Simple delay - could be more sophisticated
-                        mov     delay_time, clkfreq
-                        div     delay_time, temp
-                        waitx   delay_time
-
-frame_rate_control_ret  ret
+' frame_rate_control temporarily disabled
+' frame_rate_control
+'                         ' Calculate delay needed for target frame rate
+'                         rdlong  temp, frame_rate_target_ptr
+'                         tjz     temp, #frame_rate_control_ret
+'
+'                         ' Simple delay - could be more sophisticated
+'                         mov     delay_time, clkfreq
+'                         qdiv    delay_time, temp
+'                         getqx   delay_time
+'                         waitx   delay_time
+'
+' frame_rate_control_ret  ret
 
 ' Variables
 param_ptr               LONG    0
+acq_mode_ptr            LONG    0
 pin_group_base          LONG    0
-cs_pin                  LONG    0
-cclk_pin                LONG    0
-miso_pin                LONG    0
-clrb_pin                LONG    0
-sclk_pin                LONG    0
+cs_pin                  LONG    PIN_CS          ' Pre-initialized with offset
+cclk_pin                LONG    PIN_CCLK        ' Pre-initialized with offset
+miso_pin                LONG    PIN_MISO        ' Pre-initialized with offset
+clrb_pin                LONG    PIN_CLRB        ' Pre-initialized with offset
+sclk_pin                LONG    PIN_SCLK        ' Pre-initialized with offset
 frame_ptr               LONG    0
 subtile_idx             LONG    0
 current_subtile         LONG    0
@@ -435,8 +442,8 @@ sensor_in_subtile       LONG    0
 pixel_pos               LONG    0
 store_addr              LONG    0
 sensor_value            LONG    0
-bit_count               LONG    0
 temp                    LONG    0
+temp2                   LONG    0
 delay_time              LONG    0
 hub_buffer              LONG    $1000   ' Temporary buffer address
 
