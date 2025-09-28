@@ -59,12 +59,13 @@ VAR { tile sensor variables }
     LONG    min_frame_time              ' Minimum time between frames
     LONG    max_frame_time              ' Maximum time between frames
 
-DAT { acquisition modes }
+CON { acquisition modes }
 
-    MODE_STOPPED    = 0
-    MODE_LIVE       = 1
-    MODE_HIGH_SPEED = 2
-    MODE_DEBUG      = 3
+    #0                              ' Start enumeration at 0
+    MODE_STOPPED                    ' = 0
+    MODE_LIVE                       ' = 1
+    MODE_HIGH_SPEED                 ' = 2
+    MODE_DEBUG                      ' = 3
 
 DAT { sensor mapping arrays }
 
@@ -81,14 +82,14 @@ DAT { sensor mapping arrays }
 
 PUB null()
 '' This is not a top-level object
+'' @returns nothing - placeholder method for non-top-level object
     cog_id := -1                        ' Initialize to stopped state
 
 PUB start(base_pin_group, queue_obj) : success
-'' Start the tile sensor with specified pin group
-'' Parameters:
-''   base_pin_group - pin group base (e.g., 48 for pins 48-55)
-''   queue_obj - pointer to frame_queue object
-'' Returns: TRUE if successful, FALSE if failed
+'' Start the tile sensor with specified pin group and begin background acquisition
+'' @param base_pin_group - pin group base (e.g., 48 for pins 48-55)
+'' @param queue_obj - pointer to frame_queue object for buffer management
+'' @returns TRUE if successful, FALSE if failed to start
 
     if cog_id >= 0
         return TRUE                     ' Already running
@@ -125,7 +126,8 @@ PUB start(base_pin_group, queue_obj) : success
     return (cog_id >= 0)
 
 PUB stop()
-'' Stop the tile sensor and background cog
+'' Stop the tile sensor and terminate background cog operation
+'' @returns nothing - stops all sensor operations
 
     if cog_id >= 0
         cogstop(cog_id)
@@ -133,41 +135,36 @@ PUB stop()
         frame_queue.stop()
 
 PUB set_acquisition_mode(mode)
-'' Set the sensor acquisition mode
-'' Parameters:
-''   mode - MODE_STOPPED, MODE_LIVE, MODE_HIGH_SPEED, or MODE_DEBUG
+'' Set the sensor acquisition mode for different capture speeds
+'' @param mode - acquisition mode: MODE_STOPPED (0), MODE_LIVE (1), MODE_HIGH_SPEED (2), or MODE_DEBUG (3)
+'' @returns nothing - updates internal acquisition state
 
     acquisition_mode := mode
 
 PUB set_frame_rate_target(rate_hz)
-'' Set target frame rate
-'' Parameters:
-''   rate_hz - target frame rate in Hz (1-2000)
+'' Set target frame rate for acquisition timing control
+'' @param rate_hz - target frame rate in Hz (valid range: 1-2000)
+'' @returns nothing - updates frame rate if within valid range
 
     if rate_hz >= 1 and rate_hz <= 2000
         frame_rate_target := rate_hz
 
 PUB get_frame_count() : count
-'' Get total number of frames captured
-'' Returns: Frame count
+'' Get total number of frames captured since start
+'' @returns total frame count as LONG
 
     return frame_count
 
 PUB get_error_count() : count
-'' Get total number of errors encountered
-'' Returns: Error count
+'' Get total number of SPI/sensor errors encountered
+'' @returns error count as LONG
 
     return error_count
 
 PUB get_performance_stats(stats_ptr)
-'' Get performance statistics
-'' Parameters:
-''   stats_ptr - pointer to LONG array[5] to receive stats
-''               [0] = total frames captured
-''               [1] = total errors
-''               [2] = current frame rate estimate (Hz)
-''               [3] = minimum frame time (system clocks)
-''               [4] = maximum frame time (system clocks)
+'' Get comprehensive performance statistics from sensor system
+'' @param stats_ptr - pointer to LONG array[5] to receive stats: [0]=total frames, [1]=errors, [2]=frame rate (Hz), [3]=min frame time, [4]=max frame time
+'' @returns nothing - fills provided array with statistics
 
     if stats_ptr == 0
         return
@@ -185,17 +182,16 @@ PUB get_performance_stats(stats_ptr)
     LONG[stats_ptr][4] := max_frame_time
 
 PUB is_running() : state
-'' Check if sensor is running
-'' Returns: TRUE if running, FALSE if stopped
+'' Check if sensor background cog is currently running
+'' @returns TRUE if running, FALSE if stopped
 
     return (cog_id >= 0)
 
 PUB get_frame_position(subtile, sensor_pos) : frame_pos
-'' Calculate frame buffer position for given subtile and sensor
-'' Parameters:
-''   subtile - subtile number (0-3)
-''   sensor_pos - sensor position within subtile (0-15)
-'' Returns: Frame buffer index (0-63)
+'' Calculate frame buffer position for given subtile and sensor using hardware mapping
+'' @param subtile - subtile number (0-3) representing quadrant
+'' @param sensor_pos - sensor position within subtile (0-15)
+'' @returns frame buffer index (0-63) or -1 if invalid parameters
 
     if subtile > 3 or sensor_pos > 15
         return -1
@@ -203,8 +199,8 @@ PUB get_frame_position(subtile, sensor_pos) : frame_pos
     return BYTE[@pixel_order][sensor_pos] + BYTE[@subtile_offset][subtile]
 
 PUB debug_frame_mapping() | subtile, sensor, frame_pos
-'' Debug helper - prints the complete frame mapping
-'' Useful for verifying correct sensor-to-frame mapping
+'' Debug helper to print complete sensor-to-frame buffer mapping table
+'' @returns nothing - outputs mapping via debug statements
 
     debug("Sensor to Frame Buffer Mapping:")
     debug("===============================")
@@ -219,7 +215,8 @@ PUB debug_frame_mapping() | subtile, sensor, frame_pos
         debug("")
 
 PRI setup_gpio()
-'' Configure GPIO pins for sensor interface
+'' Configure GPIO pins for sensor interface with appropriate drive modes
+'' @returns nothing - initializes all sensor interface pins
 
     ' Set pin directions
     pinstart(abs_pin_cs, P_HIGH_1MA, 0, 0)      ' CS output

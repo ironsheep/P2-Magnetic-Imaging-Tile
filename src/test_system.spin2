@@ -35,6 +35,8 @@ VAR { test variables }
     LONG    test_duration                   ' Test duration in seconds
 
 PUB main() | success, frame_ptr, test_frames, start_time
+'' Main entry point for magnetic imaging tile test system
+'' @returns nothing - runs complete test suite and displays results
 
     ' Initialize system
     debug("P2 Magnetic Imaging Tile Test System")
@@ -68,6 +70,8 @@ PUB main() | success, frame_ptr, test_frames, start_time
     debug("Test complete")
 
 PRI test_frame_rate_limits() | test_rates[5], i, rate
+'' Test various frame rates to determine system performance limits
+'' @returns nothing - outputs test results via debug statements
 
     debug("")
     debug("=== FRAME RATE PERFORMANCE TEST ===")
@@ -105,6 +109,8 @@ PRI test_frame_rate_limits() | test_rates[5], i, rate
     debug("Frame rate test complete")
 
 PRI test_queue_performance() | i, frames_processed
+'' Test frame queue performance under high-speed acquisition conditions
+'' @returns nothing - monitors and reports queue statistics
 
     debug("")
     debug("=== QUEUE PERFORMANCE TEST ===")
@@ -132,6 +138,8 @@ PRI test_queue_performance() | i, frames_processed
     debug("Queue performance test complete")
 
 PRI test_sensor_data_quality() | frame_ptr, i, sensor_val, min_val, max_val, avg_val
+'' Test sensor data quality by analyzing captured frame statistics
+'' @returns nothing - analyzes and reports sensor data ranges
 
     debug("")
     debug("=== SENSOR DATA QUALITY TEST ===")
@@ -168,6 +176,12 @@ PRI test_sensor_data_quality() | frame_ptr, i, sensor_val, min_val, max_val, avg
     debug("Sensor data quality test complete")
 
 PRI analyze_frame_data(frame_ptr, min_ptr, max_ptr, avg_ptr) | i, val, sum, min_val, max_val
+'' Analyze frame data to extract minimum, maximum, and average sensor values
+'' @param frame_ptr - pointer to frame buffer containing 64 sensor readings
+'' @param min_ptr - pointer to store minimum value found
+'' @param max_ptr - pointer to store maximum value found
+'' @param avg_ptr - pointer to store calculated average value
+'' @returns nothing - stores results in provided pointer locations
 
     ' Initialize values
     min_val := $FFFF
@@ -191,6 +205,9 @@ PRI analyze_frame_data(frame_ptr, min_ptr, max_ptr, avg_ptr) | i, val, sum, min_
     LONG[avg_ptr] := sum / 64
 
 PRI debug_frame_layout(frame_ptr) | row, col, val
+'' Display frame data in 8x8 grid format for visual inspection
+'' @param frame_ptr - pointer to frame buffer containing 64 sensor readings
+'' @returns nothing - outputs formatted grid via debug statements
 
     debug("Frame Data Layout (8x8):")
     debug("========================")

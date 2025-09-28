@@ -35,8 +35,8 @@ VAR { frame queue variables }
     LONG    total_frames                ' Total frames processed
 
 PUB start() : success
-'' Start the frame queue system
-'' Returns: TRUE if successful, FALSE if already initialized
+'' Start the frame queue system and initialize all queue management variables
+'' @returns TRUE if successful, FALSE if already initialized
 
     if initialized
         return FALSE
@@ -55,14 +55,15 @@ PUB start() : success
     return TRUE
 
 PUB stop()
-'' Stop the frame queue system
+'' Stop the frame queue system and mark as uninitialized
+'' @returns nothing - clears initialization flag
 
     initialized := FALSE
 
 PUB allocate_frame_buffer() : buffer_ptr | head_idx
-'' Stage 1: Get exclusive access to next available frame buffer
-'' Returns: Direct pointer to buffer for zero-copy writing, or 0 if queue is full
-'' NOTE: Caller must call release_to_queue() after filling buffer
+'' Stage 1: Get exclusive access to next available frame buffer for zero-copy writing
+'' @returns direct pointer to buffer for writing, or 0 if queue is full
+'' @note Caller must call release_to_queue() after filling buffer
 
     if not initialized
         return 0
@@ -83,9 +84,9 @@ PUB allocate_frame_buffer() : buffer_ptr | head_idx
     return buffer_ptr
 
 PUB release_to_queue()
-'' Stage 2: Release filled buffer to queue for consumption
-'' Must be called after allocate_frame_buffer() and filling the buffer
-'' This completes the zero-copy two-stage buffer allocation
+'' Stage 2: Release filled buffer to queue for consumption, completing zero-copy operation
+'' @returns nothing - advances queue head and increments count
+'' @note Must be called after allocate_frame_buffer() and filling the buffer
 
     if not initialized
         return
@@ -101,9 +102,9 @@ PUB release_to_queue()
     lockret(queue_lock)
 
 PUB dequeue_frame() : frame_ptr | tail_idx
-'' Get pointer to next available frame for reading
-'' Returns: Pointer to frame buffer, or 0 if queue is empty
-'' NOTE: Caller must call release_frame() after processing
+'' Get pointer to next available frame for reading from queue tail
+'' @returns pointer to frame buffer, or 0 if queue is empty
+'' @note Caller must call release_frame() after processing
 
     if not initialized
         return 0
@@ -123,8 +124,9 @@ PUB dequeue_frame() : frame_ptr | tail_idx
     return frame_ptr
 
 PUB release_frame()
-'' Release the frame buffer obtained from dequeue_frame()
-'' Must be called after dequeue_frame() and processing the frame
+'' Release the frame buffer obtained from dequeue_frame() back to pool
+'' @returns nothing - advances queue tail and decrements count
+'' @note Must be called after dequeue_frame() and processing the frame
 
     if not initialized
         return
@@ -139,8 +141,8 @@ PUB release_frame()
     lockret(queue_lock)
 
 PUB get_queue_depth() : depth
-'' Get current number of frames in queue
-'' Returns: Number of queued frames
+'' Get current number of frames in queue in thread-safe manner
+'' @returns number of queued frames as LONG
 
     if not initialized
         return 0
@@ -150,13 +152,9 @@ PUB get_queue_depth() : depth
     lockret(queue_lock)
 
 PUB get_queue_stats(stats_ptr)
-'' Get queue statistics
-'' Parameters:
-''   stats_ptr - pointer to LONG array[4] to receive stats
-''               [0] = current queue depth
-''               [1] = dropped frames count
-''               [2] = total frames processed
-''               [3] = queue utilization percentage
+'' Get comprehensive queue statistics including depth and performance metrics
+'' @param stats_ptr - pointer to LONG array[4]: [0]=queue depth, [1]=dropped frames, [2]=total frames, [3]=utilization %
+'' @returns nothing - fills provided array with statistics
 
     if not initialized or stats_ptr == 0
         return
@@ -176,8 +174,8 @@ PUB get_queue_stats(stats_ptr)
     lockret(queue_lock)
 
 PUB is_queue_full() : full
-'' Check if queue is full
-'' Returns: TRUE if full, FALSE otherwise
+'' Check if queue has reached maximum capacity
+'' @returns TRUE if full, FALSE otherwise
 
     if not initialized
         return FALSE
@@ -187,8 +185,8 @@ PUB is_queue_full() : full
     lockret(queue_lock)
 
 PUB is_queue_empty() : empty
-'' Check if queue is empty
-'' Returns: TRUE if empty, FALSE otherwise
+'' Check if queue contains no frames
+'' @returns TRUE if empty, FALSE otherwise
 
     if not initialized
         return TRUE
@@ -198,7 +196,8 @@ PUB is_queue_empty() : empty
     lockret(queue_lock)
 
 PUB clear_queue()
-'' Clear all frames from queue (emergency reset)
+'' Clear all frames from queue for emergency reset conditions
+'' @returns nothing - resets all queue pointers to initial state
 
     if not initialized
         return
