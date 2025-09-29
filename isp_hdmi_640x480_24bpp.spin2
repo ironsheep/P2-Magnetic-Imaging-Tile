@@ -1,0 +1,190 @@
+'************************************************
+'*  ISP HDMI 640x480 16bpp Driver (RGB565)     *
+'*  Iron Sheep Productions, LLC                *
+'*  Based on original HDMI driver by RJA       *
+'*  Modified for proper VGA 640x480 @ 60Hz     *
+'*  Uses PSRAM driver                          *
+'************************************************
+'
+' Standard VGA 640x480 @ 60Hz timing:
+'   Horizontal: 640 visible + 16 front + 96 sync + 48 back = 800 total
+'   Vertical:   480 visible + 10 front + 2 sync + 33 back = 525 total
+'   Pixel clock: 25.175 MHz (achieved with 250 MHz P2 clock / 10)
+
+CON
+
+  xpix          = 640           ' visible pixels
+  ypix          = 480           ' visible lines
+
+  ' Horizontal timing (in pixels)
+  h_front       = 16            ' front porch
+  h_sync        = 96            ' sync pulse
+  h_back        = 48            ' back porch
+  h_blank       = h_front + h_sync + h_back  ' total blanking = 160
+  h_total       = xpix + h_blank             ' 800 pixels total
+
+  ' Vertical timing (in lines)
+  v_front       = 10            ' front porch
+  v_sync        = 2             ' sync pulse
+  v_back        = 33            ' back porch
+  v_blank       = v_front + v_sync + v_back  ' total blanking = 45
+  v_total       = ypix + v_blank             ' 525 lines total
+
+  pin_cfg       = %10111_1000_0100_10_00000_0   'bit-dac pins for HDMI
+
+
+VAR
+  cog           'cog status
+
+  setup[0]      'setup set by start()
+  pin_grp       'hdmi pin group of 8
+  ram_cmd       'psram command pointer
+  ram_bas       'psram screen base (640*480 longs)
+  pix_bas       'pixel line base
+  new_flg       'new-screen flag
+
+  pix[xpix*2]   'alternating pixel lines
+
+
+PUB start(hdmi_base_pin, psram_command_ptr, psram_screen_base) : okay
+
+'' Start HDMI driver cog
+
+  stop()
+
+  pin_grp := (hdmi_base_pin & $38) addpins 7
+  ram_cmd := psram_command_ptr
+  ram_bas := psram_screen_base
+  pix_bas := @pix
+
+  return cog := coginit(newcog, @driver, @setup) + 1
+
+
+PUB set_screen_base(psram_screen_base)
+
+  ram_bas := psram_screen_base
+
+
+PUB wait_new_screen()
+
+  new_flg~
+  repeat until new_flg
+
+
+PUB stop()
+
+'' Stop HDMI driver cog
+
+  if cog
+    cogstop(cog~ - 1)
+    pinclear(pin_grp)
+'
+'
+' HDMI Driver
+'
+DAT             org
+
+driver          setq    #4-1                    'get setup
+                rdlong  setup_,ptra
+
+                wrpin   ##pin_cfg,pin_grp_      'enable HDMI pins as 75-ohm 1-bit DACs
+                drvl    pin_grp_
+
+                and     pin_grp_,#$38           'set HDMI pin base into streamer commands
+                shl     pin_grp_,#17
+                or      m_bs,pin_grp_
+                or      m_sn,pin_grp_
+                or      m_bv,pin_grp_
+                or      m_nv,pin_grp_
+                or      m_vi,pin_grp_
+
+                setxfrq ##$0CCC_CCCC+1          'set transfer frequency to 1/10th clk, +1 for initial rollover
+
+                setcmod #$100                   'enable HDMI
+
+                rdfast  #xpix*2/16,pix_bas_     'set up fast read for alternating pixel lines
+
+                cogid   pa                      'get this cog's psram command pointer
+                mul     pa,#12
+                add     ram_cmd_,pa
+
+                mov     cmd_hub,pix_bas_        'set hub address
+                mov     cmd_ram,ram_bas_        'set psram address
+                mov     cmd_len,xpix_x1         'set psram longs
+'
+'
+' Field loop
+'
+.field          callpa  #v_back,#blank          'back porch blanks (33 lines)
+
+                mov     pa,ypix_x1              'visible lines (480)
+
+.line           xcont   m_sn,sync_001           'do sync (96 pixels)
+                xcont   m_bv,sync_000           'do back porch (48 pixels)
+                xcont   m_vi,#0                 'do visible pixels (640)
+                xcont   m_bs,sync_000           'do front porch (16 pixels)
+
+                add     cmd_hub,xpix_x4         'alternate pixel line
+                neg     xpix_x4
+                cmp     pa,#1           wz      'last line?
+        if_nz   add     cmd_ram,xpix_x1         'no, advance psram address
+        if_z    rdlong  cmd_ram,ptra[2]         'yes, reset psram address
+        if_z    wrlong  #1,ptra[4]              'set new_flg
+
+                setq    #3-1                    'write command to read pixels from psram
+                wrlong  cmd_,ram_cmd_
+
+                djnz    pa,#.line               'another visible line?
+
+                callpa  #v_front,#blank         'front porch blanks (10 lines)
+                callpa  #v_sync,#blankv         'vertical sync blanks (2 lines)
+
+                jmp     #.field                 'loop
+'
+'
+' Subroutines
+'
+blank           xzero   m_sn,sync_001           'blank line with hsync
+                xcont   m_bv,sync_000           'back porch
+                xcont   m_nv,sync_000           'blank visible
+                xcont   m_bs,sync_000           'front porch
+        _ret_   djnz    pa,#blank
+
+blankv          xzero   m_sn,sync_223           'blank line with vsync + hsync
+                xcont   m_bv,sync_222           'back porch with vsync
+                xcont   m_nv,sync_222           'blank visible with vsync
+                xcont   m_bs,sync_222           'front porch with vsync
+        _ret_   djnz    pa,#blankv
+'
+'
+' Initialized data
+'
+sync_000        long    %1101010100_1101010100_1101010100_10    '
+sync_001        long    %1101010100_1101010100_0010101011_10    '        hsync
+sync_222        long    %0101010100_0101010100_0101010100_10    'vsync
+sync_223        long    %0101010100_0101010100_1010101011_10    'vsync + hsync
+
+' Corrected timing values for proper VGA 640x480 @ 60Hz
+m_bs            long    $70810000 + h_front             'front porch (16 pixels)
+m_sn            long    $70810000 + h_sync              'sync pulse (96 pixels)
+m_bv            long    $70810000 + h_back              'back porch (48 pixels)
+m_nv            long    $70810000 + xpix                'invisible/blank visible (640 pixels)
+m_vi            long    $B0860000 + xpix                'visible (rflong rgb24) (640 pixels)
+
+xpix_x4         long    xpix * 4
+xpix_x1         long    xpix
+ypix_x1         long    ypix
+'
+'
+' Uninitialized data
+'
+setup_                          'driver setup structure
+pin_grp_        res     1
+ram_cmd_        res     1
+ram_bas_        res     1
+pix_bas_        res     1
+
+cmd_                            'command structure for psram driver
+cmd_hub         res     1
+cmd_ram         res     1
+cmd_len         res     1

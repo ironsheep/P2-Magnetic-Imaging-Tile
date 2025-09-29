@@ -1,0 +1,83 @@
+'' mag_tile_viewer - Main Application
+'' Magnetic Field Imaging Tile Viewer for P2 Edge with PSRAM
+''
+'' Pin Assignments:
+''   P0-P7:   HDMI Display
+''   P8-P15:  Magnetic Tile Sensor (8 x 8 grid, SPI, + 2pins)
+''   P16-P23: OLED Display (128 x 128 SPI)
+''   P40-P57: PSRAM (P2 Edge)
+
+CON
+  _CLKFREQ = 250_000_000   ' 250 MHz for HDMI timing
+
+OBJ
+  gfx   : "isp_psram_graphics" | HDMI_BASE_PIN = 0  ' ISP version with efficient drawing, HDMI on P0-P7
+
+PUB main() | x, y, color
+
+  debug("Starting Magnetic Tile Viewer", 13, 10)
+
+  ' Start the graphics system - it handles PSRAM and HDMI internally
+  gfx.start()
+  debug("Graphics system started (HDMI on P0-P7)", 13, 10)
+
+  ' Simple test pattern - much faster!
+  show_simple_test()
+
+  ' Main loop
+  repeat
+    waitms(5000)
+    debug("Display running...", 13, 10)
+
+PRI show_simple_test() | i, row, col
+
+  debug("Drawing ISP test pattern with efficient methods...", 13, 10)
+
+  ' Clear screen to dark green
+  gfx.cls($00_40_00)
+  debug("Screen cleared", 13, 10)
+
+  ' Draw colored bars using FillRect - Format is RRGGBBAA like Chip's code
+  ' Alpha byte is ignored for HDMI but included for consistency
+  gfx.FillRect(0, 0, 79, 479, $FF0000FF)       ' Red
+  gfx.FillRect(80, 0, 159, 479, $FF8000FF)     ' Orange
+  gfx.FillRect(160, 0, 239, 479, $FFFF00FF)    ' Yellow
+  gfx.FillRect(240, 0, 319, 479, $00FF00FF)    ' Green
+  gfx.FillRect(320, 0, 399, 479, $00FFFFFF)    ' Cyan
+  gfx.FillRect(400, 0, 479, 479, $0000FFFF)    ' Blue
+  gfx.FillRect(480, 0, 559, 479, $FF00FFFF)    ' Magenta
+  gfx.FillRect(560, 0, 639, 479, $FFFFFFFF)    ' White
+  debug("Drew 8 color bars (testing RGB565 format)", 13, 10)
+
+  ' Draw the sensor grid outline
+  gfx.DrawSensorGrid(200, 100, 30, 3)
+  debug("Drew 8x8 sensor grid", 13, 10)
+
+  ' Fill some sensor cells with test data (simulating magnetic field values)
+  ' This demonstrates how we'll display actual sensor data
+  repeat row from 0 to 7
+    repeat col from 0 to 7
+      i := (row + col) & 7  ' Simple pattern
+      gfx.FillSensorCell(row, col, 200, 100, 30, 3, GetFieldColor(i))
+  debug("Filled sensor grid with test pattern", 13, 10)
+
+  ' Draw border using fast line methods
+  gfx.DrawBox(0, 0, 639, 479, $FF_FF_00)
+  debug("Drew yellow border", 13, 10)
+
+  debug("ISP test pattern complete!", 13, 10)
+
+PRI GetFieldColor(value) : color
+'' Convert a field strength value (0-7) to a color
+'' This will be used for actual magnetic field visualization
+'' Format is RRGGBBAA like Chip's code
+
+  case value
+    0: color := $000040FF  ' Dark blue (no field)
+    1: color := $000080FF  ' Medium blue
+    2: color := $0000FFFF  ' Bright blue
+    3: color := $00FF00FF  ' Green (neutral)
+    4: color := $FFFF00FF  ' Yellow
+    5: color := $FF8000FF  ' Orange
+    6: color := $FF4000FF  ' Red-orange
+    7: color := $FF0000FF  ' Red (strong field)

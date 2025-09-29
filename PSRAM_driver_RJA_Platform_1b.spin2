@@ -1,0 +1,293 @@
+'' PSRAM Driver for P2-EC32MB
+''
+''   - Tuned to run from 250..340 MHz
+''
+''   - Transfers one long every 4 clocks
+''     between 512KB hub RAM and 32MB PSRAM
+''
+
+CON  'Pin Settings
+'P2 Edge with 32MB
+  LED_PIN       = 38
+  CS_PIN        = 57
+  CK_PIN        = 56
+  _dirpat       = $00FF_FF00
+  _cmdbit8      = $00D0_0008
+  _cmdnib8      = $20D0_0008
+  _cmdnibn      = $20D0_0000 + 23
+  _cmdrw        = $F0D0_0000              'read ($F0D0_0000) or write ($B0D0_0000) command
+
+
+
+{ 'SimpleP2 with 16 bit bus
+  LED_PIN       = 52
+  CS_PIN        = 48'28  '48 is Inner Row, closest to P2    '49 is outer row
+  CK_PIN        = 50 addpins 1  'upper and lower bank pairs
+  _dirpat       = $0000_FFFF
+  _cmdbit8      = $00C0_0008
+  _cmdnib8      = $20C0_0008
+  _cmdnibn      = $20C0_0000 + 23
+  _cmdrw        = $F0C0_0000              'read ($F0D0_0000) or write ($B0D0_0000) command
+}
+
+VAR
+
+  cog
+
+
+PUB start() : okay
+
+'' Start PSRAM driver - starts a cog, returns false if no cog free
+
+  pinl(49) 'keep other PSRAM bank CS from turning on
+
+  stop()
+  return cog := coginit(16, @psram_driver, @cmd_list) + 1
+
+
+PUB stop()
+
+'' Stop PSRAM driver - frees a cog if one was started
+
+  if cog
+    cogstop(cog~ - 1)
+
+
+PUB pointer() : ptr
+
+'' Get a pointer to the 3-long command
+''
+'' After writing the hub RAM and PSRAM addresses into the first two
+'' longs, the data transfer will begin after a non-zero long count
+'' is written into the third long.
+''
+''   long[ptr][0] = hub RAM byte address, $0_0000..$F_FFFF
+''
+''   long[ptr][1] = PSRAM long address, $00_0000..$7F_FFFF
+''
+''   long[ptr][2] = number of longs to transfer
+''                  negative number for hub RAM --> PSRAM
+''                  positive number for PSRAM --> hub RAM
+''
+'' Upon completion of the transfer, the third long will be zeroed
+'' by the driver, signaling completion.
+
+  return @cmd_list
+
+
+DAT
+
+cmd_list        long    0[8*3]                  'command list, one set of 3 longs for each cog
+
+
+                org                             'PSRAM driver
+
+psram_driver    mov     pa,#$0000               'write $0000,$1111,$2222..$FFFF to LUT $000..$00F
+                mov     ptrb,#0
+                rep     #2,#16
+                wrlut   pa,ptrb++
+                add     pa,h1111
+
+                drvh    #CS_PIN                 'cs high
+
+                fltl    #CK_PIN                 'set ck for transition output, idles low
+                wrpin   #%01_00101_0,#CK_PIN
+                wxpin   #1,#CK_PIN
+                drvl    #CK_PIN
+
+                or      dirb,dirpat             'make data pins outputs
+
+                setxfrq h40000000               'set 2-clock streamer timebase
+
+                mov     ijmp1,#xfi_isr          'set ijmp1 to streamer-finished ISR
+                setint1 #EVENT_XFI              'enable streamer-finished interrupt
+
+                drvl    #CS_PIN                 'enter quad mode
+                xinit   cmdbit8,#$35 rev 7
+                wypin   #16,#CK_PIN             'triggers ISR when done
+'
+'
+' Command loop
+'
+.lod            setq    #8*3-1                  'load command list
+                rdlong  cmd,ptra
+
+.chk0           tjnz    cmd+0*3+2,#.cog0        'check for commands
+.chk1           tjnz    cmd+1*3+2,#.cog1
+.chk2           tjnz    cmd+2*3+2,#.cog2
+.chk3           tjnz    cmd+3*3+2,#.cog3
+.chk4           tjnz    cmd+4*3+2,#.cog4
+.chk5           tjnz    cmd+5*3+2,#.cog5
+.chk6           tjnz    cmd+6*3+2,#.cog6
+.chk7           tjnz    cmd+7*3+2,#.cog7
+
+                jmp     #.lod                   'reload command list and check again
+
+
+.cog0           mov     hub,cmd+0*3+0           'get hub address
+                mov     adr,cmd+0*3+1           'get ram address
+                mov     len,cmd+0*3+2           'get length in longs (non-0 value triggers r/w)
+                callpa  #0*12+8,#.got           'perform r/w
+                jmp     #.chk1                  'command list reloaded, check next cog for command
+
+.cog1           mov     hub,cmd+1*3+0
+                mov     adr,cmd+1*3+1
+                mov     len,cmd+1*3+2
+                callpa  #1*12+8,#.got
+                jmp     #.chk2
+
+.cog2           mov     hub,cmd+2*3+0
+                mov     adr,cmd+2*3+1
+                mov     len,cmd+2*3+2
+                callpa  #2*12+8,#.got
+                jmp     #.chk3
+
+.cog3           mov     hub,cmd+3*3+0
+                mov     adr,cmd+3*3+1
+                mov     len,cmd+3*3+2
+                callpa  #3*12+8,#.got
+                jmp     #.chk4
+
+.cog4           mov     hub,cmd+4*3+0
+                mov     adr,cmd+4*3+1
+                mov     len,cmd+4*3+2
+                callpa  #4*12+8,#.got
+                jmp     #.chk5
+
+.cog5           mov     hub,cmd+5*3+0
+                mov     adr,cmd+5*3+1
+                mov     len,cmd+5*3+2
+                callpa  #5*12+8,#.got
+                jmp     #.chk6
+
+.cog6           mov     hub,cmd+6*3+0
+                mov     adr,cmd+6*3+1
+                mov     len,cmd+6*3+2
+                callpa  #6*12+8,#.got
+                jmp     #.chk7
+
+.cog7           mov     hub,cmd+7*3+0
+                mov     adr,cmd+7*3+1
+                mov     len,cmd+7*3+2
+                callpa  #7*12+8,#.got
+                jmp     #.chk0
+
+
+.got            mov     zip,pa                  'got a command!
+                add     zip,ptra                'get hub address of len
+
+                mov     xfi,#1                  'set transfer-finished flag
+
+                call    #block                  'r/w the block
+
+                djnz    xfi,#$                  'wait for cs high (xfi = 1)
+
+                wrlong  #0,zip                  'signal completion by clearing len in hub
+
+                setq    #8*3-1                  'load command list
+        _ret_   rdlong  cmd,ptra
+'
+'
+' Block r/w, hub = hub address, adr = SPRAM address, len.[31] ? write : read, len.[30..0] = longs
+'
+block           abs     len             wc      'get write flag into c, clear msb
+
+        if_nc   mov     prw,#.rd                'read?
+        if_nc   wrfast  h80000000,hub
+        if_c    mov     prw,#.wr                'write?
+        if_c    rdfast  h80000000,hub
+                bitnc   cmdrw,#30               'set r/w streamer command
+
+                mov     fin,adr                 'get final address for block r/w
+                add     fin,len
+
+                mov     pag,adr                 'get initial page start
+                andn    pag,h3FF
+
+.lp             add     pag,h400                'get next page
+
+                cmp     fin,pag         wcz
+        if_be   mov     len,fin                 'if r/w is within page, last r/w
+        if_a    mov     len,pag                 'if r/w is beyond page, more r/w
+                sub     len,adr
+
+        if_be   jmp     prw                     'if last r/w, jmp and exit
+
+                call    prw                     'more r/w, call and return
+
+                mov     adr,pag                 'set address to next page
+                jmp     #.lp                    'loop
+
+
+.rd             mov     pa,#$BE                 'make read command $EBxxxxxx with address
+                callpb  #8+5,#.start            'start read operation
+                setq    h80000000               'use 1-clock mode to get to precise read offset
+                xcont   cmdnibn,#0              'queue n-clock delay command
+                setq    h40000000               'use 2-clock mode for pixel timing
+                xcont   cmdrw,#0                'queue data input command, triggers ISR when done
+        _ret_   andn    dirb,dirpat             'make data pins inputs (happens on 9th ck rise)
+
+
+.wr             mov     pa,#$83                 'make write command $38xxxxxx with address
+                callpb  #8,#.start              'start write operation
+        _ret_   xcont   cmdrw,#0                'queue data output command, triggers ISR when done
+'
+'
+' Start read/write operation
+'
+.start          rolnib  pa,adr,#0               'set nibble-reversed address and command
+                rolnib  pa,adr,#1
+                rolnib  pa,adr,#2
+                rolnib  pa,adr,#3
+                rolnib  pa,adr,#4
+                rolnib  pa,adr,#5
+                rol     pa,#8
+
+                shl     len,#1                  'set number of words into r/w command
+                setword cmdrw,len,#0
+
+                djnz    xfi,#$          '!10    'wait for cs high (xfi = 1)
+
+                add     pb,len          '2      'set ck transitions
+                shl     pb,#1           '2      '(16 cycles at 320MHz = 50ns)
+
+                drvl    #CS_PIN         '2!     'cs low (cs high >= 50ns at 320MHz)
+                xinit   cmdnib8,pa              'start read/write command
+        _ret_   wypin   pb,#CK_PIN              'start ck pulses, return
+'
+'
+' Streamer-finished ISR
+'
+xfi_isr         drvh    #CS_PIN                 'cs high
+                or      dirb,dirpat             'make data pins outputs
+                mov     xfi,#1                  'set transfer-finished flag
+                reti1
+'
+'
+' Data
+'
+h80000000       long    $80000000
+h40000000       long    $40000000
+h1111           long    $1111
+h400            long    $400
+h3FF            long    $3FF
+
+dirpat          long    _dirpat
+cmdbit8         long    _cmdbit8
+cmdnib8         long    _cmdnib8
+cmdnibn         long    _cmdnibn
+cmdrw           long    _cmdrw
+'
+'
+' Undefined data
+'
+cmd             res     8*3                     'command list from cogs
+
+hub             res     1
+adr             res     1
+len             res     1
+prw             res     1
+fin             res     1
+pag             res     1
+xfi             res     1
+zip             res     1
