@@ -16,33 +16,44 @@ The SparkFun Magnetic Imaging Tile V3 is an 8×8 array of Hall effect sensors ca
 
 ## Hardware Components
 
-### SparkFun Magnetic Imaging Tile V3
+### Primary Components
 
-- 64 Hall effect sensors arranged in 8×8 grid (4mm spacing)
-- 4 subtiles for efficient readout organization
-- Hardware multiplexer for sequential sensor selection
-- AD7940 14-bit external ADC for high-precision measurements
+- **[SparkFun Magnetic Imaging Tile V3](DOCs/Magnetic-Tile-Hardware.md)** - 8×8 Hall effect sensor array
+- **[Waveshare 1.5" RGB OLED Module](DOCs/OLED-Display-Hardware.md)** - 128×128 pixel display
+- **Propeller 2 Development Board** - Main controller
 
-**Where to Buy**: [SparkFun Magnetic Imaging Tile 8x8](https://www.sparkfun.com/sparkfun-magnetic-imaging-tile-8x8.html)
+### Quick Reference
 
-### Propeller 2 Interface
-
-#### Pin Connections
-
-**Pin Group**: 48 (P48-P55)
-
+**Magnetic Tile Connection (Pin Group 40: P40-P47)**
 ```
 Pin    | Function        | Wire Color | Description
 -------|-----------------|------------|---------------------------
-+0     | CS              | VIOLET     | AD7940 Chip Select
-+1     | CCLK            | WHITE      | Counter Clock (sensor mux)
-+2     | MISO            | BLUE       | AD7940 Data Input
-+3     | CLRb            | GRAY       | Counter Clear (sensor mux)
-+4     | SCLK            | GREEN      | AD7940 SPI Clock
-+6     | AOUT            | YELLOW     | Analog Input (optional)
-GND    | Ground          | BLACK      | Ground connection
-3.3V   | VCC             | RED        | Power supply
+P40 (+0) | CS           | VIOLET     | AD7940 Chip Select
+P41 (+1) | CCLK         | WHITE      | Counter Clock (sensor mux)
+P42 (+2) | MISO         | BLUE       | AD7940 Data Input
+P43 (+3) | CLRb         | GRAY       | Counter Clear (sensor mux)
+P44 (+4) | SCLK         | GREEN      | AD7940 SPI Clock
+P46 (+6) | AOUT         | YELLOW     | Analog Input (optional)
+GND    | Ground         | BLACK      | Ground connection
+3.3V   | VCC            | RED        | Power supply
 ```
+
+**OLED Display Connection (Pin Group 24: P24-P31)**
+```
+Pin    | Function        | Description
+-------|-----------------|---------------------------
+P24 (+0) | DIN          | SPI data output (MOSI)
+P26 (+2) | CLK          | SPI clock (SCLK)
+P28 (+4) | CS           | Chip Select (active low)
+P30 (+6) | DC           | Data/Command select
+P31 (+7) | RST          | Reset (active low)
+GND    | Ground         | Ground connection
+3.3V   | VCC            | Power supply
+```
+
+For detailed hardware specifications, see:
+- [Magnetic Tile Hardware Documentation](DOCs/Magnetic-Tile-Hardware.md)
+- [OLED Display Hardware Documentation](DOCs/OLED-Display-Hardware.md)
 
 ## Features
 
@@ -114,9 +125,16 @@ This project is currently in the initial development phase. Comprehensive docume
 
 Detailed technical documentation is available in the `DOCs/` directory:
 
+### Hardware Specifications
+- **[Magnetic Tile Hardware](DOCs/Magnetic-Tile-Hardware.md)** - Detailed sensor array specifications
+- **[OLED Display Hardware](DOCs/OLED-Display-Hardware.md)** - Display module specifications
+
+### Reference Implementation
 - **[Theory of Operations](DOCs/REF-Implementation/Theory_of_Operations.md)** - Comprehensive system overview
 - **[Communication Protocol](DOCs/REF-Implementation/Communication_Protocol.md)** - Hardware interface details
 - **[Visualization System](DOCs/REF-Implementation/Processing_Visualization_Theory_of_Operations.md)** - Display implementation guide
+
+### Technical Datasheets
 - **[Hardware Schematics](DOCs/Magnetic_Imaging_Tile_Schematic_V10.pdf)** - Circuit diagrams
 - **[IC Datasheet](DOCs/AD7680.pdf)** - AD7940 ADC specifications
 
@@ -149,7 +167,7 @@ Detailed technical documentation is available in the `DOCs/` directory:
   - [P2 Edge Module with Breakout Board Bundle](https://www.parallax.com/product/p2-edge-module-with-p2-edge-breakout-board-bundle/)
   - [Propeller 2 Mini Starter Bundle](https://www.parallax.com/product/propeller-2-mini-starter-bundle/)
 - SparkFun Magnetic Imaging Tile V3 - [SparkFun](https://www.sparkfun.com/sparkfun-magnetic-imaging-tile-8x8.html)
-- 128×128 OLED display (SPI interface) - [Amazon](https://www.amazon.com/dp/B07V579YK2)
+- Waveshare 1.5inch RGB OLED Module - [Waveshare](https://www.waveshare.com/1.5inch-rgb-oled-module.htm)
 - HDMI display capability (optional secondary display) - [Amazon](https://www.amazon.com/HMTECH-Raspberry-800x480-Dual-Speaker-Non-Touch/dp/B0C6963887)
   - [P2 Eval Digital Video Out Add-on Board](https://www.parallax.com/product/p2-eval-digital-video-out-add-on-board/) (HDMI adapter for P2)
 

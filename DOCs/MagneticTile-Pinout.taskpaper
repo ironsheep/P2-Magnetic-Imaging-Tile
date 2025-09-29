@@ -1,5 +1,5 @@
 Magnetic Tile Board:
-	Pinout:
+	Pinout: p40:
 		- GND - GND - gound - BLACK
 		- p+6 - AOUT - analog in from board (current hall sensor)  - YELLOW
 			- we can do our own ADC
@@ -9,4 +9,13 @@ Magnetic Tile Board:
 		- p+3 - CLRb - sensor array - GRAY
 		- p+1 - CCLK- sensor array - WHITE
 		- 3.3v - VCC - power - REDa
-	
+
+OLED 128x128 Board:
+	Pinout: p24:
+		- 3.3v - VCC - RED
+		- GND - GND - BLACK
+		- p+0 - DIN - BLUE
+		- p+2 - CLK - YELLOW
+		- p+4 - CS - ORANGE
+		- p+6 - DC - DK GREEN
+		- p+7 - RST - WHITE

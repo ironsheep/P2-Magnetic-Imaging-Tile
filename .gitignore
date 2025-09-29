@@ -211,3 +211,9 @@ CLAUDE.md
 .vscode/settings.json
 *.obj
 *.bin
+DOCs/DRV5053.txt
+/REF-HDMI
+/P2_HDMI_AntiAlias
+*.zip
+/tests/recordings
+pnut-term-settings.json
