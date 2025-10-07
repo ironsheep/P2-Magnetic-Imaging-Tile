@@ -1,0 +1,179 @@
+'' isp_hdmi_display_engine.spin2 - HDMI Display Engine
+'' Consumes frames from HDMI FIFO and displays via psram_graphics
+''
+'' This COG:
+''   - Dequeues frames from HDMI FIFO
+''   - Converts sensor data to visual representation
+''   - Uses psram_graphics API for display
+
+CON
+  ' Test mode configuration
+  TEST_MODE   = true      ' true = show test pattern, false = process FIFO
+
+  ' Display configuration
+  GRID_X      = 200       ' Grid top-left X position
+  GRID_Y      = 100       ' Grid top-left Y position
+  CELL_SIZE   = 30        ' Size of each sensor cell in pixels
+  CELL_GAP    = 3         ' Gap between cells in pixels
+
+  ' Color mapping ranges
+  MIN_FIELD   = 0         ' Minimum field value
+  MAX_FIELD   = 65535     ' Maximum field value (16-bit)
+  MID_FIELD   = 32768     ' Neutral field value
+
+OBJ
+  fifo : "isp_frame_fifo_manager"
+  gfx  : "isp_psram_graphics"
+
+VAR
+  long  cog_id
+  long  frame_count
+  long  display_mode
+  long  color_palette[8]
+
+PUB null()
+  '' Not a top-level object
+
+PUB start() : ok
+  '' Start the HDMI display engine
+  '' @returns cog_id if successful, -1 if failed
+
+  stop()
+
+  ' Initialize color palette for magnetic field visualization
+  init_palette()
+
+  ' Initialize variables
+  frame_count := 0
+  display_mode := 0
+
+  ' Start display COG
+  cog_id := cogspin(NEWCOG, display_loop(), @frame_count)
+
+  return cog_id
+
+PUB stop()
+  '' Stop the HDMI display engine
+
+  if cog_id >= 0
+    cogstop(cog_id)
+    cog_id := -1
+
+PUB set_display_mode(mode)
+  '' Set display visualization mode
+  '' @param mode - display mode (0=normal, 1=enhanced contrast, etc.)
+
+  display_mode := mode
+
+PUB get_frame_count() : count
+  '' Get number of frames displayed
+
+  return frame_count
+
+PUB show_test_pattern() | row, col, value
+  '' Display a test pattern directly (bypasses FIFO)
+  '' Useful for initial testing without full pipeline
+
+  ' Draw the sensor grid
+  gfx.DrawSensorGrid(GRID_X, GRID_Y, CELL_SIZE, CELL_GAP)
+
+  ' Fill with diagonal gradient pattern
+  repeat row from 0 to 7
+    repeat col from 0 to 7
+      value := ((row + col) * 4096) & $FFFF  ' Create gradient
+      gfx.FillSensorCell(row, col, GRID_X, GRID_Y, CELL_SIZE, CELL_GAP, field_to_color(value))
+
+  ' Add identifying text
+  ' gfx.DrawText(GRID_X, GRID_Y - 20, string("HDMI Test Pattern"))
+
+PRI init_palette()
+  '' Initialize color palette for field strength visualization
+  '' Blue (negative) -> Green (neutral) -> Red (positive)
+
+  color_palette[0] := $000080FF  ' Strong negative - Dark blue
+  color_palette[1] := $0000FFFF  ' Negative - Bright blue
+  color_palette[2] := $0080FFFF  ' Weak negative - Cyan
+  color_palette[3] := $00FF00FF  ' Neutral - Green
+  color_palette[4] := $80FF00FF  ' Weak positive - Yellow-green
+  color_palette[5] := $FFFF00FF  ' Positive - Yellow
+  color_palette[6] := $FF8000FF  ' Strong positive - Orange
+  color_palette[7] := $FF0000FF  ' Very strong positive - Red
+
+PRI display_loop() | framePtr, row, col, sensorVal, color, idx
+  '' Main display loop running in dedicated COG
+
+  if TEST_MODE
+    ' Test pattern mode - display once and idle
+    show_test_pattern()
+    repeat
+      waitms(1000)  ' Just keep COG alive
+  else
+    ' Normal operation - process FIFO
+    ' Draw initial grid
+    gfx.DrawSensorGrid(GRID_X, GRID_Y, CELL_SIZE, CELL_GAP)
+
+    repeat
+      ' Get frame from HDMI FIFO
+      framePtr := fifo.dequeue(fifo.FIFO_HDMI)
+
+      if framePtr
+        ' Display the 8x8 sensor array
+        repeat row from 0 to 7
+          repeat col from 0 to 7
+            ' Get sensor value (already remapped to display order)
+            idx := row * 8 + col
+            sensorVal := word[framePtr][idx]
+
+            ' Map sensor value to color
+            color := field_to_color(sensorVal)
+
+            ' Fill the cell with the color
+            gfx.FillSensorCell(row, col, GRID_X, GRID_Y, CELL_SIZE, CELL_GAP, color)
+
+        ' Release frame back to pool
+        fifo.releaseFrame(framePtr)
+
+        ' Update frame counter
+        frame_count++
+
+        ' Optional: Add frame rate display or other overlays
+        ' gfx.DrawText(10, 10, string("FPS: "), frame_count)
+
+PRI field_to_color(fieldVal) : color | index
+  '' Convert magnetic field value to display color
+  '' @param fieldVal - 16-bit sensor reading
+  '' @returns color in RRGGBBAA format
+
+  ' Map field value to palette index (0-7)
+  if fieldVal < MID_FIELD / 2
+    index := 0  ' Strong negative
+  elseif fieldVal < MID_FIELD * 3 / 4
+    index := 1  ' Negative
+  elseif fieldVal < MID_FIELD * 7 / 8
+    index := 2  ' Weak negative
+  elseif fieldVal < MID_FIELD * 9 / 8
+    index := 3  ' Neutral
+  elseif fieldVal < MID_FIELD * 5 / 4
+    index := 4  ' Weak positive
+  elseif fieldVal < MID_FIELD * 3 / 2
+    index := 5  ' Positive
+  elseif fieldVal < MID_FIELD * 7 / 4
+    index := 6  ' Strong positive
+  else
+    index := 7  ' Very strong positive
+
+  ' Apply display mode transformations if needed
+  case display_mode
+    0:  ' Normal mode
+      color := color_palette[index]
+    1:  ' Enhanced contrast mode
+      ' Expand the color range for better visibility
+      if index < 3
+        index := 0  ' More blue
+      elseif index > 4
+        index := 7  ' More red
+      color := color_palette[index]
+    other:
+      color := color_palette[index]
+
+  return color

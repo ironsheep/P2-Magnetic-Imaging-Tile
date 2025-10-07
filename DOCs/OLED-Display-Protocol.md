@@ -7,18 +7,18 @@ This document provides the complete protocol specification for interfacing the P
 
 ### Pin Assignments
 
-**Pin Group**: 24 (P24-P31)
+**Pin Group**: 16 (P16-P23)
 
 ```
 Display Pin | Function    | P2 Pin  | Direction | Description
 ------------|-------------|---------|-----------|------------------
 1. VCC      | Power       | 3.3V    | Output    | 3.3V power supply
 2. GND      | Ground      | GND     | -         | Ground reference
-3. DIN      | MOSI        | P24 (+0)| Output    | SPI data (Master Out)
-4. SCL      | SCLK        | P26 (+2)| Output    | SPI clock
-5. CS       | Chip Select | P28 (+4)| Output    | Active low select
-6. DC       | Data/Cmd    | P30 (+6)| Output    | H=Data, L=Command
-7. RST      | Reset       | P31 (+7)| Output    | Active low reset
+3. DIN      | MOSI        | P16 (+0)| Output    | SPI data (Master Out)
+4. SCL      | SCLK        | P18 (+2)| Output    | SPI clock
+5. CS       | Chip Select | P20 (+4)| Output    | Active low select
+6. DC       | Data/Cmd    | P22 (+6)| Output    | H=Data, L=Command
+7. RST      | Reset       | P23 (+7)| Output    | Active low reset
 ```
 
 ## SPI Communication Protocol

@@ -1,0 +1,479 @@
+'' =================================================================================================
+''   File....... isp_tile_sensor.spin2
+''   Purpose.... Magnetic Imaging Tile sensor interface with new FIFO architecture
+''   Author..... Stephen M Moraco
+''               -- Copyright (c) 2025 Iron Sheep Productions, LLC
+''               -- see below for terms of use
+''   E-mail..... stephen@ironsheep.biz
+''   Started.... Jan 2025
+''   Updated.... Jan 2025
+''
+'' =================================================================================================
+
+CON { tile sensor constants }
+
+    ' Pin assignments (relative to pin group)
+    PIN_CS          = 0                 ' +0 - AD7680 Chip Select (VIOLET)
+    PIN_CCLK        = 1                 ' +1 - Counter Clock (WHITE)
+    PIN_MISO        = 2                 ' +2 - AD7680 Data Input (BLUE)
+    PIN_CLRB        = 3                 ' +3 - Counter Clear (GRAY)
+    PIN_SCLK        = 4                 ' +4 - AD7680 SPI Clock (GREEN)
+    PIN_AOUT        = 6                 ' +6 - Analog Input (YELLOW)
+
+    ' Sensor array configuration
+    SENSORS_PER_FRAME = 64              ' 8x8 sensor array
+    SUBTILES = 4                        ' 4 quadrants
+    SENSORS_PER_SUBTILE = 16            ' 4x4 per subtile
+
+    ' ADC configuration
+    ADC_BITS = 16                       ' AD7680 is 16-bit ADC
+    ADC_MAX_VALUE = (1 << ADC_BITS) - 1 ' Maximum ADC reading
+    SPI_TRANSFER_BITS = 24              ' Total SPI transfer size (4 leading + 16 data + 4 trailing)
+    SPI_DATA_BITS = 20                  ' Minimum transfer (4 leading + 16 data)
+
+    ' Timing constants (in system clocks)
+    SPI_CLOCK_DELAY = 10                ' Delay between SPI clock edges
+    COUNTER_SETUP_DELAY = 50            ' Delay after counter operations
+    SENSOR_SETTLE_DELAY = 20            ' Delay for sensor to settle
+
+    ' Smart Pin SPI configuration
+    SPI_CLOCK_FREQ = 10_000_000          ' 10 MHz SPI clock
+
+    ' Note: P_SYNC_RX, P_SYNC_TX and other smart pin constants are built-in
+
+    ' Subtile reading order (based on hardware layout)
+    ' Documentation specifies: subtileOrder[] = {0, 2, 1, 3}
+    ' subtileOffset[] = {0, 4, 32, 36}
+
+OBJ
+    fifo : "isp_frame_fifo_manager"    ' Multi-FIFO frame pool manager
+
+VAR { tile sensor variables }
+
+    LONG    cog_id                      ' Background cog ID (-1 = stopped, >=0 = running)
+    LONG    pin_group                   ' Base pin group (e.g., 48)
+    LONG    frame_count                 ' Total frames captured
+    LONG    error_count                 ' SPI/sensor error count
+    LONG    acquisition_mode            ' Current acquisition mode
+    LONG    frame_rate_target           ' Target frame rate (Hz)
+
+    ' Pin definitions (absolute)
+    LONG    abs_pin_cs, abs_pin_cclk, abs_pin_miso, abs_pin_clrb, abs_pin_sclk, abs_pin_aout
+
+    ' Performance monitoring
+    LONG    last_frame_time             ' Timestamp of last frame
+    LONG    min_frame_time              ' Minimum time between frames
+    LONG    max_frame_time              ' Maximum time between frames
+
+CON { acquisition modes }
+
+    #0                              ' Start enumeration at 0
+    MODE_STOPPED                    ' = 0
+    MODE_LIVE                       ' = 1
+    MODE_HIGH_SPEED                 ' = 2
+    MODE_DEBUG                      ' = 3
+
+DAT { sensor mapping arrays }
+
+    ' Subtile reading order: scan subtiles 0, 2, 1, 3 (not sequential!)
+    subtile_order   BYTE    0, 2, 1, 3
+
+    ' Frame buffer offsets for each subtile (words)
+    subtile_offset  BYTE    0, 4, 32, 36
+
+    ' Pixel mapping within each subtile (serpentine pattern)
+    ' Maps counter position (0-15) to frame buffer position within subtile
+    pixel_order     BYTE    26, 27, 18, 19, 10, 11, 2, 3
+                    BYTE    1, 0, 9, 8, 17, 16, 25, 24
+
+PUB null()
+'' This is not a top-level object
+'' @returns nothing - placeholder method for non-top-level object
+    cog_id := -1                        ' Initialize to stopped state
+
+PUB start(base_pin_group, fifo_obj) : success
+'' Start the tile sensor with specified pin group and begin background acquisition
+'' @param base_pin_group - pin group base (e.g., 48 for pins 48-55)
+'' @param fifo_obj - pointer to isp_frame_fifo_manager object
+'' @returns TRUE if successful, FALSE if failed to start
+
+    if cog_id >= 0
+        return TRUE                     ' Already running
+
+    ' Store configuration
+    pin_group := base_pin_group
+
+    ' Calculate absolute pin numbers
+    abs_pin_cs := pin_group + PIN_CS
+    abs_pin_cclk := pin_group + PIN_CCLK
+    abs_pin_miso := pin_group + PIN_MISO
+    abs_pin_clrb := pin_group + PIN_CLRB
+    abs_pin_sclk := pin_group + PIN_SCLK
+    abs_pin_aout := pin_group + PIN_AOUT
+
+    ' Initialize variables (cog_id already checked above)
+    frame_count := 0
+    error_count := 0
+    acquisition_mode := MODE_STOPPED
+    frame_rate_target := 100            ' Default 100 Hz
+    min_frame_time := $7FFFFFFF
+    max_frame_time := 0
+
+    ' FIFO manager is passed in and already started by main
+
+    ' Configure GPIO pins
+    setup_gpio()
+
+    ' Start background cog with parameter block
+    cog_id := coginit(NEWCOG, @sensor_cog_entry, @pin_group)
+
+    ' Return success based on cog_id validity
+    return (cog_id >= 0)
+
+PUB stop()
+'' Stop the tile sensor and terminate background cog operation
+'' @returns nothing - stops all sensor operations
+
+    if cog_id >= 0
+        cogstop(cog_id)
+        cog_id := -1
+        ' FIFO manager stopped by main, not here
+
+PUB set_acquisition_mode(mode)
+'' Set the sensor acquisition mode for different capture speeds
+'' @param mode - acquisition mode: MODE_STOPPED (0), MODE_LIVE (1), MODE_HIGH_SPEED (2), or MODE_DEBUG (3)
+'' @returns nothing - updates internal acquisition state
+
+    acquisition_mode := mode
+
+PUB set_frame_rate_target(rate_hz)
+'' Set target frame rate for acquisition timing control
+'' @param rate_hz - target frame rate in Hz (valid range: 1-2000)
+'' @returns nothing - updates frame rate if within valid range
+
+    if rate_hz >= 1 and rate_hz <= 2000
+        frame_rate_target := rate_hz
+
+PUB get_frame_count() : count
+'' Get total number of frames captured since start
+'' @returns total frame count as LONG
+
+    return frame_count
+
+PUB get_error_count() : count
+'' Get total number of SPI/sensor errors encountered
+'' @returns error count as LONG
+
+    return error_count
+
+PUB get_performance_stats(stats_ptr)
+'' Get comprehensive performance statistics from sensor system
+'' @param stats_ptr - pointer to LONG array[5] to receive stats: [0]=total frames, [1]=errors, [2]=frame rate (Hz), [3]=min frame time, [4]=max frame time
+'' @returns nothing - fills provided array with statistics
+
+    if stats_ptr == 0
+        return
+
+    LONG[stats_ptr][0] := frame_count
+    LONG[stats_ptr][1] := error_count
+
+    ' Calculate current frame rate estimate
+    if min_frame_time > 0
+        LONG[stats_ptr][2] := clkfreq / min_frame_time
+    else
+        LONG[stats_ptr][2] := 0
+
+    LONG[stats_ptr][3] := min_frame_time
+    LONG[stats_ptr][4] := max_frame_time
+
+PUB is_running() : state
+'' Check if sensor background cog is currently running
+'' @returns TRUE if running, FALSE if stopped
+
+    return (cog_id >= 0)
+
+PUB get_frame_position(subtile, sensor_pos) : frame_pos
+'' Calculate frame buffer position for given subtile and sensor using hardware mapping
+'' @param subtile - subtile number (0-3) representing quadrant
+'' @param sensor_pos - sensor position within subtile (0-15)
+'' @returns frame buffer index (0-63) or -1 if invalid parameters
+
+    if subtile > 3 or sensor_pos > 15
+        return -1
+
+    return BYTE[@pixel_order][sensor_pos] + BYTE[@subtile_offset][subtile]
+
+PUB debug_frame_mapping() | subtile, sensor, frame_pos
+'' Debug helper to print complete sensor-to-frame buffer mapping table
+'' @returns nothing - outputs mapping via debug statements
+
+    debug("Sensor to Frame Buffer Mapping:")
+    debug("===============================")
+
+    repeat subtile from 0 to 3
+        debug("Subtile ", udec(subtile), " (scan order: ", udec(BYTE[@subtile_order][subtile]), "):")
+
+        repeat sensor from 0 to 15
+            frame_pos := get_frame_position(subtile, sensor)
+            debug("  Sensor ", udec(sensor), " -> Frame[", udec(frame_pos), "] (row ", udec(frame_pos / 8), ", col ", udec(frame_pos // 8), ")")
+
+        debug(" ")
+
+PRI setup_gpio() | spi_config
+'' Configure pins for sensor interface with smart pin modes for SPI
+'' @returns nothing - initializes all sensor interface pins
+
+    ' Set pin directions for counter control
+    pinstart(abs_pin_cs, P_HIGH_1MA, 0, 0)      ' CS output
+    pinstart(abs_pin_cclk, P_HIGH_1MA, 0, 0)    ' CCLK output
+    pinstart(abs_pin_clrb, P_HIGH_1MA, 0, 0)    ' CLRb output
+
+    ' Configure smart pins for SPI
+    ' MISO pin as sync serial receive (data input)
+    pinf(abs_pin_miso)                       ' Float pin first
+    wrpin(abs_pin_miso, P_SYNC_RX)           ' Set sync serial receive mode (built-in constant)
+    wxpin(abs_pin_miso, 24)                  ' 24 bits per transfer (4 leading + 16 data + 4 trailing)
+
+    ' SCLK pin as transition output for clock generation
+    pinf(abs_pin_sclk)                       ' Float pin first
+    wrpin(abs_pin_sclk, P_TRANSITION) ' Set as transition output for clock (built-in constant)
+    wxpin(abs_pin_sclk, clkfreq / SPI_CLOCK_FREQ / 2) ' Set clock period
+
+    ' Set initial pin states
+    pinh(abs_pin_cs)                    ' CS high (inactive)
+    pinl(abs_pin_cclk)                  ' CCLK low
+    pinh(abs_pin_clrb)                  ' CLRb high (counter enabled)
+    pinl(abs_pin_sclk)                  ' SCLK low
+
+DAT { background cog code }
+
+                        ORG     0
+
+sensor_cog_entry
+                        ' Get parameter pointer (points to pin_group)
+                        mov     param_ptr, ptra
+
+                        ' Load pin configuration
+                        rdlong  pin_group_base, param_ptr
+
+                        ' Calculate acquisition_mode address (offset from pin_group)
+                        mov     acq_mode_ptr, param_ptr
+                        add     acq_mode_ptr, #12        ' Skip frame_count(4) + error_count(4) + acquisition_mode offset
+
+                        ' Add base to all pin offsets (initialized at compile time)
+                        add     cs_pin, pin_group_base
+                        add     cclk_pin, pin_group_base
+                        add     miso_pin, pin_group_base
+                        add     clrb_pin, pin_group_base
+                        add     sclk_pin, pin_group_base
+
+acquisition_loop
+                        ' Check acquisition mode - continue unless explicitly stopped
+                        rdlong  temp, acq_mode_ptr
+                        cmp     temp, #MODE_STOPPED wz
+                if_z    jmp     #acquisition_loop
+
+                        ' Get frame buffer for new data
+                        call    #get_frame_buffer
+                        tjz     frame_ptr, #acquisition_loop  ' Skip if no buffer available
+
+                        ' Capture sensor frame
+                        call    #capture_frame
+
+                        ' Commit frame to queue
+                        call    #commit_frame_buffer
+
+                        ' Update frame count (using offset from param_ptr)
+                        mov     temp2, param_ptr
+                        add     temp2, #4                ' frame_count is at offset 4
+                        rdlong  temp, temp2
+                        add     temp, #1
+                        wrlong  temp, temp2
+
+                        ' Add timing control based on target frame rate
+                        ' call    #frame_rate_control    ' Commented out for now
+
+                        jmp     #acquisition_loop
+
+acquisition_exit
+                        cogstop #0
+
+get_frame_buffer
+                        ' Get next available frame from FIFO manager
+                        ' Call fifo.getNextFrame() via hub interface
+                        mov     temp, ##fifo.getNextFrame
+                        call    temp
+                        mov     frame_ptr, temp            ' Store returned frame pointer
+get_frame_buffer_ret    ret
+
+commit_frame_buffer
+                        ' Commit frame to sensor FIFO
+                        ' Call fifo.commitFrame(FIFO_SENSOR, frame_ptr)
+                        mov     temp, #fifo.FIFO_SENSOR
+                        mov     temp2, frame_ptr
+                        mov     temp3, ##fifo.commitFrame
+                        call    temp3
+commit_frame_buffer_ret ret
+
+capture_frame
+                        ' Reset sensor counter to position 0
+                        call    #reset_sensor_counter
+
+                        ' Advance to sensor 1 (first active sensor per documentation)
+                        call    #advance_sensor_counter
+
+                        ' Read all 64 sensors in correct subtile order: 0, 2, 1, 3
+                        mov     subtile_idx, #0
+
+capture_subtile_loop
+                        ' Get current subtile number from subtile_order array
+                        mov     temp, ##@subtile_order
+                        add     temp, subtile_idx
+                        rdbyte  current_subtile, temp
+
+                        ' Get frame buffer offset for this subtile
+                        mov     temp, ##@subtile_offset
+                        add     temp, current_subtile
+                        rdbyte  frame_offset, temp
+
+                        ' Read 16 sensors from current subtile
+                        mov     sensor_in_subtile, #0
+
+capture_sensor_loop
+                        ' Read sensor value via AD7680
+                        call    #read_ad7680
+
+                        ' Map sensor position using pixel_order lookup
+                        mov     temp, ##@pixel_order
+                        add     temp, sensor_in_subtile
+                        rdbyte  pixel_pos, temp
+
+                        ' Calculate final frame buffer position
+                        ' frame_position = pixel_pos + frame_offset
+                        mov     temp, pixel_pos
+                        add     temp, frame_offset
+
+                        ' Store value in frame buffer (word aligned)
+                        mov     store_addr, frame_ptr
+                        add     store_addr, temp
+                        add     store_addr, temp            ' Word offset (*2)
+                        wrword  sensor_value, store_addr
+
+                        ' Advance to next sensor in hardware sequence
+                        call    #advance_sensor_counter
+
+                        ' Next sensor in subtile
+                        add     sensor_in_subtile, #1
+                        cmp     sensor_in_subtile, #16 wz
+                if_nz   jmp     #capture_sensor_loop
+
+                        ' Next subtile
+                        add     subtile_idx, #1
+                        cmp     subtile_idx, #4 wz
+                if_nz   jmp     #capture_subtile_loop
+
+capture_frame_ret       ret
+
+reset_sensor_counter
+                        ' Pulse CLRb low to reset counter
+                        drvl    clrb_pin
+                        waitx   #COUNTER_SETUP_DELAY
+                        drvh    clrb_pin
+                        waitx   #COUNTER_SETUP_DELAY
+reset_sensor_counter_ret ret
+
+advance_sensor_counter
+                        ' Pulse CCLK to advance to next sensor
+                        drvh    cclk_pin
+                        waitx   #COUNTER_SETUP_DELAY
+                        drvl    cclk_pin
+                        waitx   #COUNTER_SETUP_DELAY
+advance_sensor_counter_ret ret
+
+read_ad7680
+                        ' Smart pin SPI read
+                        ' Start conversion (CS low)
+                        drvl    cs_pin
+                        waitx   #SENSOR_SETTLE_DELAY
+
+                        ' Start smart pin SPI transfer
+                        dirl    miso_pin                ' Reset smart pin
+                        dirh    miso_pin                ' Enable smart pin
+                        wypin   #0, sclk_pin            ' Start clock generation
+
+                        ' Wait for 24 bits to be received
+                        waitx   #48                     ' Wait for 24 clock cycles at configured rate
+
+                        ' Read received data (24 bits: 4 leading zeros + 16 data bits + 4 trailing)
+                        rdpin   sensor_value, miso_pin
+                        shr     sensor_value, #4       ' Shift right to remove 4 trailing zeros
+                        and     sensor_value, ##$FFFF   ' Mask to get 16-bit value
+
+                        ' End conversion (CS high)
+                        drvh    cs_pin
+
+read_ad7680_ret         ret
+
+' frame_rate_control temporarily disabled
+' frame_rate_control
+'                         ' Calculate delay needed for target frame rate
+'                         rdlong  temp, frame_rate_target_ptr
+'                         tjz     temp, #frame_rate_control_ret
+'
+'                         ' Simple delay - could be more sophisticated
+'                         mov     delay_time, clkfreq
+'                         qdiv    delay_time, temp
+'                         getqx   delay_time
+'                         waitx   delay_time
+'
+' frame_rate_control_ret  ret
+
+' Variables
+param_ptr               LONG    0
+acq_mode_ptr            LONG    0
+pin_group_base          LONG    0
+cs_pin                  LONG    PIN_CS          ' Pre-initialized with offset
+cclk_pin                LONG    PIN_CCLK        ' Pre-initialized with offset
+miso_pin                LONG    PIN_MISO        ' Pre-initialized with offset
+clrb_pin                LONG    PIN_CLRB        ' Pre-initialized with offset
+sclk_pin                LONG    PIN_SCLK        ' Pre-initialized with offset
+frame_ptr               LONG    0
+subtile_idx             LONG    0
+current_subtile         LONG    0
+frame_offset            LONG    0
+sensor_in_subtile       LONG    0
+pixel_pos               LONG    0
+store_addr              LONG    0
+sensor_value            LONG    0
+temp                    LONG    0
+temp2                   LONG    0
+delay_time              LONG    0
+hub_buffer              LONG    $1000   ' Temporary buffer address
+
+CON { license }
+{{
+
+ -------------------------------------------------------------------------------------------------
+  MIT License
+
+  Copyright (c) 2025 Iron Sheep Productions, LLC
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+ =================================================================================================
+}}

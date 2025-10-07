@@ -1,0 +1,132 @@
+'' isp_frame_processor.spin2 - Frame routing and decimation COG
+'' Reads from sensor FIFO, processes/decimates, routes to display FIFOs
+''
+'' Processing modes:
+''   - Simple decimation (every Nth frame)
+''   - Frame averaging (average N frames)
+''   - Peak detection
+''   - Future: Edge detection, filtering, etc.
+
+CON
+  ' Decimation ratios (configurable)
+  DEFAULT_HDMI_DECIMATION = 9    ' Every 9th frame to HDMI
+  DEFAULT_OLED_DECIMATION = 27   ' Every 27th frame to OLED
+
+  ' Processing modes
+  MODE_DECIMATION = 0            ' Simple frame skipping
+  MODE_AVERAGING  = 1            ' Average multiple frames
+  MODE_PEAK       = 2            ' Peak detection across frames
+
+OBJ
+  fifo : "isp_frame_fifo_manager"
+
+VAR
+  long  cog_id
+  long  processing_mode
+  long  hdmi_decimation
+  long  oled_decimation
+  long  frame_counter
+  long  hdmi_counter
+  long  oled_counter
+  long  stats[4]                 ' Performance statistics
+
+PUB null()
+  '' Not a top-level object
+
+PUB start(fifo_obj) : ok
+  '' Start the frame processor COG
+  '' @param fifo_obj - pointer to frame FIFO manager
+  '' @returns cog_id if successful, -1 if failed
+
+  stop()
+
+  ' Initialize variables
+  processing_mode := MODE_DECIMATION
+  hdmi_decimation := DEFAULT_HDMI_DECIMATION
+  oled_decimation := DEFAULT_OLED_DECIMATION
+  frame_counter := 0
+  hdmi_counter := 0
+  oled_counter := 0
+
+  ' Start processing COG
+  cog_id := cogspin(NEWCOG, processor_loop(fifo_obj), @stats)
+
+  return cog_id
+
+PUB stop()
+  '' Stop the frame processor COG
+
+  if cog_id >= 0
+    cogstop(cog_id)
+    cog_id := -1
+
+PUB set_mode(mode)
+  '' Set processing mode
+  '' @param mode - MODE_DECIMATION, MODE_AVERAGING, or MODE_PEAK
+
+  if mode >= MODE_DECIMATION and mode <= MODE_PEAK
+    processing_mode := mode
+
+PUB set_decimation(hdmi_ratio, oled_ratio)
+  '' Set decimation ratios for displays
+  '' @param hdmi_ratio - frames to skip before sending to HDMI (1 = every frame)
+  '' @param oled_ratio - frames to skip before sending to OLED
+
+  if hdmi_ratio > 0
+    hdmi_decimation := hdmi_ratio
+  if oled_ratio > 0
+    oled_decimation := oled_ratio
+
+PUB get_stats(stat_ptr)
+  '' Copy statistics to provided buffer
+  '' @param stat_ptr - pointer to 4-long buffer for stats
+
+  longmove(stat_ptr, @stats, 4)
+
+PRI processor_loop(fifo_obj) | framePtr, sendHDMI, sendOLED
+  '' Main processing loop running in dedicated COG
+  '' @param fifo_obj - pointer to FIFO manager
+
+  repeat
+    ' Wait for frame from sensor FIFO
+    framePtr := fifo.dequeue(fifo.FIFO_SENSOR)
+
+    if framePtr
+      ' Update frame counter
+      frame_counter++
+
+      ' Process frame based on mode
+      case processing_mode
+        MODE_DECIMATION:
+          ' Simple decimation - just pass through selected frames
+          sendHDMI := (++hdmi_counter // hdmi_decimation) == 0
+          sendOLED := (++oled_counter // oled_decimation) == 0
+
+        MODE_AVERAGING:
+          ' TODO: Implement frame averaging
+          sendHDMI := (++hdmi_counter // hdmi_decimation) == 0
+          sendOLED := (++oled_counter // oled_decimation) == 0
+
+        MODE_PEAK:
+          ' TODO: Implement peak detection
+          sendHDMI := (++hdmi_counter // hdmi_decimation) == 0
+          sendOLED := (++oled_counter // oled_decimation) == 0
+
+      ' Route to appropriate display FIFOs
+      if sendHDMI
+        if fifo.commitFrame(fifo.FIFO_HDMI, framePtr) < 0
+          ' HDMI FIFO full, release frame
+          fifo.releaseFrame(framePtr)
+      elseif sendOLED
+        if fifo.commitFrame(fifo.FIFO_OLED, framePtr) < 0
+          ' OLED FIFO full, release frame
+          fifo.releaseFrame(framePtr)
+      else
+        ' Frame not needed by any display, release it
+        fifo.releaseFrame(framePtr)
+
+      ' Update statistics
+      stats[0] := frame_counter
+      stats[1] := hdmi_counter
+      stats[2] := oled_counter
+      stats[3] := processing_mode

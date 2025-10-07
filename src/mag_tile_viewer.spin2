@@ -1,0 +1,104 @@
+' mag_tile_viewer - Main Application
+' Magnetic Field Imaging Tile Viewer for P2 Edge with PSRAM
+'
+' Pin Assignments:
+'   P0-P7:   HDMI Display
+'   P8-P15:  Magnetic Tile Sensor (8 x 8 grid, SPI, + 2pins)
+'   P16-P23: OLED Display (128 x 128 SPI)
+'   P40-P57: PSRAM (P2 Edge)
+
+CON
+  _CLKFREQ = 250_000_000   ' 250 MHz for HDMI timing
+
+  ' Pin group assignments
+  HDMI_BASE_PIN   = 0
+  SENSOR_BASE_PIN = 8
+  OLED_BASE_PIN   = 16
+
+OBJ
+  ' Core system components
+  fifo       : "isp_frame_fifo_manager"      ' Multi-FIFO frame pool manager
+  gfx        : "isp_psram_graphics"                      ' HDMI graphics system
+
+  ' Display engines
+  hdmi_engine : "isp_hdmi_display_engine"    ' HDMI display consumer
+  oled_mgr    : "isp_oled_manager"           ' OLED display consumer
+
+  ' Data acquisition and processing
+  ' sensor      : "isp_tile_sensor"            ' Magnetic tile sensor interface (commented for display testing)
+  ' processor   : "isp_frame_processor"        ' Frame routing/decimation (commented for display testing)
+
+VAR
+  long  system_status
+
+PUB main() | success
+
+  debug("Starting Magnetic Tile Viewer", 13, 10)
+  debug("============================", 13, 10)
+
+  ' Initialize the frame FIFO manager
+  debug("Initializing frame FIFO manager...", 13, 10)
+  if not fifo.start()
+    debug("ERROR: Failed to start FIFO manager", 13, 10)
+    return
+
+  ' Start the HDMI graphics system (handles PSRAM internally)
+  debug("Starting HDMI graphics system (P0-P7)...", 13, 10)
+  gfx.start()
+  debug("  HDMI graphics system ready", 13, 10)
+
+  ' Start HDMI display engine
+  debug("Starting HDMI display engine...", 13, 10)
+  if hdmi_engine.start() < 0
+    debug("ERROR: Failed to start HDMI engine", 13, 10)
+    return
+  debug("  HDMI engine ready", 13, 10)
+
+  ' Start OLED manager
+  debug("Starting OLED manager (P16-P23)...", 13, 10)
+  if oled_mgr.start(OLED_BASE_PIN) < 0
+    debug("ERROR: Failed to start OLED manager", 13, 10)
+    return
+  debug("  OLED manager ready", 13, 10)
+
+  ' Skip frame processor during display testing (not needed in TEST_MODE)
+  debug("Frame processor: SKIPPED (display test mode)", 13, 10)
+  ' Uncomment below when TEST_MODE = false in display engines:
+  ' if processor.start(@fifo) < 0
+  '   debug("ERROR: Failed to start frame processor", 13, 10)
+  '   return
+  ' debug("  Frame processor ready", 13, 10)
+
+  ' Skip sensor initialization during display testing
+  debug("Sensor interface: SKIPPED (display test mode)", 13, 10)
+  ' Uncomment below when ready to test sensor:
+  ' if not sensor.start(SENSOR_BASE_PIN, @fifo)
+  '   debug("ERROR: Failed to start sensor interface", 13, 10)
+  ' else
+  '   debug("  Sensor interface ready", 13, 10)
+
+  debug(" ", 13, 10)
+  debug("System initialization complete!", 13, 10)
+
+  ' Check if display engines are in test mode
+  ' (Note: TEST_MODE is set in isp_hdmi_display_engine and isp_oled_manager)
+  debug(" ", 13, 10)
+  debug("=== TEST MODE ACTIVE ===", 13, 10)
+  debug("Both displays showing test patterns", 13, 10)
+  debug("Set TEST_MODE = false in display engines to enable FIFO processing", 13, 10)
+  debug(" ", 13, 10)
+
+  ' Clear HDMI screen
+  gfx.cls($00_00_00)
+
+  ' Main monitoring loop
+  repeat
+    waitms(5000)
+    debug("System running - HDMI frames: ", udec(hdmi_engine.get_frame_count()))
+    debug(", OLED frames: ", udec(oled_mgr.get_frame_count()), 13, 10)
+
+    ' When TEST_MODE is false, these stats become meaningful:
+    ' debug("  FIFO depths - Sensor: ", udec(fifo.getQueueDepth(fifo.FIFO_SENSOR)))
+    ' debug(", HDMI: ", udec(fifo.getQueueDepth(fifo.FIFO_HDMI)))
+    ' debug(", OLED: ", udec(fifo.getQueueDepth(fifo.FIFO_OLED)))
+    ' debug(", Free: ", udec(fifo.getFreeFrames()), 13, 10)

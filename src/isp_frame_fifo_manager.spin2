@@ -1,0 +1,228 @@
+'' isp_frame_fifo_manager.spin2 - Multi-FIFO Frame Pool Manager
+'' Zero-copy architecture with three independent FIFOs sharing a common frame pool
+''
+'' FIFOs:
+''   - FIFO_SENSOR: Sensor -> Frame Processor
+''   - FIFO_HDMI:   Frame Processor -> HDMI Display Engine
+''   - FIFO_OLED:   Frame Processor -> OLED Manager
+
+CON
+  ' FIFO IDs
+  FIFO_SENSOR = 0
+  FIFO_HDMI   = 1
+  FIFO_OLED   = 2
+
+  ' Frame configuration
+  FRAME_SIZE  = 128         ' 64 sensors x 2 bytes each
+  MAX_FRAMES  = 32          ' Total frames in pool
+  FIFO_DEPTH  = 16          ' Max entries per FIFO
+
+  ' Return codes
+  SUCCESS     = 0
+  ERR_FULL    = -1
+  ERR_EMPTY   = -2
+  ERR_INVALID = -3
+
+VAR
+  ' Frame pool - all frames live here
+  byte  framePool[MAX_FRAMES * FRAME_SIZE]
+
+  ' Free frame tracking
+  long  freeList[MAX_FRAMES]
+  long  freeHead
+  long  freeTail
+  long  freeCount
+
+  ' FIFO structures - just hold pointers
+  long  sensorFIFO[FIFO_DEPTH]
+  long  sensorHead
+  long  sensorTail
+  long  sensorCount
+
+  long  hdmiFIFO[FIFO_DEPTH]
+  long  hdmiHead
+  long  hdmiTail
+  long  hdmiCount
+
+  long  oledFIFO[FIFO_DEPTH]
+  long  oledHead
+  long  oledTail
+  long  oledCount
+
+  ' Lock for atomic operations
+  byte  lock
+
+PUB null()
+  '' Not a top-level object
+
+PUB start() : ok
+  '' Initialize the frame pool and all FIFOs
+
+  lock := locknew()
+
+  ' Initialize free list with all frames
+  repeat freeHead from 0 to MAX_FRAMES-1
+    freeList[freeHead] := @framePool + (freeHead * FRAME_SIZE)
+
+  freeHead := 0
+  freeTail := MAX_FRAMES - 1
+  freeCount := MAX_FRAMES
+
+  ' Initialize all FIFOs as empty
+  sensorHead := sensorTail := sensorCount := 0
+  hdmiHead := hdmiTail := hdmiCount := 0
+  oledHead := oledTail := oledCount := 0
+
+  return true
+
+PUB stop()
+  '' Clean shutdown
+
+  if lock >= 0
+    lockrel(lock)
+    lock := -1
+
+PUB getNextFrame() : framePtr | timeout
+  '' Get next available frame from pool
+  '' Blocks until frame available
+  '' Returns pointer to frame buffer
+
+  timeout := 0
+  repeat
+    repeat while locktry(lock)
+
+    if freeCount > 0
+      ' Get frame from free list
+      framePtr := freeList[freeHead]
+      freeHead := (freeHead + 1) // MAX_FRAMES
+      freeCount--
+      lockrel(lock)
+      return framePtr
+
+    lockrel(lock)
+
+    ' No frames available, wait a bit
+    waitms(1)
+    if ++timeout > 1000
+      return 0  ' Timeout after 1 second
+
+PUB commitFrame(fifoID, framePtr) : result
+  '' Commit frame to specified FIFO
+  '' Makes frame visible to consumers
+
+  repeat while locktry(lock)
+
+  case fifoID
+    FIFO_SENSOR:
+      if sensorCount < FIFO_DEPTH
+        sensorFIFO[sensorTail] := framePtr
+        sensorTail := (sensorTail + 1) // FIFO_DEPTH
+        sensorCount++
+        result := SUCCESS
+      else
+        result := ERR_FULL
+
+    FIFO_HDMI:
+      if hdmiCount < FIFO_DEPTH
+        hdmiFIFO[hdmiTail] := framePtr
+        hdmiTail := (hdmiTail + 1) // FIFO_DEPTH
+        hdmiCount++
+        result := SUCCESS
+      else
+        result := ERR_FULL
+
+    FIFO_OLED:
+      if oledCount < FIFO_DEPTH
+        oledFIFO[oledTail] := framePtr
+        oledTail := (oledTail + 1) // FIFO_DEPTH
+        oledCount++
+        result := SUCCESS
+      else
+        result := ERR_FULL
+
+    other:
+      result := ERR_INVALID
+
+  lockrel(lock)
+  return result
+
+PUB dequeue(fifoID) : framePtr | timeout
+  '' Dequeue frame from specified FIFO
+  '' Blocks until frame available
+  '' Returns pointer to frame
+
+  timeout := 0
+  repeat
+    repeat while locktry(lock)
+
+    case fifoID
+      FIFO_SENSOR:
+        if sensorCount > 0
+          framePtr := sensorFIFO[sensorHead]
+          sensorHead := (sensorHead + 1) // FIFO_DEPTH
+          sensorCount--
+          lockrel(lock)
+          return framePtr
+
+      FIFO_HDMI:
+        if hdmiCount > 0
+          framePtr := hdmiFIFO[hdmiHead]
+          hdmiHead := (hdmiHead + 1) // FIFO_DEPTH
+          hdmiCount--
+          lockrel(lock)
+          return framePtr
+
+      FIFO_OLED:
+        if oledCount > 0
+          framePtr := oledFIFO[oledHead]
+          oledHead := (oledHead + 1) // FIFO_DEPTH
+          oledCount--
+          lockrel(lock)
+          return framePtr
+
+      other:
+        lockrel(lock)
+        return 0
+
+    lockrel(lock)
+
+    ' No frames available, wait
+    waitms(1)
+    if ++timeout > 1000
+      return 0  ' Timeout
+
+PUB releaseFrame(framePtr)
+  '' Return frame to free pool
+  '' Called by consumers when done with frame
+
+  if framePtr == 0
+    return
+
+  repeat while locktry(lock)
+
+  if freeCount < MAX_FRAMES
+    freeList[freeTail] := framePtr
+    freeTail := (freeTail + 1) // MAX_FRAMES
+    freeCount++
+
+  lockrel(lock)
+
+PUB getQueueDepth(fifoID) : count
+  '' Get current number of frames in specified FIFO
+
+  repeat while locktry(lock)
+
+  case fifoID
+    FIFO_SENSOR: count := sensorCount
+    FIFO_HDMI:   count := hdmiCount
+    FIFO_OLED:   count := oledCount
+    other:       count := -1
+
+  lockrel(lock)
+
+PUB getFreeFrames() : count
+  '' Get number of available frames in pool
+
+  repeat while locktry(lock)
+  count := freeCount
+  lockrel(lock)

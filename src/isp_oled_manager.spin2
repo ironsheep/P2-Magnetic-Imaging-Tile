@@ -1,0 +1,208 @@
+'' isp_oled_manager.spin2 - OLED Display Manager
+'' Consumes frames from OLED FIFO and displays via OLED driver
+''
+'' This COG:
+''   - Dequeues frames from OLED FIFO
+''   - Converts sensor data to OLED format
+''   - Manages OLED display updates
+
+CON
+  ' Test mode configuration
+  TEST_MODE   = true      ' true = show test pattern, false = process FIFO
+
+  ' OLED display dimensions
+  OLED_WIDTH  = 128
+  OLED_HEIGHT = 128
+
+  ' Sensor display configuration
+  SENSOR_GRID_SIZE = 8
+  CELL_WIDTH  = OLED_WIDTH / SENSOR_GRID_SIZE    ' 16 pixels per cell
+  CELL_HEIGHT = OLED_HEIGHT / SENSOR_GRID_SIZE   ' 16 pixels per cell
+
+  ' Display update modes
+  MODE_FULL_UPDATE = 0
+  MODE_DIFFERENTIAL = 1
+
+OBJ
+  fifo : "isp_frame_fifo_manager"
+  oled : "isp_oled_driver"
+
+VAR
+  long  cog_id
+  long  frame_count
+  long  update_mode
+  word  last_frame[64]    ' Previous frame for differential updates
+  byte  frame_buffer[OLED_WIDTH * OLED_HEIGHT * 2]  ' OLED display buffer (RGB565)
+
+PUB null()
+  '' Not a top-level object
+
+PUB start(base_pin) : ok
+  '' Start the OLED manager
+  '' @param base_pin - base pin for OLED SPI interface
+  '' @returns cog_id if successful, -1 if failed
+
+  stop()
+
+  ' Initialize OLED driver
+  if not oled.start(base_pin)
+    return -1
+
+  ' Clear last frame buffer
+  wordfill(@last_frame, 0, 64)
+
+  ' Initialize variables
+  frame_count := 0
+  update_mode := MODE_FULL_UPDATE
+
+  ' Start display COG
+  cog_id := cogspin(NEWCOG, oled_loop(), @frame_count)
+
+  return cog_id
+
+PUB stop()
+  '' Stop the OLED manager
+
+  if cog_id >= 0
+    cogstop(cog_id)
+    cog_id := -1
+    oled.stop()
+
+PUB set_update_mode(mode)
+  '' Set display update mode
+  '' @param mode - MODE_FULL_UPDATE or MODE_DIFFERENTIAL
+
+  update_mode := mode
+
+PUB get_frame_count() : count
+  '' Get number of frames displayed
+
+  return frame_count
+
+PUB show_test_pattern() | row, col, sensorVal, pattern
+  '' Display a test pattern directly (bypasses FIFO)
+  '' Useful for initial testing without full pipeline
+
+  ' Create a checkerboard pattern with gradient
+  repeat row from 0 to 7
+    repeat col from 0 to 7
+      ' Create alternating pattern with gradient
+      if (row + col) & 1
+        pattern := (row * 8192) + (col * 4096)  ' Diagonal gradient
+      else
+        pattern := 65535 - ((row * 8192) + (col * 4096))  ' Inverse gradient
+
+      ' Build display buffer with test pattern
+      build_test_cell(row, col, pattern)
+
+  ' Send to OLED
+  oled.clear()
+  oled.draw_bitmap(0, 0, OLED_WIDTH, OLED_HEIGHT, @frame_buffer)
+
+PRI build_test_cell(row, col, value) | color, x, y, pixelIdx
+  '' Build a single cell in the frame buffer for test pattern
+  '' @param row, col - cell position (0-7)
+  '' @param value - test value to display
+
+  ' Convert to RGB565 color
+  color := field_to_rgb565(value)
+
+  ' Fill the cell in display buffer
+  repeat y from 0 to CELL_HEIGHT - 1
+    repeat x from 0 to CELL_WIDTH - 1
+      pixelIdx := ((row * CELL_HEIGHT + y) * OLED_WIDTH + (col * CELL_WIDTH + x)) * 2
+      frame_buffer[pixelIdx] := color & $FF
+      frame_buffer[pixelIdx + 1] := color >> 8
+
+PRI oled_loop() | framePtr, row, col, sensorVal, color, idx, changed
+  '' Main OLED display loop running in dedicated COG
+
+  if TEST_MODE
+    ' Test pattern mode - display once and idle
+    show_test_pattern()
+    repeat
+      waitms(1000)  ' Just keep COG alive
+  else
+    ' Normal operation - process FIFO
+    ' Clear display initially
+    oled.clear()
+
+    repeat
+      ' Get frame from OLED FIFO
+      framePtr := fifo.dequeue(fifo.FIFO_OLED)
+
+      if framePtr
+        ' Check if frame has changed (for differential mode)
+        changed := false
+        if update_mode == MODE_DIFFERENTIAL
+          repeat idx from 0 to 63
+            if word[framePtr][idx] <> last_frame[idx]
+              changed := true
+              quit
+
+        ' Update display if changed or in full update mode
+        if changed or (update_mode == MODE_FULL_UPDATE)
+          ' Build display buffer from sensor data
+          build_display_buffer(framePtr)
+
+          ' Send to OLED
+          oled.draw_bitmap(0, 0, OLED_WIDTH, OLED_HEIGHT, @frame_buffer)
+
+          ' Save frame for differential comparison
+          wordmove(@last_frame, framePtr, 64)
+
+        ' Release frame back to pool
+        fifo.releaseFrame(framePtr)
+
+        ' Update frame counter
+        frame_count++
+
+PRI build_display_buffer(framePtr) | row, col, sensorIdx, sensorVal, color, x, y, pixelIdx
+  '' Convert sensor frame to OLED display buffer
+  '' @param framePtr - pointer to sensor frame data
+
+  ' Process each sensor
+  repeat row from 0 to 7
+    repeat col from 0 to 7
+      ' Get sensor value
+      sensorIdx := row * 8 + col
+      sensorVal := word[framePtr][sensorIdx]
+
+      ' Convert to RGB565 color
+      color := field_to_rgb565(sensorVal)
+
+      ' Fill the cell in display buffer
+      repeat y from 0 to CELL_HEIGHT - 1
+        repeat x from 0 to CELL_WIDTH - 1
+          pixelIdx := ((row * CELL_HEIGHT + y) * OLED_WIDTH + (col * CELL_WIDTH + x)) * 2
+          ' Store RGB565 color (little-endian)
+          frame_buffer[pixelIdx] := color & $FF
+          frame_buffer[pixelIdx + 1] := color >> 8
+
+PRI field_to_rgb565(fieldVal) : color | r, g, b
+  '' Convert magnetic field value to RGB565 color
+  '' @param fieldVal - 16-bit sensor reading
+  '' @returns RGB565 color value
+
+  ' Simple color mapping: Blue (low) -> Green (mid) -> Red (high)
+  if fieldVal < 16384  ' Lower quarter - blue dominant
+    b := 31
+    g := fieldVal >> 9  ' 0-31 range
+    r := 0
+  elseif fieldVal < 32768  ' Mid-low - cyan to green
+    b := 31 - ((fieldVal - 16384) >> 9)
+    g := 31
+    r := 0
+  elseif fieldVal < 49152  ' Mid-high - green to yellow
+    b := 0
+    g := 31
+    r := (fieldVal - 32768) >> 10  ' 0-31 range
+  else  ' Upper quarter - red dominant
+    b := 0
+    g := 31 - ((fieldVal - 49152) >> 9)
+    r := 31
+
+  ' Convert to RGB565 format: RRRRRGGG GGGBBBBB
+  color := (r << 11) | (g << 6) | b
+
+  return color
