@@ -46,20 +46,20 @@ The Waveshare 1.5inch RGB OLED Module is a compact, high-contrast display module
 
 ### P2 Pin Assignments
 
-**Pin Group**: 24 (P24-P31)
+**Pin Group**: 16 (P16-P23)
 
 | P2 Pin | Signal | Function | Direction | Description |
 |--------|--------|----------|-----------|-------------|
-| P24 (+0) | DIN | MOSI | Output | SPI data output to display |
-| P26 (+2) | CLK | SCLK | Output | SPI clock signal |
-| P28 (+4) | CS | Chip Select | Output | Active low chip select |
-| P30 (+6) | DC | Data/Command | Output | High=Data, Low=Command |
-| P31 (+7) | RST | Reset | Output | Active low reset signal |
+| P16 (+0) | DIN | MOSI | Output | SPI data output to display |
+| P18 (+2) | CLK | SCLK | Output | SPI clock signal |
+| P20 (+4) | CS | Chip Select | Output | Active low chip select |
+| P22 (+6) | DC | Data/Command | Output | High=Data, Low=Command |
+| P23 (+7) | RST | Reset | Output | Active low reset signal |
 | GND | GND | Ground | - | Ground reference |
 | 3.3V | VCC | Power | - | 3.3V power supply |
 
 - Pin group allocation allows efficient Smart Pin configuration
-- Separate from magnetic tile interface (Pin Group 48)
+- Separate from magnetic tile interface (Pin Group 8: P8-P15)
 
 ## Communication Protocol
 
