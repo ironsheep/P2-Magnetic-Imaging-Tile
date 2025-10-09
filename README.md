@@ -24,34 +24,35 @@ The SparkFun Magnetic Imaging Tile V3 is an 8×8 array of Hall effect sensors ca
 
 ### Quick Reference
 
-**Magnetic Tile Connection (Pin Group 40: P40-P47)**
-```
-Pin    | Function        | Wire Color | Description
--------|-----------------|------------|---------------------------
-P40 (+0) | CS           | VIOLET     | AD7940 Chip Select
-P41 (+1) | CCLK         | WHITE      | Counter Clock (sensor mux)
-P42 (+2) | MISO         | BLUE       | AD7940 Data Input
-P43 (+3) | CLRb         | GRAY       | Counter Clear (sensor mux)
-P44 (+4) | SCLK         | GREEN      | AD7940 SPI Clock
-P46 (+6) | AOUT         | YELLOW     | Analog Input (optional)
-GND    | Ground         | BLACK      | Ground connection
-3.3V   | VCC            | RED        | Power supply
-```
+#### HDMI Connection (Pin Group 0: P0-P7)
 
-**OLED Display Connection (Pin Group 24: P24-P31)**
-```
-Pin    | Function        | Description
--------|-----------------|---------------------------
-P24 (+0) | DIN          | SPI data output (MOSI)
-P26 (+2) | CLK          | SPI clock (SCLK)
-P28 (+4) | CS           | Chip Select (active low)
-P30 (+6) | DC           | Data/Command select
-P31 (+7) | RST          | Reset (active low)
-GND    | Ground         | Ground connection
-3.3V   | VCC            | Power supply
-```
+#### Magnetic Tile Connection (Pin Group 8: P8-P15)
+
+| Pin      | Function | Wire Color | LA Ch Color   | Description                |
+| -------- | -------- | ---------- | ------------- | -------------------------- |
+| P8 (+0)  | CS       | VIOLET     | 00 0-0 YELLOW | AD7940 Chip Select         |
+| P9 (+1)  | CCLK     | WHITE      | 05 1-1 BROWN  | Counter Clock (sensor mux) |
+| P10 (+2) | MISO     | BLUE       | 01 0-1 GREEN  | AD7940 Data Input          |
+| P11 (+3) | CLRb     | GRAY       | 04 1-0 GRAY   | Counter Clear (sensor mux) |
+| P12 (+4) | SCLK     | GREEN      | 02 0-2 BLUE   | AD7940 SPI Clock           |
+| P14 (+6) | AOUT     | YELLOW     |               | Analog Input (optional)    |
+| GND      | Ground   | BLACK      |               | Ground connection          |
+| 3.3V     | VCC      | RED        |               | Power supply               |
+
+#### OLED Display Connection (Pin Group 16: P16-P23)
+
+| Pin      | Function | Wire Color | LA Ch Color   | Description              |
+| -------- | -------- | ---------- | ------------- | ------------------------ |
+| P16 (+0) | DIN      | BLUE       | 04 2-0 GRAY   | SPI data output (MOSI)   |
+| P18 (+2) | CLK      | YELLOW     | 05 2-1 BROWN  | SPI clock (SCLK)         |
+| P20 (+4) | CS       | ORANGE     | 06 2-2 RED    | Chip Select (active low) |
+| P22 (+6) | DC       | DK GREEN   | 07 2-3 ORANGE | Data/Command select      |
+| P23 (+7) | RST      | WHITE      | 03 1-3 ORANGE | Reset (active low)       |
+| GND      | Ground   | BLACK      |               | Ground connection        |
+| 3.3V     | VCC      | RED        |               | Power supply             |
 
 For detailed hardware specifications, see:
+
 - [Magnetic Tile Hardware Documentation](DOCs/Magnetic-Tile-Hardware.md)
 - [OLED Display Hardware Documentation](DOCs/OLED-Display-Hardware.md)
 
@@ -83,13 +84,13 @@ For detailed hardware specifications, see:
 
 **Initial Implementation**: Live continuous scanning with real-time OLED display
 
-| Mode | Description | Frame Rate |
-|------|-------------|------------|
-| Live Scan | Continuous real-time magnetic field visualization | Limited by display refresh |
-| High-Speed | Maximum speed capture and display | Up to 2000 Hz |
-| Debug | Single sensor diagnostic via debug console | Variable |
+| Mode       | Description                                       | Frame Rate                 |
+| ---------- | ------------------------------------------------- | -------------------------- |
+| Live Scan  | Continuous real-time magnetic field visualization | Limited by display refresh |
+| High-Speed | Maximum speed capture and display                 | Up to 2000 Hz              |
+| Debug      | Single sensor diagnostic via debug console        | Variable                   |
 
-*Note: Command interface for mode switching is under development*
+Note: _Command interface for mode switching is under development_
 
 ## Data Format
 
@@ -97,7 +98,7 @@ For detailed hardware specifications, see:
 
 Each frame contains 64 sensor readings arranged as an 8×8 grid, processed internally and displayed directly on the OLED screen:
 
-```
+```data
 [0,0] [0,1] [0,2] [0,3] [0,4] [0,5] [0,6] [0,7]
 [1,0] [1,1] [1,2] [1,3] [1,4] [1,5] [1,6] [1,7]
 ...
@@ -126,15 +127,18 @@ This project is currently in the initial development phase. Comprehensive docume
 Detailed technical documentation is available in the `DOCs/` directory:
 
 ### Hardware Specifications
+
 - **[Magnetic Tile Hardware](DOCs/Magnetic-Tile-Hardware.md)** - Detailed sensor array specifications
 - **[OLED Display Hardware](DOCs/OLED-Display-Hardware.md)** - Display module specifications
 
 ### Reference Implementation
+
 - **[Theory of Operations](DOCs/REF-Implementation/Theory_of_Operations.md)** - Comprehensive system overview
 - **[Communication Protocol](DOCs/REF-Implementation/Communication_Protocol.md)** - Hardware interface details
 - **[Visualization System](DOCs/REF-Implementation/Processing_Visualization_Theory_of_Operations.md)** - Display implementation guide
 
 ### Technical Datasheets
+
 - **[Hardware Schematics](DOCs/Magnetic_Imaging_Tile_Schematic_V10.pdf)** - Circuit diagrams
 - **[IC Datasheet](DOCs/AD7680.pdf)** - AD7940 ADC specifications
 
@@ -155,6 +159,7 @@ Detailed technical documentation is available in the `DOCs/` directory:
 - Engineering design validation
 
 ### Industrial Applications
+
 - Quality control testing
 - Magnetic component inspection
 - Research and development tools
@@ -163,6 +168,7 @@ Detailed technical documentation is available in the `DOCs/` directory:
 ## Development Requirements
 
 ### Hardware
+
 - Propeller 2 development board (choose one):
   - [P2 Edge Module with Breakout Board Bundle](https://www.parallax.com/product/p2-edge-module-with-p2-edge-breakout-board-bundle/)
   - [Propeller 2 Mini Starter Bundle](https://www.parallax.com/product/propeller-2-mini-starter-bundle/)
@@ -172,6 +178,7 @@ Detailed technical documentation is available in the `DOCs/` directory:
   - [P2 Eval Digital Video Out Add-on Board](https://www.parallax.com/product/p2-eval-digital-video-out-add-on-board/) (HDMI adapter for P2)
 
 ### Software Tools
+
 - Propeller 2 development environment
 - PNut or FlexProp compiler
 - Serial terminal application
@@ -189,6 +196,7 @@ Detailed technical documentation is available in the `DOCs/` directory:
 ## Contributing
 
 This is an open-source project under the MIT License. Contributions are welcome for:
+
 - P2 source code implementation
 - Performance optimization
 - Feature enhancements

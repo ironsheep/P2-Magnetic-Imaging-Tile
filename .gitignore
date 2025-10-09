@@ -217,3 +217,5 @@ DOCs/DRV5053.txt
 *.zip
 /tests/recordings
 pnut-term-settings.json
+/.p2kb-cache
+/OBEX
