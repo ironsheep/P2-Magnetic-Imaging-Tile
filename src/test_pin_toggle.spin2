@@ -1,0 +1,152 @@
+'' =================================================================================================
+''   File....... test_pin_toggle.spin2
+''   Purpose.... Test all 5 magnetic tile control pins - Logic analyzer verification
+''   Author..... Stephen M Moraco
+''               -- Copyright (c) 2025 Iron Sheep Productions, LLC
+''   E-mail..... stephen@ironsheep.biz
+''   Started.... Jan 2025
+''   Updated.... Jan 2025
+''
+'' =================================================================================================
+''
+''  PIN VERIFICATION TEST: Verify all 5 control pins and identify them on logic analyzer
+''
+''  SUCCESS CRITERIA:
+''  1. All 5 pins (CS, CCLK, MISO, CLRb, SCLK) show unique toggle patterns
+''  2. Binary counting pattern makes each pin identifiable by frequency
+''  3. Test runs for 5 seconds (50 count cycles, 0-49 in binary on pins)
+''
+''  HARDWARE SETUP:
+''  - Connect magnetic tile to Pin Group 8 (P8-P15)
+''  - Connect logic analyzer to pins P8-P12:
+''    - P8  = CS (VIOLET)   - Bit 0 - FASTEST toggle (every cycle)
+''    - P9  = CCLK (WHITE)  - Bit 1 - Toggles every 2 cycles
+''    - P10 = MISO (BLUE)   - Bit 2 - Toggles every 4 cycles
+''    - P11 = CLRb (GRAY)   - Bit 3 - Toggles every 8 cycles
+''    - P12 = SCLK (GREEN)  - Bit 4 - SLOWEST toggle (every 16 cycles)
+''  - No need for tile power during this test (just testing P2 pins)
+''
+''  EXPECTED BEHAVIOR:
+''  - Binary counting pattern from 0 to 49 (0b00000 to 0b110001)
+''  - Each count held for 100ms
+''  - P8 toggles fastest, P12 toggles slowest
+''  - Easy to identify which LA channel corresponds to which P2 pin
+''  - Ends with CS high, others low (safe state)
+''
+'' =================================================================================================
+
+CON
+    _clkfreq = 200_000_000                  ' 200 MHz system clock
+
+    ' Pin group for magnetic tile (from README.md)
+    TILE_PIN_GROUP = 8                      ' Pin Group 8: P8-P15
+
+    ' Test parameters
+    TOGGLE_CYCLES = 50                      ' 50 cycles = 10 seconds
+    HOLD_TIME_MS = 100                      ' 100ms per state
+
+OBJ
+    tile : "isp_tile_sensor"                ' Magnetic tile sensor driver
+
+PUB main()
+
+    DEBUG("================================================================================")
+    DEBUG("Magnetic Tile Pin Toggle Test - Logic Analyzer Verification")
+    DEBUG("================================================================================")
+    DEBUG(" ")
+
+    ' NOTE: We are NOT calling tile.start() to avoid ANY Smart Pin configuration
+    ' This test only uses basic digital I/O - no Smart Pins at all
+    DEBUG("Pin Toggle Test - NO Smart Pin modes configured")
+    DEBUG("Pin Group: P8-P15 (P8=CS, P9=CCLK, P10=MISO, P11=CLRb, P12=SCLK)")
+    DEBUG(" ")
+
+    DEBUG("TEST: Binary Counting Pattern - Pin Identification")
+    DEBUG("----------------------------------------------------")
+    DEBUG("Pins under test (bit position = toggle frequency):")
+    DEBUG("  P8  (CS)   - VIOLET wire - Bit 0 - FASTEST (every cycle)")
+    DEBUG("  P9  (CCLK) - WHITE wire  - Bit 1 - Every 2 cycles")
+    DEBUG("  P10 (MISO) - BLUE wire   - Bit 2 - Every 4 cycles")
+    DEBUG("  P11 (CLRb) - GRAY wire   - Bit 3 - Every 8 cycles")
+    DEBUG("  P12 (SCLK) - GREEN wire  - Bit 4 - SLOWEST (every 16 cycles)")
+    DEBUG(" ")
+    DEBUG("Counting pattern:")
+    DEBUG("  - Binary count from 0 to ", UDEC(TOGGLE_CYCLES-1))
+    DEBUG("  - ", UDEC(HOLD_TIME_MS), "ms per count")
+    DEBUG("  - Total duration: ", UDEC(TOGGLE_CYCLES * HOLD_TIME_MS / 1000), " seconds")
+    DEBUG(" ")
+    DEBUG("Connect logic analyzer to P8-P12 to identify pin mapping")
+    DEBUG(" ")
+    DEBUG("Starting test in 3 seconds...")
+    WAITMS(3000)
+    DEBUG(" ")
+    DEBUG("TEST RUNNING - Monitor logic analyzer...")
+    DEBUG(" ")
+
+    ' Run the pin toggle test
+    tile.test_pin_toggle(TOGGLE_CYCLES)
+
+    DEBUG(" ")
+    DEBUG("** Test complete!")
+    DEBUG(" ")
+    DEBUG("VERIFY ON LOGIC ANALYZER:")
+    DEBUG("  - Do you see 5 different toggle patterns?")
+    DEBUG("  - Fastest toggling = P8 (CS/VIOLET)")
+    DEBUG("  - Slowest toggling = P12 (SCLK/GREEN)")
+    DEBUG("  - Binary counting pattern visible (0 to ", UDEC(TOGGLE_CYCLES-1), ")?")
+    DEBUG("  - Each state held for ", UDEC(HOLD_TIME_MS), "ms?")
+    DEBUG("  - Final state: CS=HIGH, others=LOW?")
+    DEBUG(" ")
+    DEBUG("Pin identification guide:")
+    DEBUG("  - Bit 0 (toggles every count)  = P8  (CS/VIOLET)")
+    DEBUG("  - Bit 1 (toggles every 2)      = P9  (CCLK/WHITE)")
+    DEBUG("  - Bit 2 (toggles every 4)      = P10 (MISO/BLUE)")
+    DEBUG("  - Bit 3 (toggles every 8)      = P11 (CLRb/GRAY)")
+    DEBUG("  - Bit 4 (toggles every 16)     = P12 (SCLK/GREEN)")
+    DEBUG(" ")
+    DEBUG("If any channel is missing:")
+    DEBUG("  - Check wire connections")
+    DEBUG("  - Verify pin assignments match hardware")
+    DEBUG("  - Check for shorts or open circuits")
+    DEBUG(" ")
+    DEBUG("================================================================================")
+    DEBUG("PIN TOGGLE TEST COMPLETE")
+    DEBUG("================================================================================")
+    DEBUG(" ")
+    DEBUG("END_SESSION")  ' Marker for automated test script
+    DEBUG(" ")
+    DEBUG("Pins stable - program will run forever to maintain pin states")
+    DEBUG(" ")
+
+    ' CRITICAL: Keep program running forever to maintain stable pin states
+    ' Without this loop, program ends and P2 behavior is undefined
+    repeat
+        WAITMS(1000)  ' Infinite loop - keeps pins stable
+
+CON { license }
+{{
+
+ -------------------------------------------------------------------------------------------------
+  MIT License
+
+  Copyright (c) 2025 Iron Sheep Productions, LLC
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+ =================================================================================================
+}}

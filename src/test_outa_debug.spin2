@@ -1,0 +1,63 @@
+'' =================================================================================================
+''   File....... test_outa_debug.spin2
+''   Purpose.... Debug OUTA register operations for P8-P12
+''   Author..... Stephen M Moraco
+''   Started.... Jan 2025
+'' =================================================================================================
+
+CON
+    _clkfreq = 200_000_000
+
+    PIN_BASE = 8
+    PIN_MASK = %11111 << PIN_BASE   ' Bits 8-12
+
+PUB main() | count, test_value, shifted_value
+
+    debug("================================================================================")
+    debug("OUTA Register Debug Test")
+    debug("================================================================================")
+    debug(" ")
+    debug("PIN_BASE = ", udec(PIN_BASE))
+    debug("PIN_MASK = %", ubin_long(PIN_MASK))
+    debug(" ")
+
+    ' Disable smart pin modes
+    repeat count from 0 to 4
+        pinf(PIN_BASE + count)
+
+    waitms(10)
+
+    ' Set direction to output
+    DIRA |= PIN_MASK
+
+    ' Test 1: Set all low
+    debug("TEST 1: Setting all pins LOW")
+    OUTA &= !PIN_MASK
+    debug("  OUTA = %", ubin_long(OUTA))
+    waitms(500)
+
+    ' Test 2: Set all high
+    debug("TEST 2: Setting all pins HIGH")
+    OUTA |= PIN_MASK
+    debug("  OUTA = %", ubin_long(OUTA))
+    waitms(500)
+
+    ' Test 3: Test individual count values
+    debug(" ")
+    debug("TEST 3: Writing count values 0-7")
+    repeat count from 0 to 7
+        test_value := count & $1F
+        shifted_value := test_value << PIN_BASE
+
+        debug("  count=", udec(count), " test_value=", udec(test_value), " shifted=%", ubin_long(shifted_value))
+
+        ' Write using the same method as test_pins_mask
+        OUTA := (OUTA & !PIN_MASK) | shifted_value
+
+        debug("    OUTA after write = %", ubin_long(OUTA))
+        debug("    Expected P8=", udec(test_value & 1), " P9=", udec((test_value >> 1) & 1), " P10=", udec((test_value >> 2) & 1))
+
+        waitms(500)
+
+    debug(" ")
+    debug("END_SESSION")

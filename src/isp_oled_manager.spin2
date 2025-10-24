@@ -8,7 +8,7 @@
 
 CON
   ' Test mode configuration
-  TEST_MODE   = true      ' true = show test pattern, false = process FIFO
+  TEST_MODE   = false     ' true = show test pattern, false = process FIFO
 
   ' OLED display dimensions
   OLED_WIDTH  = 128
@@ -23,6 +23,14 @@ CON
   MODE_FULL_UPDATE = 0
   MODE_DIFFERENTIAL = 1
 
+  ' FIFO IDs (must match isp_frame_fifo_manager)
+  FIFO_OLED   = 2
+
+  ' Color mapping ranges
+  MIN_FIELD   = 0         ' Minimum field value
+  MAX_FIELD   = 4095      ' Maximum field value (12-bit from sensor)
+  MID_FIELD   = 2048      ' Neutral field value (12-bit midpoint)
+
 OBJ
   fifo : "isp_frame_fifo_manager"
   oled : "isp_oled_driver"
@@ -31,22 +39,31 @@ VAR
   long  cog_id
   long  frame_count
   long  update_mode
+  long  base_pin
   word  last_frame[64]    ' Previous frame for differential updates
   byte  frame_buffer[OLED_WIDTH * OLED_HEIGHT * 2]  ' OLED display buffer (RGB565)
 
 PUB null()
   '' Not a top-level object
 
-PUB start(base_pin) : ok
+PUB start(oled_base_pin) : ok
   '' Start the OLED manager
-  '' @param base_pin - base pin for OLED SPI interface
+  '' @param oled_base_pin - base pin for OLED SPI interface
   '' @returns cog_id if successful, -1 if failed
 
+  debug("OLED Manager: Starting...", 13, 10)
   stop()
 
+  ' Save pin configuration
+  base_pin := oled_base_pin
+
   ' Initialize OLED driver
+  debug("OLED Manager: Calling driver start()...", 13, 10)
   if not oled.start(base_pin)
+    debug("OLED Manager: ERROR - Driver start() failed!", 13, 10)
     return -1
+
+  debug("OLED Manager: Driver initialized successfully", 13, 10)
 
   ' Clear last frame buffer
   wordfill(@last_frame, 0, 64)
@@ -55,8 +72,14 @@ PUB start(base_pin) : ok
   frame_count := 0
   update_mode := MODE_FULL_UPDATE
 
+  debug("OLED Manager: Starting display COG...", 13, 10)
   ' Start display COG
   cog_id := cogspin(NEWCOG, oled_loop(), @frame_count)
+
+  if cog_id < 0
+    debug("OLED Manager: ERROR - Failed to start COG!", 13, 10)
+  else
+    debug("OLED Manager: COG ", udec(cog_id), " started successfully", 13, 10)
 
   return cog_id
 
@@ -83,21 +106,28 @@ PUB show_test_pattern() | row, col, sensorVal, pattern
   '' Display a test pattern directly (bypasses FIFO)
   '' Useful for initial testing without full pipeline
 
-  ' Create a checkerboard pattern with gradient
+  debug("OLED Test Pattern: Building checkerboard pattern...", 13, 10)
+
+  ' Create a checkerboard pattern with gradient (12-bit values)
   repeat row from 0 to 7
     repeat col from 0 to 7
       ' Create alternating pattern with gradient
       if (row + col) & 1
-        pattern := (row * 8192) + (col * 4096)  ' Diagonal gradient
+        pattern := (row * 512) + (col * 256)  ' Diagonal gradient (12-bit)
       else
-        pattern := 65535 - ((row * 8192) + (col * 4096))  ' Inverse gradient
+        pattern := 4095 - ((row * 512) + (col * 256))  ' Inverse gradient (12-bit)
 
       ' Build display buffer with test pattern
       build_test_cell(row, col, pattern)
 
+  debug("OLED Test Pattern: Pattern built, clearing display...", 13, 10)
   ' Send to OLED
   oled.clear()
+
+  debug("OLED Test Pattern: Sending bitmap (", udec(OLED_WIDTH * OLED_HEIGHT * 2), " bytes)...", 13, 10)
   oled.draw_bitmap(0, 0, OLED_WIDTH, OLED_HEIGHT, @frame_buffer)
+
+  debug("OLED Test Pattern: Display complete!", 13, 10)
 
 PRI build_test_cell(row, col, value) | color, x, y, pixelIdx
   '' Build a single cell in the frame buffer for test pattern
@@ -117,21 +147,27 @@ PRI build_test_cell(row, col, value) | color, x, y, pixelIdx
 PRI oled_loop() | framePtr, row, col, sensorVal, color, idx, changed
   '' Main OLED display loop running in dedicated COG
 
+  debug("OLED Loop: COG started, TEST_MODE=", udec(TEST_MODE), 13, 10)
+
   if TEST_MODE
     ' Test pattern mode - display once and idle
+    debug("OLED Loop: Displaying test pattern...", 13, 10)
     show_test_pattern()
+    debug("OLED Loop: Entering idle loop (test pattern should be visible)", 13, 10)
     repeat
       waitms(1000)  ' Just keep COG alive
   else
     ' Normal operation - process FIFO
+    debug("OLED Loop: FIFO processing mode active", 13, 10)
+
     ' Clear display initially
     oled.clear()
 
     repeat
-      ' Get frame from OLED FIFO
-      framePtr := fifo.dequeue(fifo.FIFO_OLED)
+      ' Dequeue frame from OLED FIFO (blocking)
+      framePtr := fifo.dequeue(FIFO_OLED)
 
-      if framePtr
+      if framePtr <> 0
         ' Check if frame has changed (for differential mode)
         changed := false
         if update_mode == MODE_DIFFERENTIAL
@@ -139,6 +175,15 @@ PRI oled_loop() | framePtr, row, col, sensorVal, color, idx, changed
             if word[framePtr][idx] <> last_frame[idx]
               changed := true
               quit
+
+        ' Increment frame counter
+        frame_count++
+
+        ' Debug output every 60 frames (~1 second at 60 fps)
+        if (frame_count // 60) == 0
+          debug("OLED Manager: Processed ", udec(frame_count), " frames", 13, 10)
+          debug("  Corner values: TL=", udec(word[framePtr][0]), " TR=", udec(word[framePtr][7]), \
+                " BL=", udec(word[framePtr][56]), " BR=", udec(word[framePtr][63]), 13, 10)
 
         ' Update display if changed or in full update mode
         if changed or (update_mode == MODE_FULL_UPDATE)
@@ -153,9 +198,10 @@ PRI oled_loop() | framePtr, row, col, sensorVal, color, idx, changed
 
         ' Release frame back to pool
         fifo.releaseFrame(framePtr)
-
-        ' Update frame counter
-        frame_count++
+      else
+        ' FIFO timeout - shouldn't happen in normal operation
+        debug("OLED Manager: FIFO dequeue timeout!", 13, 10)
+        waitms(10)
 
 PRI build_display_buffer(framePtr) | row, col, sensorIdx, sensorVal, color, x, y, pixelIdx
   '' Convert sensor frame to OLED display buffer
@@ -181,25 +227,27 @@ PRI build_display_buffer(framePtr) | row, col, sensorIdx, sensorVal, color, x, y
 
 PRI field_to_rgb565(fieldVal) : color | r, g, b
   '' Convert magnetic field value to RGB565 color
-  '' @param fieldVal - 16-bit sensor reading
+  '' @param fieldVal - 12-bit sensor reading (0-4095)
   '' @returns RGB565 color value
 
-  ' Simple color mapping: Blue (low) -> Green (mid) -> Red (high)
-  if fieldVal < 16384  ' Lower quarter - blue dominant
+  ' Color mapping for 12-bit range: Blue (low) -> Green (mid) -> Red (high)
+  ' Thresholds: 1024 (1/4), 2048 (mid), 3072 (3/4)
+
+  if fieldVal < 1024  ' Lower quarter - blue dominant
     b := 31
-    g := fieldVal >> 9  ' 0-31 range
+    g := fieldVal >> 4  ' 0-31 range (divide by 32)
     r := 0
-  elseif fieldVal < 32768  ' Mid-low - cyan to green
-    b := 31 - ((fieldVal - 16384) >> 9)
+  elseif fieldVal < 2048  ' Mid-low - cyan to green
+    b := 31 - ((fieldVal - 1024) >> 4)
     g := 31
     r := 0
-  elseif fieldVal < 49152  ' Mid-high - green to yellow
+  elseif fieldVal < 3072  ' Mid-high - green to yellow
     b := 0
     g := 31
-    r := (fieldVal - 32768) >> 10  ' 0-31 range
+    r := (fieldVal - 2048) >> 5  ' 0-31 range (divide by 32)
   else  ' Upper quarter - red dominant
     b := 0
-    g := 31 - ((fieldVal - 49152) >> 9)
+    g := 31 - ((fieldVal - 3072) >> 4)
     r := 31
 
   ' Convert to RGB565 format: RRRRRGGG GGGBBBBB

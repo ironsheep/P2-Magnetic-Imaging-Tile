@@ -1,0 +1,220 @@
+'' =================================================================================================
+''   File....... test_fifo_pipeline.spin2
+''   Purpose.... Test sensor → decimator → HDMI FIFO pipeline
+''   Author..... Stephen M Moraco
+''               -- Copyright (c) 2025 Iron Sheep Productions, LLC
+''   E-mail..... stephen@ironsheep.biz
+''   Started.... Jan 2025
+''   Updated.... Jan 2025
+''
+'' =================================================================================================
+
+CON { timing constants }
+
+    _CLKFREQ = 200_000_000          ' System clock frequency
+
+CON { test constants }
+
+    TEST_DURATION_SEC = 10          ' Run test for 10 seconds
+    STATS_INTERVAL_MS = 1000        ' Print stats every 1 second
+
+OBJ
+
+    fifo     : "isp_frame_fifo_manager"    ' Multi-FIFO frame pool manager
+    sensor   : "isp_tile_sensor"           ' Tile sensor driver
+    decimator: "isp_frame_decimator"       ' Frame rate decimator
+
+VAR
+
+    LONG    sensor_stats[5]         ' Sensor statistics array
+    LONG    decimator_stats[5]      ' Decimator statistics array
+
+PUB main() | elapsed_sec, last_sensor_frames, last_decimator_frames, sensor_fps, decimator_fps
+
+    debug("================================================================================")
+    debug("FIFO Pipeline Test: Sensor -> Decimator -> HDMI FIFO")
+    debug("================================================================================")
+    debug(" ")
+
+    ' Initialize FIFO manager
+    debug("Initializing FIFO manager...")
+    if fifo.start()
+        debug("  FIFO manager started successfully")
+    else
+        debug("  ERROR: FIFO manager failed to start")
+        return
+
+    WAITMS(100)
+
+    ' Start tile sensor
+    debug("Starting tile sensor (375 fps target)...")
+    if sensor.start(@fifo)
+        debug("  Tile sensor started successfully")
+    else
+        debug("  ERROR: Tile sensor failed to start")
+        fifo.stop()
+        return
+
+    WAITMS(100)
+
+    ' Start decimator
+    debug("Starting decimator (6:1 decimation, 60 fps output)...")
+    if decimator.start(@fifo)
+        debug("  Decimator started successfully")
+    else
+        debug("  ERROR: Decimator failed to start")
+        sensor.stop()
+        fifo.stop()
+        return
+
+    WAITMS(500)
+
+    ' Set sensor to LIVE mode
+    debug(" ")
+    debug("Enabling sensor acquisition (MODE_LIVE)...")
+    sensor.set_acquisition_mode(1)  ' MODE_LIVE = 1
+
+    ' Set decimator to HDMI only mode
+    debug("Enabling decimator (MODE_HDMI_ONLY)...")
+    decimator.set_mode(1)           ' MODE_HDMI_ONLY = 1
+
+    debug(" ")
+    debug("Pipeline active - monitoring for ", udec(TEST_DURATION_SEC), " seconds...")
+    debug("--------------------------------------------------------------------------------")
+    debug(" ")
+
+    ' Initialize frame counters for FPS calculation
+    last_sensor_frames := 0
+    last_decimator_frames := 0
+
+    ' Run test for specified duration
+    elapsed_sec := 0
+    repeat while elapsed_sec < TEST_DURATION_SEC
+
+        ' Wait 1 second
+        WAITMS(STATS_INTERVAL_MS)
+        elapsed_sec++
+
+        ' Get sensor statistics
+        sensor.get_performance_stats(@sensor_stats)
+
+        ' Get decimator statistics
+        decimator.get_stats(@decimator_stats)
+
+        ' Calculate FPS (frames processed in last second)
+        sensor_fps := sensor_stats[0] - last_sensor_frames
+        decimator_fps := decimator_stats[2] - last_decimator_frames  ' HDMI output count
+
+        ' Update last frame counts
+        last_sensor_frames := sensor_stats[0]
+        last_decimator_frames := decimator_stats[2]
+
+        ' Display statistics
+        debug("Time: ", udec(elapsed_sec), "s")
+        debug("  Sensor:")
+        debug("    Total frames:  ", udec(sensor_stats[0]))
+        debug("    Actual FPS:    ", udec(sensor_fps), " fps")
+        debug("    Errors:        ", udec(sensor_stats[1]))
+        debug(" ")
+        debug("  Decimator:")
+        debug("    Processed:     ", udec(decimator_stats[0]))
+        debug("    Dropped:       ", udec(decimator_stats[1]))
+        debug("    HDMI output:   ", udec(decimator_stats[2]))
+        debug("    Output FPS:    ", udec(decimator_fps), " fps")
+        debug("    Decimation:    ", udec(decimator_stats[1] * 100 / (decimator_stats[0] + 1)), "%")
+        debug(" ")
+        debug("  FIFO Depths:")
+        debug("    Sensor FIFO:   ", udec(fifo.getQueueDepth(0)), " frames")
+        debug("    HDMI FIFO:     ", udec(fifo.getQueueDepth(1)), " frames")
+        debug("    Free frames:   ", udec(fifo.getFreeFrames()), " / 32")
+        debug("--------------------------------------------------------------------------------")
+
+    debug(" ")
+    debug("================================================================================")
+    debug("TEST COMPLETE - Final Statistics")
+    debug("================================================================================")
+    debug(" ")
+
+    ' Get final statistics
+    sensor.get_performance_stats(@sensor_stats)
+    decimator.get_stats(@decimator_stats)
+
+    ' Display final stats
+    debug("Sensor Performance:")
+    debug("  Total frames captured: ", udec(sensor_stats[0]))
+    debug("  Average frame rate:    ", udec(sensor_stats[0] / TEST_DURATION_SEC), " fps (target: 375 fps)")
+    debug("  Total errors:          ", udec(sensor_stats[1]))
+    debug("  Min frame time:        ", udec(sensor_stats[3] / 1000), " us")
+    debug("  Max frame time:        ", udec(sensor_stats[4] / 1000), " us")
+    debug(" ")
+
+    debug("Decimator Performance:")
+    debug("  Total processed:       ", udec(decimator_stats[0]))
+    debug("  Total dropped:         ", udec(decimator_stats[1]))
+    debug("  HDMI frames output:    ", udec(decimator_stats[2]))
+    debug("  Average output rate:   ", udec(decimator_stats[2] / TEST_DURATION_SEC), " fps (target: 60 fps)")
+    debug("  Decimation ratio:      ", udec(decimator_stats[0] / (decimator_stats[2] + 1)), ":1 (target: 6:1)")
+    debug(" ")
+
+    ' Test validation
+    debug("Test Validation:")
+    if sensor_stats[0] > (TEST_DURATION_SEC * 300)  ' At least 300 fps
+        debug("  PASS: Sensor frame rate >= 300 fps")
+    else
+        debug("  FAIL: Sensor frame rate < 300 fps")
+
+    if decimator_stats[2] > (TEST_DURATION_SEC * 50)  ' At least 50 fps
+        debug("  PASS: Decimator output >= 50 fps")
+    else
+        debug("  FAIL: Decimator output < 50 fps")
+
+    if sensor_stats[1] == 0
+        debug("  PASS: No sensor errors detected")
+    else
+        debug("  WARN: ", udec(sensor_stats[1]), " sensor errors detected")
+
+    debug(" ")
+    debug("================================================================================")
+    debug(" ")
+
+    ' Shutdown subsystems
+    debug("Shutting down pipeline...")
+    decimator.set_mode(0)           ' Stop decimator
+    sensor.set_acquisition_mode(0)  ' Stop sensor
+    WAITMS(100)
+
+    decimator.stop()
+    sensor.stop()
+    fifo.stop()
+
+    debug("Pipeline stopped cleanly")
+    debug(" ")
+    debug("END_SESSION")
+
+CON { license }
+{{
+
+ -------------------------------------------------------------------------------------------------
+  MIT License
+
+  Copyright (c) 2025 Iron Sheep Productions, LLC
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+ =================================================================================================
+}}

@@ -1,0 +1,49 @@
+'' =================================================================================================
+''   File....... test_pin_toggle_simple.spin2
+''   Purpose.... Simple continuous toggle of P8-P12
+''   Author..... Stephen M Moraco
+''   Started.... Jan 2025
+'' =================================================================================================
+
+CON
+    _clkfreq = 200_000_000
+
+    PIN_BASE = 8
+    PIN_MASK = %11111 << PIN_BASE   ' P8-P12
+
+PUB main() | i
+
+    debug("================================================================================")
+    debug("Simple Pin Toggle Test - P8-P12")
+    debug("================================================================================")
+    debug(" ")
+
+    ' Disable smart pin modes on all 5 pins (do this ONCE)
+    repeat i from 0 to 4
+        pinf(PIN_BASE + i)
+
+    'waitms(10)
+
+    ' Set all pins as OUTPUTS using DIRA (do this ONCE)
+    DIRA |= PIN_MASK
+
+    ' Set all pins low initially
+    OUTA &= !PIN_MASK
+
+    waitms(100)
+
+    debug("Toggling P8-P12 continuously...")
+    debug("  P8  = CS")
+    debug("  P9  = CCLK")
+    debug("  P10 = MISO")
+    debug("  P11 = CLRb")
+    debug("  P12 = SCLK")
+    debug(" ")
+    debug("Toggling at ~1kHz (500us per toggle)")
+    debug(" ")
+
+    ' Just toggle forever - do NOT reset direction
+    repeat
+        ' Toggle all 5 pins at once
+        OUTA ^= PIN_MASK
+        waitus(500)

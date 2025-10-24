@@ -1,0 +1,74 @@
+'' =================================================================================================
+''   File....... test_ref_hdmi.spin2
+''   Purpose.... Test reference HDMI driver on pin 0
+''   Author..... Stephen M Moraco
+''               -- Copyright (c) 2025 Iron Sheep Productions, LLC
+''   E-mail..... stephen@ironsheep.biz
+''   Started.... Jan 2025
+''   Updated.... Jan 2025
+''
+'' =================================================================================================
+
+CON { timing constants }
+
+    _CLKFREQ = 200_000_000          ' System clock frequency
+
+CON { hardware pin assignments }
+
+    HDMI_BASE_PIN = 0               ' HDMI on P0-P7 (pin group 0)
+
+OBJ
+
+    psram : "PSRAM_driver_RJA_Platform_1b"
+    hdmi  : "isp_hdmi_640x480_24bpp"       ' Use NEW timings (proper VGA 640x480 @ 60Hz)
+
+PUB main()
+
+    debug("================================================================================")
+    debug("Reference HDMI Driver Test")
+    debug("================================================================================")
+    debug(" ")
+    debug("Starting PSRAM...")
+
+    psram.start()
+
+    debug("Starting HDMI on pin ", udec(HDMI_BASE_PIN), "...")
+    hdmi.start(HDMI_BASE_PIN, psram.pointer(), 0)
+
+    debug("HDMI reference driver initialized!")
+    debug("Test pattern should be visible on HDMI display")
+    debug(" ")
+    debug("System running continuously...")
+    debug(" ")
+
+    ' Keep system running
+    repeat
+        waitms(1000)
+
+CON { license }
+{{
+
+ -------------------------------------------------------------------------------------------------
+  MIT License
+
+  Copyright (c) 2025 Iron Sheep Productions, LLC
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+ =================================================================================================
+}}

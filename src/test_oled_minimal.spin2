@@ -1,0 +1,39 @@
+'' test_oled_minimal.spin2 - Find optimal OLED frame rate
+'' Tests different delays between frames to find display sweet spot
+
+CON
+  _clkfreq = 335_000_000  ' Run at max speed to minimize overhead
+
+OBJ
+  oled : "isp_oled_driver"
+
+VAR
+  long sensor_values[64]
+
+PUB main() | idx, start_time, elapsed_ms
+
+  debug("OLED Frame Rate Test", 13, 10)
+
+  if oled.start(0)
+    debug("OLED initialized at 20 MHz SPI", 13, 10)
+  else
+    debug("OLED init failed!", 13, 10)
+    return
+
+  ' Create gradient pattern
+  repeat idx from 0 to 63
+    sensor_values[idx] := idx * 16
+
+  debug(13, 10, "Frame rate test (no debug in loop)...", 13, 10)
+
+  ' Continuous animation loop WITHOUT debug output
+  repeat
+    ' Update all 64 values for smooth color cycling
+    repeat idx from 0 to 63
+      sensor_values[idx] := (sensor_values[idx] + 50) & $3FF
+
+    ' Draw frame with optimized fast method
+    oled.draw_grid_8x8_fast(@sensor_values, 0, 1008)
+
+    ' Wait 16ms for 60 fps (display refresh rate)
+    waitms(16)

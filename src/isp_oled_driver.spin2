@@ -1,5 +1,5 @@
-'' isp_oled_driver.spin2 - Low-level OLED Display Driver
-'' Hardware interface for 128x128 SPI OLED display
+'' isp_oled_driver.spin2 - Low-level OLED Display Driver (Smart Pin SPI)
+'' Hardware interface for 128x128 SPI OLED display using P2 Smart Pins
 ''
 '' Pin connections (Pin Group 16, non-consecutive):
 ''   P16: MOSI - SPI Data
@@ -7,82 +7,139 @@
 ''   P20: CS   - Chip Select
 ''   P22: DC   - Data/Command
 ''   P23: RST  - Reset
-''   P21: BLK  - Backlight (optional, between CS and DC)
 
 CON
-  ' Actual pin numbers (non-consecutive in group 16)
-  PIN_MOSI = 16
-  PIN_SCLK = 18
-  PIN_CS   = 20
-  PIN_DC   = 22
-  PIN_RST  = 23
-  PIN_BLK  = 21
+  ' Pin numbers from README
+  PIN_MOSI = 16  ' P16 - DIN (MOSI) - Smart Pin SYNC_TX
+  PIN_SCLK = 18  ' P18 - CLK (SCLK) - Smart Pin PULSE
+  PIN_CS   = 20  ' P20 - CS - GPIO
+  PIN_DC   = 22  ' P22 - DC - GPIO
+  PIN_RST  = 23  ' P23 - RST - GPIO
 
   ' SPI timing
-  SPI_FREQ = 10_000_000   ' 10 MHz SPI clock
+  SPI_FREQ = 20_000_000   ' 20 MHz SPI clock (maximum per datasheet)
+
+  ' Smart Pin modes (use built-in Spin2 constants)
+  ' P_PULSE = pulse/cycle output for clock
+  ' P_SYNC_TX = synchronous serial transmit for MOSI
+  ' P_OE = output enable
 
   ' Display dimensions
   WIDTH  = 128
   HEIGHT = 128
 
-  ' Common OLED commands
-  CMD_DISPLAY_OFF     = $AE
-  CMD_DISPLAY_ON      = $AF
-  CMD_SET_REMAP       = $A0
-  CMD_START_LINE      = $A1
-  CMD_DISPLAY_OFFSET  = $A2
-  CMD_NORMAL_DISPLAY  = $A4
-  CMD_SET_MULTIPLEX   = $A8
-  CMD_SET_MASTER      = $AD
-  CMD_POWER_MODE      = $B0
-  CMD_PRECHARGE       = $B1
-  CMD_CLOCKDIV        = $B3
-  CMD_PRECHARGEA      = $8A
-  CMD_PRECHARGEB      = $8B
-  CMD_PRECHARGEC      = $8C
-  CMD_PRECHARGELEVEL  = $BB
-  CMD_VCOMH           = $BE
-  CMD_MASTER_CURRENT  = $87
-  CMD_COLUMN_ADDR     = $15
-  CMD_ROW_ADDR        = $75
-  CMD_WRITE_RAM       = $5C
+  ' Mailbox indices for PASM2 streaming COG
+  MB_LUT_PTR    = 0  ' Bit-reverse lookup table pointer
+  MB_FRAME_PTR  = 1  ' Frame data pointer
+  MB_BYTE_COUNT = 2  ' Number of bytes to stream
+  MB_GO_FLAG    = 3  ' Start/done signal (1=go, 0=done)
+  MB_STATUS     = 4  ' Reserved for status/error codes
+
+  ' SSD1351 OLED commands (from datasheet Table 9-1)
+  CMD_SET_COLUMN      = $15  ' Set Column Address
+  CMD_SET_ROW         = $75  ' Set Row Address
+  CMD_WRITE_RAM       = $5C  ' Write RAM Command
+  CMD_READ_RAM        = $5D  ' Read RAM Command
+  CMD_SET_REMAP       = $A0  ' Set Re-map & Color Depth
+  CMD_START_LINE      = $A1  ' Set Display Start Line
+  CMD_DISPLAY_OFFSET  = $A2  ' Set Display Offset
+  CMD_DISPLAY_ALLOFF  = $A4  ' Entire Display OFF
+  CMD_DISPLAY_ALLON   = $A5  ' Entire Display ON
+  CMD_NORMAL_DISPLAY  = $A6  ' Normal Display
+  CMD_INVERSE_DISPLAY = $A7  ' Inverse Display
+  CMD_FUNCTION_SEL    = $AB  ' Function Selection
+  CMD_DISPLAY_OFF     = $AE  ' Sleep Mode ON (Display OFF)
+  CMD_DISPLAY_ON      = $AF  ' Sleep Mode OFF (Display ON)
+  CMD_PRECHARGE       = $B1  ' Set Phase Length
+  CMD_ENHANCEDISPLAY  = $B2  ' Display Enhancement
+  CMD_CLOCKDIV        = $B3  ' Set Front Clock Divider
+  CMD_SET_VSL         = $B4  ' Set Segment Low Voltage
+  CMD_SET_GPIO        = $B5  ' Set GPIO
+  CMD_PRECHARGE2      = $B6  ' Set Second Precharge Period
+  CMD_GRAYSCALE       = $B8  ' Look Up Table for Gray Scale
+  CMD_LINEAR_LUT      = $B9  ' Use Built-in Linear LUT
+  CMD_PRECHARGE_V     = $BB  ' Set Pre-charge Voltage
+  CMD_VCOMH           = $BE  ' Set VCOMH Voltage
+  CMD_CONTRAST        = $C1  ' Set Contrast Current
+  CMD_MASTER_CONTRAST = $C7  ' Master Contrast Current Control
+  CMD_MUX_RATIO       = $CA  ' Set MUX Ratio
+  CMD_COMMAND_LOCK    = $FD  ' Set Command Lock
 
 VAR
   long  initialized
+  long  bitrev_lut[256]  ' Lookup table for bit-reversed bytes
+  long  cog_id           ' COG ID for streaming engine (-1 = not running)
+  long  mailbox[5]       ' [0]=lut_ptr, [1]=frame_ptr, [2]=byte_count, [3]=go_flag, [4]=status
+  byte  frame_buffer[WIDTH * HEIGHT * 2]  ' Full frame buffer for PASM2 streaming
 
 PUB null()
   '' Not a top-level object
 
-PUB start(pin_base) : ok
-  '' Initialize the OLED display
+PUB start(pin_base) : ok | clk_period, i, temp
+  '' Initialize the OLED display using Smart Pin SPI
   '' @param pin_base - ignored, pins are fixed at P16-P23
   '' @returns TRUE if successful
 
-  ' Configure pins (using fixed pin numbers)
-  pinlow(PIN_CS)
-  pinlow(PIN_SCLK)
-  pinlow(PIN_MOSI)
-  pinlow(PIN_DC)
-  pinhigh(PIN_RST)
+  debug("OLED Driver: Starting initialization (SMART PIN MODE)...", 13, 10)
+  debug("  Pin assignments: MOSI=P", udec(PIN_MOSI), " SCLK=P", udec(PIN_SCLK))
+  debug(" CS=P", udec(PIN_CS), " DC=P", udec(PIN_DC), " RST=P", udec(PIN_RST), 13, 10)
 
-  ' Set pin directions
-  pinstart(PIN_CS, P_OE, 0, 0)
-  pinstart(PIN_SCLK, P_OE, 0, 0)
-  pinstart(PIN_MOSI, P_OE, 0, 0)
-  pinstart(PIN_DC, P_OE, 0, 0)
-  pinstart(PIN_RST, P_OE, 0, 0)
+  ' Initialize COG management
+  cog_id := -1
+  mailbox[MB_LUT_PTR]    := @bitrev_lut
+  mailbox[MB_FRAME_PTR]  := 0
+  mailbox[MB_BYTE_COUNT] := 0
+  mailbox[MB_GO_FLAG]    := 0
+  mailbox[MB_STATUS]     := 0
 
-  ' Optional backlight control
-  pinhigh(PIN_BLK)
-  pinstart(PIN_BLK, P_OE, 0, 0)
+  ' Build bit-reverse lookup table for fast SPI transmission
+  debug("  Building bit-reverse LUT...", 13, 10)
+  repeat i from 0 to 255
+    temp := i << 24
+    temp rev= 31
+    bitrev_lut[i] := temp
+
+  ' Configure GPIO pins (CS, DC, RST)
+  pinhigh(PIN_CS)    ' CS high (deselected)
+  pinlow(PIN_DC)     ' DC low (default to command mode)
+  pinhigh(PIN_RST)   ' RST high (not in reset)
+
+  ' Calculate clock period for desired SPI frequency
+  ' For 20MHz target: clkfreq / SPI_FREQ = 250M / 20M = 12.5 ticks
+  clk_period := 2 #> (clkfreq / SPI_FREQ) <# $FFFF
+
+  debug("  Clock calc: clkfreq=", udec(clkfreq), " SPI_FREQ=", udec(SPI_FREQ))
+  debug(" clk_period=", udec(clk_period), 13, 10)
+
+  ' Configure SCLK as pulse mode for clock generation
+  ' ORIGINAL formula (works but gives 208kHz - need to debug why!)
+  pinstart(PIN_SCLK, P_OE | P_PULSE, clk_period | (clk_period >> 1) << 16, 0)
+
+  debug("  SCLK config: X=", uhex_long(clk_period | (clk_period >> 1) << 16), 13, 10)
+
+  ' Configure MOSI as Sync Serial TX mode (configured once, stays enabled!)
+  ' Add clock pin offset in bits 24-26: ((PIN_SCLK - PIN_MOSI) & %111) << 24
+  pinstart(PIN_MOSI, P_OE | P_SYNC_TX | ((PIN_SCLK - PIN_MOSI) & %111) << 24, %1_00000 | 7, 0)
+
+  debug("  SPI configured for Smart Pin Mode 0 at ", udec(SPI_FREQ), " Hz", 13, 10)
 
   ' Reset display
+  debug("  Performing hardware reset...", 13, 10)
   reset()
 
   ' Initialize display
+  debug("  Sending initialization sequence...", 13, 10)
   init_display()
 
+  ' Launch streaming COG
+  debug("  Starting PASM2 streaming COG...", 13, 10)
+  cog_id := cogspin(NEWCOG, stream_cog(), @mailbox)
+  if cog_id < 0
+    debug("  ERROR: Failed to start streaming COG!", 13, 10)
+    return FALSE
+
   initialized := TRUE
+  debug("OLED Driver: Initialization complete! (COG ", udec(cog_id), ")", 13, 10)
   return TRUE
 
 PUB stop()
@@ -90,89 +147,115 @@ PUB stop()
 
   if initialized
     display_off()
+    if cog_id >= 0
+      cogstop(cog_id)
+      cog_id := -1
     initialized := FALSE
 
 PUB reset()
   '' Hardware reset the display
+  '' Per datasheet: reset pulse must be at least 2us, then wait 300ms
 
   pinlow(PIN_RST)
-  waitms(10)
+  waitms(10)  ' 10ms reset pulse
   pinhigh(PIN_RST)
-  waitms(10)
+  waitms(300)  ' Wait 300ms for VCC to stabilize per datasheet
 
 PUB init_display()
-  '' Initialize OLED with configuration sequence
+  '' Initialize SSD1351 OLED with proper configuration sequence
+  '' Based on SSD1351 datasheet
 
-  ' Basic initialization sequence for SSD1351 or similar
+  debug("    Init step 1: Unlock (FD 12)", 13, 10)
+  write_cmd_data1(CMD_COMMAND_LOCK, $12)  ' Unlock basic commands
+
+  debug("    Init step 2: Unlock advanced (FD B1)", 13, 10)
+  write_cmd_data1(CMD_COMMAND_LOCK, $B1)  ' Make A2,B1,B3,BB,BE,C1 accessible
+
+  debug("    Init step 3: Display OFF", 13, 10)
   write_command(CMD_DISPLAY_OFF)
 
-  ' Set remap and display format
-  write_command(CMD_SET_REMAP)
-  write_data($74)  ' 65K color, enable split, reverse color sequence
+  debug("    Init step 4: Clock divider (B3 F1)", 13, 10)
+  write_cmd_data1(CMD_CLOCKDIV, $F1)  ' 7:4 = Oscillator Freq, 3:0 = CLK Div Ratio
 
-  ' Set display start line
-  write_command(CMD_START_LINE)
-  write_data(0)
+  debug("    Init step 5: Mux ratio (CA 7F)", 13, 10)
+  write_cmd_data1(CMD_MUX_RATIO, $7F)  ' 128 MUX
 
-  ' Set display offset
-  write_command(CMD_DISPLAY_OFFSET)
-  write_data(0)
+  debug("    Init step 6: Set remap (A0 65)", 13, 10)
+  write_cmd_data1(CMD_SET_REMAP, $65)  ' A[7:6]=01 65k, A[5]=1 COM split, A[0]=1 Column remap
 
-  ' Set GPIO
-  write_command($B5)
-  write_data($00)
+  debug("    Init step 7: Start line (A1 00)", 13, 10)
+  write_cmd_data1(CMD_START_LINE, $00)
 
-  ' Set function selection
-  write_command($AB)
-  write_data($01)
+  debug("    Init step 8: Display offset (A2 00)", 13, 10)
+  write_cmd_data1(CMD_DISPLAY_OFFSET, $00)
 
-  ' Set precharge
-  write_command(CMD_PRECHARGE)
-  write_data($32)
+  debug("    Init step 9: Set GPIO (B5 00)", 13, 10)
+  write_cmd_data1(CMD_SET_GPIO, $00)
 
-  ' Set VCOMH
-  write_command(CMD_VCOMH)
-  write_data($05)
+  debug("    Init step 10: Function select (AB 01)", 13, 10)
+  write_cmd_data1(CMD_FUNCTION_SEL, $01)  ' Enable internal VDD regulator
 
-  ' Set normal display
+  debug("    Init step 11: Precharge (B1 32)", 13, 10)
+  write_cmd_data1(CMD_PRECHARGE, $32)  ' Phase 1=5 DCLKs, Phase 2=3 DCLKs
+
+  debug("    Init step 12: VCOMH (BE 05)", 13, 10)
+  write_cmd_data1(CMD_VCOMH, $05)  ' 0.82 x VCC
+
+  debug("    Init step 13: Normal display (A6)", 13, 10)
   write_command(CMD_NORMAL_DISPLAY)
 
-  ' Set contrast
-  write_command($C1)
-  write_data($C8)
-  write_data($80)
-  write_data($C8)
+  debug("    Init step 14: Contrast (C1 C8 80 C8)", 13, 10)
+  write_cmd_data3(CMD_CONTRAST, $C8, $80, $C8)  ' Color A, B, C
 
-  ' Set master current
-  write_command(CMD_MASTER_CURRENT)
-  write_data($0F)
+  debug("    Init step 15: Master contrast (C7 0F)", 13, 10)
+  write_cmd_data1(CMD_MASTER_CONTRAST, $0F)  ' Maximum brightness
 
-  ' Set precharge speeds
-  write_command($B1)
-  write_data($32)
+  debug("    Init step 16: VSL (B4 A0 B5 55)", 13, 10)
+  write_cmd_data3(CMD_SET_VSL, $A0, $B5, $55)
 
-  ' Set clock div
-  write_command(CMD_CLOCKDIV)
-  write_data($F0)
+  debug("    Init step 17: Precharge voltage (BB 17)", 13, 10)
+  write_cmd_data1(CMD_PRECHARGE_V, $17)
 
-  ' Set multiplex
-  write_command(CMD_SET_MULTIPLEX)
-  write_data($7F)  ' 128 lines
+  debug("    Init step 18: Second precharge (B6 01)", 13, 10)
+  write_cmd_data1(CMD_PRECHARGE2, $01)
 
-  ' Turn on display
+  debug("    Init step 19: Display ON", 13, 10)
   write_command(CMD_DISPLAY_ON)
+
+  waitms(100)  ' Wait for display to stabilize
+  debug("    All 19 init steps complete!", 13, 10)
 
 PUB clear()
   '' Clear the entire display
 
+  debug("  OLED clear: Setting window and writing black pixels...", 13, 10)
   set_window(0, 0, WIDTH-1, HEIGHT-1)
 
-  write_command(CMD_WRITE_RAM)
+  write_cmd_data_start(CMD_WRITE_RAM)
 
-  ' Write black pixels (RGB565 format)
+  ' Write black pixels (RGB565 format) - CS stays low for entire write
   repeat WIDTH * HEIGHT
-    write_data($00)
-    write_data($00)
+    write_data_cont($00)
+    write_data_cont($00)
+
+  write_data_end()
+
+  debug("  OLED clear: Complete (", udec(WIDTH * HEIGHT * 2), " bytes)", 13, 10)
+
+PUB fill_screen(color)
+  '' Fill entire screen with specified color
+  '' @param color - RGB565 color value (16-bit)
+
+  set_window(0, 0, WIDTH-1, HEIGHT-1)
+
+  write_cmd_data_start(CMD_WRITE_RAM)
+
+  ' Write color pixels (RGB565 format) - CS stays low for entire write
+  repeat WIDTH * HEIGHT
+    write_data_cont(color >> 8)    ' High byte
+    write_data_cont(color & $FF)   ' Low byte
+
+  write_data_end()
 
 PUB display_on()
   '' Turn display on
@@ -189,16 +272,11 @@ PUB set_window(x1, y1, x2, y2)
   '' @param x1, y1 - top-left corner
   '' @param x2, y2 - bottom-right corner
 
-  write_command(CMD_COLUMN_ADDR)
-  write_data(x1)
-  write_data(x2)
+  write_cmd_data2(CMD_SET_COLUMN, x1, x2)
+  write_cmd_data2(CMD_SET_ROW, y1, y2)
 
-  write_command(CMD_ROW_ADDR)
-  write_data(y1)
-  write_data(y2)
-
-PUB draw_bitmap(xpos, ypos, bwidth, bheight, bitmap_ptr) | pixel_count, idx
-  '' Draw bitmap at specified position
+PUB draw_bitmap(xpos, ypos, bwidth, bheight, bitmap_ptr) | pixel_count
+  '' Draw bitmap at specified position (uses PASM2 streaming COG)
   '' @param xpos, ypos - top-left position
   '' @param bwidth, bheight - bitmap dimensions
   '' @param bitmap_ptr - pointer to RGB565 bitmap data
@@ -207,10 +285,16 @@ PUB draw_bitmap(xpos, ypos, bwidth, bheight, bitmap_ptr) | pixel_count, idx
 
   write_command(CMD_WRITE_RAM)
 
-  ' Send bitmap data
+  ' Calculate byte count
   pixel_count := bwidth * bheight
-  repeat idx from 0 to (pixel_count * 2) - 1
-    write_data(byte[bitmap_ptr][idx])
+
+  ' Queue frame for streaming via COG
+  mailbox[MB_FRAME_PTR]  := bitmap_ptr
+  mailbox[MB_BYTE_COUNT] := pixel_count * 2
+  mailbox[MB_GO_FLAG]    := 1
+
+  ' Wait for COG to complete
+  repeat until mailbox[MB_GO_FLAG] == 0
 
 PUB draw_pixel(px, py, color)
   '' Draw a single pixel
@@ -223,40 +307,317 @@ PUB draw_pixel(px, py, color)
   write_data(color >> 8)    ' High byte
   write_data(color & $FF)   ' Low byte
 
+PUB draw_rect(x, y, w, h, color)
+  '' Draw filled rectangle
+  '' @param x, y - top-left corner
+  '' @param w, h - width and height
+  '' @param color - RGB565 fill color
+
+  set_window(x, y, x + w - 1, y + h - 1)
+
+  write_cmd_data_start(CMD_WRITE_RAM)
+
+  repeat w * h
+    write_data_cont(color >> 8)
+    write_data_cont(color & $FF)
+
+  write_data_end()
+
+PUB value_to_color(value, min_val, max_val) : color | range, normalized, r, g, b
+
+  '' Map value to color gradient: Blue (min) -> Green (mid) -> Red (max)
+  '' @param value - sensor reading
+  '' @param min_val - minimum expected value
+  '' @param max_val - maximum expected value
+  '' @returns RGB565 color value
+
+  ' Clamp value to range
+  value := min_val #> value <# max_val
+  range := max_val - min_val
+
+  if range == 0
+    return $0000  ' Black if no range
+
+  ' Normalize to 0-255 range
+  normalized := ((value - min_val) * 255) / range
+
+  ' Create gradient: Blue -> Cyan -> Green -> Yellow -> Red
+  if normalized < 64
+    ' Blue to Cyan (increase green)
+    r := 0
+    g := normalized << 2
+    b := 255
+  elseif normalized < 128
+    ' Cyan to Green (decrease blue)
+    r := 0
+    g := 255
+    b := 255 - ((normalized - 64) << 2)
+  elseif normalized < 192
+    ' Green to Yellow (increase red)
+    r := (normalized - 128) << 2
+    g := 255
+    b := 0
+  else
+    ' Yellow to Red (decrease green)
+    r := 255
+    g := 255 - ((normalized - 192) << 2)
+    b := 0
+
+  ' Convert to RGB565 format
+  ' RGB565: RRRR_RGGG_GGGB_BBBB
+  color := ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
+
+PUB draw_grid_8x8(values_ptr, min_val, max_val) | row, col, cell_size, x, y, value, color
+
+  '' Draw 8x8 grid with color-mapped values
+  '' @param values_ptr - pointer to array of 64 sensor values
+  '' @param min_val - minimum value for color mapping
+  '' @param max_val - maximum value for color mapping
+
+  cell_size := WIDTH / 8  ' 128 / 8 = 16 pixels per cell
+
+  repeat row from 0 to 7
+    repeat col from 0 to 7
+      ' Calculate cell position
+      x := col * cell_size
+      y := row * cell_size
+
+      ' Get sensor value and map to color
+      value := long[values_ptr][(row * 8) + col]
+      color := value_to_color(value, min_val, max_val)
+
+      ' Draw filled cell
+      draw_rect(x, y, cell_size, cell_size, color)
+
+PUB draw_grid_8x8_fast(values_ptr, min_val, max_val) | sensor_idx, px_row, px_col, row, col, color, cell_size, colors[64], buf_idx
+
+  '' OPTIMIZED: Draw 8x8 grid with maximum frame rate using PASM2 streaming
+  '' Pre-calculates all 64 colors, builds frame buffer, streams via PASM2 COG
+  '' @param values_ptr - pointer to array of 64 sensor values
+  '' @param min_val - minimum value for color mapping
+  '' @param max_val - maximum value for color mapping
+
+  cell_size := WIDTH / 8  ' 16 pixels per cell
+
+  ' PRE-CALCULATE all 64 colors once (major optimization!)
+  repeat sensor_idx from 0 to 63
+    colors[sensor_idx] := value_to_color(long[values_ptr][sensor_idx], min_val, max_val)
+
+  ' Build frame buffer in RAM
+  buf_idx := 0
+  repeat px_row from 0 to HEIGHT-1
+    ' Calculate row once per scan line
+    row := px_row >> 4  ' Divide by 16 (same as / cell_size but faster)
+
+    repeat px_col from 0 to WIDTH-1
+      ' Determine which sensor cell this pixel belongs to
+      col := px_col >> 4  ' Divide by 16
+      sensor_idx := (row << 3) + col  ' (row * 8) + col, but faster
+
+      ' Look up pre-calculated color
+      color := colors[sensor_idx]
+
+      ' Write to buffer
+      frame_buffer[buf_idx++] := color >> 8
+      frame_buffer[buf_idx++] := color & $FF
+
+  ' Set window to full screen
+  set_window(0, 0, WIDTH-1, HEIGHT-1)
+
+  ' Send WRITE_RAM command
+  write_command(CMD_WRITE_RAM)
+
+  ' Queue frame for PASM2 streaming
+  mailbox[MB_FRAME_PTR]  := @frame_buffer
+  mailbox[MB_BYTE_COUNT] := WIDTH * HEIGHT * 2
+  mailbox[MB_GO_FLAG]    := 1
+
+  ' Wait for COG to complete
+  repeat until mailbox[MB_GO_FLAG] == 0
+
 PRI write_command(cmd)
   '' Send command byte to display
   '' @param cmd - command byte
+  '' Note: CS is raised after command, caller must use write_data for data bytes
 
-  pinlow(PIN_DC)   ' Command mode
   pinlow(PIN_CS)   ' Select display
+  pinlow(PIN_DC)   ' Command mode
   spi_write(cmd)
-  pinhigh(PIN_CS)  ' Deselect
+  pinhigh(PIN_CS)  ' Deselect after command
 
 PRI write_data(data)
   '' Send data byte to display
   '' @param data - data byte
+  '' Note: For multi-byte data, CS should stay low - use write_cmd_data_start/cont/end
+
+  pinlow(PIN_CS)   ' Select display
+  pinhigh(PIN_DC)  ' Data mode
+  spi_write(data)
+  pinhigh(PIN_CS)  ' Deselect after data
+
+PRI write_cmd_data_start(cmd)
+  '' Start command+data transaction (keeps CS low, call write_data_cont for data)
+  '' @param cmd - command byte
+
+  pinlow(PIN_CS)   ' Select display for entire transaction
+  pinlow(PIN_DC)   ' Command mode
+  spi_write(cmd)
+  pinhigh(PIN_DC)  ' Switch to data mode for subsequent bytes
+
+PRI write_data_cont(data)
+  '' Send data byte in continuous transaction (CS stays low)
+  '' @param data - data byte
+  '' Must be called after write_cmd_data_start
+
+  spi_write(data)
+
+PRI write_data_end()
+  '' End continuous data transaction
+  '' Must be called after write_cmd_data_start/write_data_cont
+
+  pinhigh(PIN_CS)  ' Deselect after transaction
+
+PRI write_cmd_data1(cmd, data1)
+  '' Send command with one data byte (keeps CS low for entire transaction)
+  '' @param cmd - command byte
+  '' @param data1 - data byte
+
+  pinlow(PIN_CS)   ' Select display for entire transaction
+
+  pinlow(PIN_DC)   ' Command mode
+  spi_write(cmd)
 
   pinhigh(PIN_DC)  ' Data mode
-  pinlow(PIN_CS)   ' Select display
-  spi_write(data)
-  pinhigh(PIN_CS)  ' Deselect
+  spi_write(data1)
 
-PRI spi_write(value) | bit
-  '' Bit-bang SPI write
+  pinhigh(PIN_CS)  ' Deselect after transaction
+
+PRI write_cmd_data2(cmd, data1, data2)
+  '' Send command with two data bytes (keeps CS low for entire transaction)
+  '' @param cmd - command byte
+  '' @param data1, data2 - data bytes
+
+  pinlow(PIN_CS)   ' Select display for entire transaction
+
+  pinlow(PIN_DC)   ' Command mode
+  spi_write(cmd)
+
+  pinhigh(PIN_DC)  ' Data mode
+  spi_write(data1)
+  spi_write(data2)
+
+  pinhigh(PIN_CS)  ' Deselect after transaction
+
+PRI write_cmd_data3(cmd, data1, data2, data3)
+  '' Send command with three data bytes (keeps CS low for entire transaction)
+  '' @param cmd - command byte
+  '' @param data1, data2, data3 - data bytes
+
+  pinlow(PIN_CS)   ' Select display for entire transaction
+
+  pinlow(PIN_DC)   ' Command mode
+  spi_write(cmd)
+
+  pinhigh(PIN_DC)  ' Data mode
+  spi_write(data1)
+  spi_write(data2)
+  spi_write(data3)
+
+  pinhigh(PIN_CS)  ' Deselect after transaction
+
+PRI spi_write(value)
+
+  '' Send byte via Smart Pin SPI (MSB first, Mode 0)
   '' @param value - byte to send
+  '' OPTIMIZED: Uses lookup table for bit-reverse, minimizes overhead
 
-  repeat bit from 7 to 0
-    pinwrite(PIN_MOSI, (value >> bit) & 1)
-    pinhigh(PIN_SCLK)
-    pinlow(PIN_SCLK)
+  ' Load pre-computed bit-reversed value
+  wypin(PIN_MOSI, bitrev_lut[value & $FF])
 
-PUB set_brightness(level)
-  '' Set display brightness/backlight
-  '' @param level - brightness level (0-255)
+  ' Trigger 8 clock pulses
+  wypin(PIN_SCLK, 8)
 
-  ' This would typically control PWM on backlight pin
-  ' For now, just on/off
-  if level > 0
-    pinhigh(PIN_BLK)
-  else
-    pinlow(PIN_BLK)
+  ' Wait for transmission complete
+  repeat until pinr(PIN_SCLK)
+
+PRI stream_cog()
+
+  '' PASM2 streaming COG - maximum performance frame output
+  '' Runs continuously, waiting for frame requests via mailbox
+  '' Achieves ~14ms per frame (vs 148ms with Spin2)
+
+  org
+    ' mailbox address is passed in ptra by cogspin()
+    mov       mbox, ptra
+
+    ' Read LUT base address from mailbox[0]
+    rdlong    lut_base, mbox
+
+.wait_for_frame
+    ' Wait for GO signal (mailbox[3] != 0)
+    mov       temp, mbox
+    add       temp, #12             ' Point to mailbox[3] (go_flag)
+    rdlong    go_flag, temp
+    tjz       go_flag, #.wait_for_frame
+
+    ' Read frame parameters
+    mov       temp, mbox
+    add       temp, #4
+    rdlong    frame_ptr, temp       ' mailbox[1] = frame data pointer
+    add       temp, #4
+    rdlong    byte_count, temp      ' mailbox[2] = byte count
+
+    ' Set DC high (data mode) and CS low (select display)
+    drvh      #PIN_DC
+    drvl      #PIN_CS
+
+.byte_loop
+    ' Read byte from frame buffer
+    rdbyte    data_byte, frame_ptr
+    add       frame_ptr, #1
+
+    ' Look up bit-reversed value from LUT
+    ' LUT is array of longs, so index = data_byte * 4
+    mov       temp, data_byte
+    shl       temp, #2              ' Multiply by 4 for long index
+    add       temp, lut_base
+    rdlong    rev_val, temp
+
+    ' Send to MOSI Smart Pin (data ready in shifter)
+    wypin     rev_val, #PIN_MOSI
+
+    ' Trigger 8 clock pulses (starts transmission)
+    wypin     #8, #PIN_SCLK
+
+    ' Wait for SCLK to complete (poll IN flag like working Spin2 code)
+.wait_sclk
+    testp     #PIN_SCLK wc      ' Check if SCLK IN flag is set
+  if_nc jmp       #.wait_sclk         ' Loop until flag is set
+    akpin     #PIN_SCLK           ' Acknowledge/clear the flag
+
+    ' Next byte
+    djnz      byte_count, #.byte_loop
+
+    ' Raise CS (deselect display)
+    drvh      #PIN_CS
+
+    ' Clear GO signal (mailbox[3] = 0) to signal completion
+    mov       temp, mbox
+    add       temp, #12             ' Point to mailbox[3]
+    mov       go_flag, #0
+    wrlong    go_flag, temp
+
+    ' Go back to waiting for next frame
+    jmp       #.wait_for_frame
+
+' COG variables
+mbox        long  0
+lut_base    long  0
+frame_ptr   long  0
+byte_count  long  0
+data_byte   long  0
+rev_val     long  0
+temp        long  0
+go_flag     long  0
+
+  end

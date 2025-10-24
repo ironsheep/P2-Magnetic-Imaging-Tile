@@ -1,0 +1,166 @@
+'************************
+'*  HDMI 960x540 24bpp  *
+'*  uses PSRAM driver   *
+'************************
+'
+CON
+
+  xpix          = 640'960
+  ypix          = 480'540
+
+  pin_cfg       = %10111_1000_0100_10_00000_0   'bit-dac pins for HDMI
+
+
+VAR
+  cog           'cog status
+
+  setup[0]      'setup set by start()
+  pin_grp       'hdmi pin group of 8
+  ram_cmd       'psram command pointer
+  ram_bas       'psram screen base (960*540 longs)
+  pix_bas       'pixel line base
+  new_flg       'new-screen flag
+
+  pix[xpix*2]   'alternating pixel lines
+
+
+PUB start(hdmi_base_pin, psram_command_ptr, psram_screen_base) : okay
+
+'' Start HDMI driver cog
+
+  stop()
+
+  pin_grp := (hdmi_base_pin & $38) addpins 7
+  ram_cmd := psram_command_ptr
+  ram_bas := psram_screen_base
+  pix_bas := @pix
+
+  return cog := coginit(newcog, @driver, @setup) + 1
+
+
+PUB set_screen_base(psram_screen_base)
+
+  ram_bas := psram_screen_base
+
+
+PUB wait_new_screen()
+
+  new_flg~
+  repeat until new_flg
+
+
+PUB stop()
+
+'' Stop HDMI driver cog
+
+  if cog
+    cogstop(cog~ - 1)
+    pinclear(pin_grp)
+'
+'
+' HDMI Driver
+'
+DAT             org
+
+driver          setq    #4-1                    'get setup
+                rdlong  setup_,ptra
+
+                wrpin   ##pin_cfg,pin_grp_      'enable HDMI pins as 75-ohm 1-bit DACs
+                drvl    pin_grp_
+
+                and     pin_grp_,#$38           'set HDMI pin base into streamer commands
+                shl     pin_grp_,#17
+                or      m_bs,pin_grp_
+                or      m_sn,pin_grp_
+                or      m_bv,pin_grp_
+                or      m_nv,pin_grp_
+                or      m_vi,pin_grp_
+
+                setxfrq ##$0CCC_CCCC+1          'set transfer frequency to 1/10th clk, +1 for initial rollover
+
+                setcmod #$100                   'enable HDMI
+
+                rdfast  #xpix*2/16,pix_bas_     'set up fast read for alternating pixel lines
+
+                cogid   pa                      'get this cog's psram command pointer
+                mul     pa,#12
+                add     ram_cmd_,pa
+
+                mov     cmd_hub,pix_bas_        'set hub address
+                mov     cmd_ram,ram_bas_        'set psram address
+                mov     cmd_len,xpix_x1         'set psram longs
+'
+'
+' Field loop
+'
+.field          callpa  #7,#blank               'top blanks
+
+                mov     pa,ypix_x1              'visible lines
+
+.line           xcont   m_sn,sync_001           'do sync
+                xcont   m_bv,sync_000           'do before-visible
+                xcont   m_vi,#0                 'do visible pixels
+                xcont   m_bs,sync_000           'do before-sync
+
+                add     cmd_hub,xpix_x4         'alternate pixel line
+                neg     xpix_x4
+                cmp     pa,#1           wz      'last line?
+        if_nz   add     cmd_ram,xpix_x1         'no, advance psram address
+        if_z    rdlong  cmd_ram,ptra[2]         'yes, reset psram address
+        if_z    wrlong  #1,ptra[4]              'set new_flg
+
+                setq    #3-1                    'write command to read pixels from psram
+                wrlong  cmd_,ram_cmd_
+
+                djnz    pa,#.line               'another visible line?
+
+                callpa  #1,#blankv              'vertical sync blanks
+
+                jmp     #.field                 'loop
+'
+'
+' Subroutines
+'
+blank           xzero   m_sn,sync_001           'blank line
+                xcont   m_bv,sync_000
+                xcont   m_nv,sync_000
+                xcont   m_bs,sync_000
+        _ret_   djnz    pa,#blank
+
+blankv          xzero   m_sn,sync_223           'blank line with vsync
+                xcont   m_bv,sync_222
+                xcont   m_nv,sync_222
+                xcont   m_bs,sync_222
+        _ret_   djnz    pa,#blankv
+'
+'
+' Initialized data
+'
+sync_000        long    %1101010100_1101010100_1101010100_10    '
+sync_001        long    %1101010100_1101010100_0010101011_10    '        hsync
+sync_222        long    %0101010100_0101010100_0101010100_10    'vsync
+sync_223        long    %0101010100_0101010100_1010101011_10    'vsync + hsync
+
+m_bs            long    $70810000 + 4                           'before sync
+m_sn            long    $70810000 + 8                           'sync
+m_bv            long    $70810000 + 4                           'before visible
+m_nv            long    $70810000 + xpix                        'invisible
+m_vi            long    $B0860000 + xpix                        'visible (rflong rgb24)
+
+xpix_x4         long    xpix * 4
+xpix_x1         long    xpix
+ypix_x1         long    ypix
+'
+'
+' Uninitialized data
+'
+setup_                          'driver setup structure
+pin_grp_        res     1
+ram_cmd_        res     1
+ram_bas_        res     1
+pix_bas_        res     1
+
+cmd_                            'command structure for psram driver
+cmd_hub         res     1
+cmd_ram         res     1
+cmd_len         res     1

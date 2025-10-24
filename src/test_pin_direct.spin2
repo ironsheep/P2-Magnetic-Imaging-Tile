@@ -1,0 +1,45 @@
+'' =================================================================================================
+''   File....... test_pin_direct.spin2
+''   Purpose.... Direct pin test - check raw MISO state
+''   Author..... Stephen M Moraco
+''   Started.... Jan 2025
+'' =================================================================================================
+
+CON
+    _clkfreq = 200_000_000
+
+    TILE_PIN_GROUP = 8
+    PIN_MISO = 2
+
+VAR
+    LONG abs_pin_miso
+
+PUB main() | i, pin_state
+
+    debug("================================================================================")
+    debug("Direct Pin Test - Raw MISO Reading")
+    debug("================================================================================")
+    debug(" ")
+
+    abs_pin_miso := TILE_PIN_GROUP + PIN_MISO
+
+    debug("MISO pin: P", udec(abs_pin_miso))
+    debug(" ")
+
+    ' Configure as simple input
+    pinf(abs_pin_miso)
+
+    debug("Reading raw pin state 20 times...")
+    debug(" ")
+
+    repeat i from 0 to 19
+        pin_state := pinr(abs_pin_miso)
+        debug("  Read ", udec_(i), ": ", udec(pin_state))
+        waitms(100)
+
+    debug(" ")
+    debug("If pin always reads 1, it's floating high or pulled high")
+    debug("If pin always reads 0, it's pulled low or grounded")
+    debug("If pin varies, there may be noise or actual signal")
+    debug(" ")
+    debug("END_SESSION")

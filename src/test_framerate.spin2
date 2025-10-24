@@ -1,0 +1,87 @@
+'' test_framerate.spin2 - Benchmark OLED Frame Rate
+'' Measures actual FPS for normal vs optimized drawing
+
+CON
+  _clkfreq = 250_000_000
+
+OBJ
+  oled : "isp_oled_driver"
+
+VAR
+  long sensor_values[64]
+  long start_time, end_time, elapsed_ms, fps
+
+PUB main() | idx, frames
+
+  debug("Frame Rate Benchmark", 13, 10)
+  debug("===================", 13, 10)
+
+  ' Initialize OLED at 20MHz
+  if oled.start(0)
+    debug("OLED initialized at 20 MHz SPI", 13, 10)
+  else
+    debug("OLED init failed!", 13, 10)
+    return
+
+  ' Create test pattern
+  repeat idx from 0 to 63
+    sensor_values[idx] := idx * 16
+
+  debug(13, 10, "Testing NORMAL method (64 rectangles)...", 13, 10)
+
+  ' Benchmark normal method
+  frames := 100
+  start_time := getms()
+
+  repeat frames
+    oled.draw_grid_8x8(@sensor_values, 0, 1008)
+
+  end_time := getms()
+  elapsed_ms := end_time - start_time
+  fps := (frames * 1000) / elapsed_ms
+
+  debug("  ", udec(frames), " frames in ", udec(elapsed_ms), " ms", 13, 10)
+  debug("  Average FPS: ", udec(fps), 13, 10)
+  debug("  Frame time: ", udec(elapsed_ms / frames), " ms", 13, 10)
+
+  waitms(2000)
+
+  debug(13, 10, "Testing FAST method (single stream)...", 13, 10)
+
+  ' Benchmark fast method
+  frames := 100
+  start_time := getms()
+
+  repeat frames
+    oled.draw_grid_8x8_fast(@sensor_values, 0, 1008)
+
+  end_time := getms()
+  elapsed_ms := end_time - start_time
+  fps := (frames * 1000) / elapsed_ms
+
+  debug("  ", udec(frames), " frames in ", udec(elapsed_ms), " ms", 13, 10)
+  debug("  Average FPS: ", udec(fps), 13, 10)
+  debug("  Frame time: ", udec(elapsed_ms / frames), " ms", 13, 10)
+
+  waitms(2000)
+
+  debug(13, 10, "Continuous display at max rate...", 13, 10)
+
+  ' Run continuous loop showing FPS
+  frames := 0
+  start_time := getms()
+
+  repeat
+    oled.draw_grid_8x8_fast(@sensor_values, 0, 1008)
+    frames++
+
+    ' Update FPS every second
+    if (getms() - start_time) >= 1000
+      fps := frames
+      debug("FPS: ", udec(fps), 13, 10)
+      frames := 0
+      start_time := getms()
+
+      ' Change pattern slightly
+      repeat idx from 0 to 63
+        sensor_values[idx] := (sensor_values[idx] + 10) & $3FF

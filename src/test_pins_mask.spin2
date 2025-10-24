@@ -1,0 +1,60 @@
+'' =================================================================================================
+''   File....... test_pins_mask.spin2
+''   Purpose.... Binary counter using pin masking - write all 5 pins at once
+''   Author..... Stephen M Moraco
+''   Started.... Jan 2025
+'' =================================================================================================
+
+CON
+    _clkfreq = 200_000_000
+
+    PIN_BASE = 8                ' Start at P8
+    PIN_MASK = %11111 << PIN_BASE   ' 5 bits starting at P8 (P8-P12)
+
+PUB main() | count
+
+    debug("================================================================================")
+    debug("Binary Counter Test - Using Pin Masking")
+    debug("================================================================================")
+    debug(" ")
+    debug("Writing 5-bit values to P8-P12 using OUTA register")
+    debug("  P8  = Bit 0 (LSB) - CS")
+    debug("  P9  = Bit 1       - CCLK")
+    debug("  P10 = Bit 2       - MISO")
+    debug("  P11 = Bit 3       - CLRb")
+    debug("  P12 = Bit 4 (MSB) - SCLK")
+    debug(" ")
+
+    ' Disable smart pin modes on all 5 pins
+    repeat count from 0 to 4
+        pinf(PIN_BASE + count)
+
+    waitms(10)
+
+    ' Set pins P8-P12 as outputs using DIRA register
+    DIRA |= PIN_MASK
+
+    ' Set all pins low initially
+    OUTA &= !PIN_MASK
+
+    waitms(100)
+
+    debug("Starting binary count 0-31, repeating 3 times...")
+    debug("Each count held for 200ms")
+    debug(" ")
+
+    repeat 3
+        repeat count from 0 to 31
+            ' Write the count value to pins P8-P12 using OUTA
+            ' Clear the 5 bits, then set them to count value
+            OUTA := (OUTA & !PIN_MASK) | ((count & $1F) << PIN_BASE)
+
+            waitms(200)
+
+    ' Set all low at end
+    OUTA &= !PIN_MASK
+
+    debug(" ")
+    debug("Counter complete using pin masking.")
+    debug(" ")
+    debug("END_SESSION")

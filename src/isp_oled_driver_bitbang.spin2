@@ -1,0 +1,366 @@
+'' isp_oled_driver.spin2 - Low-level OLED Display Driver
+'' Hardware interface for 128x128 SPI OLED display
+''
+'' Pin connections (Pin Group 16, non-consecutive):
+''   P16: MOSI - SPI Data
+''   P18: SCLK - SPI Clock
+''   P20: CS   - Chip Select
+''   P22: DC   - Data/Command
+''   P23: RST  - Reset
+
+CON
+  ' Pin numbers from README (testing if LA probes were swapped)
+  PIN_MOSI = 16  ' P16 - DIN (MOSI) per README
+  PIN_SCLK = 18  ' P18 - CLK (SCLK) per README
+  PIN_CS   = 20  ' P20 - CS per README
+  PIN_DC   = 22  ' P22 - DC per README
+  PIN_RST  = 23  ' P23 - RST per README
+
+  ' SPI timing
+  SPI_FREQ = 10_000_000   ' 10 MHz SPI clock (using Smart Pin PULSE + SYNC_TX)
+
+  ' Display dimensions
+  WIDTH  = 128
+  HEIGHT = 128
+
+  ' SSD1351 OLED commands (from datasheet Table 9-1)
+  CMD_SET_COLUMN      = $15  ' Set Column Address
+  CMD_SET_ROW         = $75  ' Set Row Address
+  CMD_WRITE_RAM       = $5C  ' Write RAM Command
+  CMD_READ_RAM        = $5D  ' Read RAM Command
+  CMD_SET_REMAP       = $A0  ' Set Re-map & Color Depth
+  CMD_START_LINE      = $A1  ' Set Display Start Line
+  CMD_DISPLAY_OFFSET  = $A2  ' Set Display Offset
+  CMD_DISPLAY_ALLOFF  = $A4  ' Entire Display OFF
+  CMD_DISPLAY_ALLON   = $A5  ' Entire Display ON
+  CMD_NORMAL_DISPLAY  = $A6  ' Normal Display
+  CMD_INVERSE_DISPLAY = $A7  ' Inverse Display
+  CMD_FUNCTION_SEL    = $AB  ' Function Selection
+  CMD_DISPLAY_OFF     = $AE  ' Sleep Mode ON (Display OFF)
+  CMD_DISPLAY_ON      = $AF  ' Sleep Mode OFF (Display ON)
+  CMD_PRECHARGE       = $B1  ' Set Phase Length
+  CMD_ENHANCEDISPLAY  = $B2  ' Display Enhancement
+  CMD_CLOCKDIV        = $B3  ' Set Front Clock Divider
+  CMD_SET_VSL         = $B4  ' Set Segment Low Voltage
+  CMD_SET_GPIO        = $B5  ' Set GPIO
+  CMD_PRECHARGE2      = $B6  ' Set Second Precharge Period
+  CMD_GRAYSCALE       = $B8  ' Look Up Table for Gray Scale
+  CMD_LINEAR_LUT      = $B9  ' Use Built-in Linear LUT
+  CMD_PRECHARGE_V     = $BB  ' Set Pre-charge Voltage
+  CMD_VCOMH           = $BE  ' Set VCOMH Voltage
+  CMD_CONTRAST        = $C1  ' Set Contrast Current
+  CMD_MASTER_CONTRAST = $C7  ' Master Contrast Current Control
+  CMD_MUX_RATIO       = $CA  ' Set MUX Ratio
+  CMD_COMMAND_LOCK    = $FD  ' Set Command Lock
+
+VAR
+  long  initialized
+
+PUB null()
+  '' Not a top-level object
+
+PUB start(pin_base) : ok
+  '' Initialize the OLED display using bit-banged SPI
+  '' @param pin_base - ignored, pins are fixed at P16-P23
+  '' @returns TRUE if successful
+
+  debug("OLED Driver: Starting initialization (BIT-BANG MODE)...", 13, 10)
+  debug("  Pin assignments: MOSI=P", udec(PIN_MOSI), " SCLK=P", udec(PIN_SCLK))
+  debug(" CS=P", udec(PIN_CS), " DC=P", udec(PIN_DC), " RST=P", udec(PIN_RST), 13, 10)
+
+  ' Configure all pins as simple GPIO outputs
+  pinhigh(PIN_CS)    ' CS high (deselected)
+  pinlow(PIN_DC)     ' DC low (default to command mode)
+  pinhigh(PIN_RST)   ' RST high (not in reset)
+  pinlow(PIN_SCLK)   ' SCLK starts LOW for Mode 0
+  pinlow(PIN_MOSI)   ' MOSI starts low
+
+  debug("  SPI configured for bit-bang Mode 0 (GPIO mode)", 13, 10)
+
+  ' Reset display
+  debug("  Performing hardware reset...", 13, 10)
+  reset()
+
+  ' Initialize display
+  debug("  Sending initialization sequence...", 13, 10)
+  init_display()
+
+  initialized := TRUE
+  debug("OLED Driver: Initialization complete!", 13, 10)
+  return TRUE
+
+PUB stop()
+  '' Shutdown the OLED display
+
+  if initialized
+    display_off()
+    initialized := FALSE
+
+PUB reset()
+  '' Hardware reset the display
+  '' Per datasheet: reset pulse must be at least 2us, then wait 300ms
+
+  pinlow(PIN_RST)
+  waitms(10)  ' 10ms reset pulse
+  pinhigh(PIN_RST)
+  waitms(300)  ' Wait 300ms for VCC to stabilize per datasheet
+
+PUB init_display()
+  '' Initialize SSD1351 OLED with proper configuration sequence
+  '' Based on SSD1351 datasheet
+
+  debug("    Init step 1: Unlock (FD 12)", 13, 10)
+  write_cmd_data1(CMD_COMMAND_LOCK, $12)  ' Unlock basic commands
+
+  debug("    Init step 2: Unlock advanced (FD B1)", 13, 10)
+  write_cmd_data1(CMD_COMMAND_LOCK, $B1)  ' Make A2,B1,B3,BB,BE,C1 accessible
+
+  debug("    Init step 3: Display OFF", 13, 10)
+  write_command(CMD_DISPLAY_OFF)
+
+  debug("    Init step 4: Clock divider (B3 F1)", 13, 10)
+  write_cmd_data1(CMD_CLOCKDIV, $F1)  ' 7:4 = Oscillator Freq, 3:0 = CLK Div Ratio
+
+  debug("    Init step 5: Mux ratio (CA 7F)", 13, 10)
+  write_cmd_data1(CMD_MUX_RATIO, $7F)  ' 128 MUX
+
+  debug("    Init step 6: Set remap (A0 64)", 13, 10)
+  write_cmd_data1(CMD_SET_REMAP, $64)  ' A[7:6]=01 65k color, A[5]=1 Enable COM split odd/even
+
+  debug("    Init step 7: Start line (A1 00)", 13, 10)
+  write_cmd_data1(CMD_START_LINE, $00)
+
+  debug("    Init step 8: Display offset (A2 00)", 13, 10)
+  write_cmd_data1(CMD_DISPLAY_OFFSET, $00)
+
+  debug("    Init step 9: Set GPIO (B5 00)", 13, 10)
+  write_cmd_data1(CMD_SET_GPIO, $00)
+
+  debug("    Init step 10: Function select (AB 01)", 13, 10)
+  write_cmd_data1(CMD_FUNCTION_SEL, $01)  ' Enable internal VDD regulator
+
+  debug("    Init step 11: Precharge (B1 32)", 13, 10)
+  write_cmd_data1(CMD_PRECHARGE, $32)  ' Phase 1=5 DCLKs, Phase 2=3 DCLKs
+
+  debug("    Init step 12: VCOMH (BE 05)", 13, 10)
+  write_cmd_data1(CMD_VCOMH, $05)  ' 0.82 x VCC
+
+  debug("    Init step 13: Normal display (A6)", 13, 10)
+  write_command(CMD_NORMAL_DISPLAY)
+
+  debug("    Init step 14: Contrast (C1 C8 80 C8)", 13, 10)
+  write_cmd_data3(CMD_CONTRAST, $C8, $80, $C8)  ' Color A, B, C
+
+  debug("    Init step 15: Master contrast (C7 0F)", 13, 10)
+  write_cmd_data1(CMD_MASTER_CONTRAST, $0F)  ' Maximum brightness
+
+  debug("    Init step 16: VSL (B4 A0 B5 55)", 13, 10)
+  write_cmd_data3(CMD_SET_VSL, $A0, $B5, $55)
+
+  debug("    Init step 17: Precharge voltage (BB 17)", 13, 10)
+  write_cmd_data1(CMD_PRECHARGE_V, $17)
+
+  debug("    Init step 18: Second precharge (B6 01)", 13, 10)
+  write_cmd_data1(CMD_PRECHARGE2, $01)
+
+  debug("    Init step 19: Display ON", 13, 10)
+  write_command(CMD_DISPLAY_ON)
+
+  waitms(100)  ' Wait for display to stabilize
+  debug("    All 19 init steps complete!", 13, 10)
+
+PUB clear()
+  '' Clear the entire display
+
+  debug("  OLED clear: Setting window and writing black pixels...", 13, 10)
+  set_window(0, 0, WIDTH-1, HEIGHT-1)
+
+  write_cmd_data_start(CMD_WRITE_RAM)
+
+  ' Write black pixels (RGB565 format) - CS stays low for entire write
+  repeat WIDTH * HEIGHT
+    write_data_cont($00)
+    write_data_cont($00)
+
+  write_data_end()
+
+  debug("  OLED clear: Complete (", udec(WIDTH * HEIGHT * 2), " bytes)", 13, 10)
+
+PUB fill_screen(color)
+  '' Fill entire screen with specified color
+  '' @param color - RGB565 color value (16-bit)
+
+  set_window(0, 0, WIDTH-1, HEIGHT-1)
+
+  write_cmd_data_start(CMD_WRITE_RAM)
+
+  ' Write color pixels (RGB565 format) - CS stays low for entire write
+  repeat WIDTH * HEIGHT
+    write_data_cont(color >> 8)    ' High byte
+    write_data_cont(color & $FF)   ' Low byte
+
+  write_data_end()
+
+PUB display_on()
+  '' Turn display on
+
+  write_command(CMD_DISPLAY_ON)
+
+PUB display_off()
+  '' Turn display off
+
+  write_command(CMD_DISPLAY_OFF)
+
+PUB set_window(x1, y1, x2, y2)
+  '' Set drawing window
+  '' @param x1, y1 - top-left corner
+  '' @param x2, y2 - bottom-right corner
+
+  write_cmd_data2(CMD_SET_COLUMN, x1, x2)
+  write_cmd_data2(CMD_SET_ROW, y1, y2)
+
+PUB draw_bitmap(xpos, ypos, bwidth, bheight, bitmap_ptr) | pixel_count, idx
+  '' Draw bitmap at specified position
+  '' @param xpos, ypos - top-left position
+  '' @param bwidth, bheight - bitmap dimensions
+  '' @param bitmap_ptr - pointer to RGB565 bitmap data
+
+  set_window(xpos, ypos, xpos + bwidth - 1, ypos + bheight - 1)
+
+  write_command(CMD_WRITE_RAM)
+
+  ' Send bitmap data
+  pixel_count := bwidth * bheight
+  repeat idx from 0 to (pixel_count * 2) - 1
+    write_data(byte[bitmap_ptr][idx])
+
+PUB draw_pixel(px, py, color)
+  '' Draw a single pixel
+  '' @param px, py - pixel position
+  '' @param color - RGB565 color value
+
+  set_window(px, py, px, py)
+
+  write_command(CMD_WRITE_RAM)
+  write_data(color >> 8)    ' High byte
+  write_data(color & $FF)   ' Low byte
+
+PRI write_command(cmd)
+  '' Send command byte to display
+  '' @param cmd - command byte
+  '' Note: CS is raised after command, caller must use write_data for data bytes
+
+  pinlow(PIN_CS)   ' Select display
+  pinlow(PIN_DC)   ' Command mode
+  spi_write(cmd)
+  pinhigh(PIN_CS)  ' Deselect after command
+
+PRI write_data(data)
+  '' Send data byte to display
+  '' @param data - data byte
+  '' Note: For multi-byte data, CS should stay low - use write_cmd_data_start/cont/end
+
+  pinlow(PIN_CS)   ' Select display
+  pinhigh(PIN_DC)  ' Data mode
+  spi_write(data)
+  pinhigh(PIN_CS)  ' Deselect after data
+
+PRI write_cmd_data_start(cmd)
+  '' Start command+data transaction (keeps CS low, call write_data_cont for data)
+  '' @param cmd - command byte
+
+  pinlow(PIN_CS)   ' Select display for entire transaction
+  pinlow(PIN_DC)   ' Command mode
+  spi_write(cmd)
+  pinhigh(PIN_DC)  ' Switch to data mode for subsequent bytes
+
+PRI write_data_cont(data)
+  '' Send data byte in continuous transaction (CS stays low)
+  '' @param data - data byte
+  '' Must be called after write_cmd_data_start
+
+  spi_write(data)
+
+PRI write_data_end()
+  '' End continuous data transaction
+  '' Must be called after write_cmd_data_start/write_data_cont
+
+  pinhigh(PIN_CS)  ' Deselect after transaction
+
+PRI write_cmd_data1(cmd, data1)
+  '' Send command with one data byte (keeps CS low for entire transaction)
+  '' @param cmd - command byte
+  '' @param data1 - data byte
+
+  pinlow(PIN_CS)   ' Select display for entire transaction
+
+  pinlow(PIN_DC)   ' Command mode
+  spi_write(cmd)
+
+  pinhigh(PIN_DC)  ' Data mode
+  spi_write(data1)
+
+  pinhigh(PIN_CS)  ' Deselect after transaction
+
+PRI write_cmd_data2(cmd, data1, data2)
+  '' Send command with two data bytes (keeps CS low for entire transaction)
+  '' @param cmd - command byte
+  '' @param data1, data2 - data bytes
+
+  pinlow(PIN_CS)   ' Select display for entire transaction
+
+  pinlow(PIN_DC)   ' Command mode
+  spi_write(cmd)
+
+  pinhigh(PIN_DC)  ' Data mode
+  spi_write(data1)
+  spi_write(data2)
+
+  pinhigh(PIN_CS)  ' Deselect after transaction
+
+PRI write_cmd_data3(cmd, data1, data2, data3)
+  '' Send command with three data bytes (keeps CS low for entire transaction)
+  '' @param cmd - command byte
+  '' @param data1, data2, data3 - data bytes
+
+  pinlow(PIN_CS)   ' Select display for entire transaction
+
+  pinlow(PIN_DC)   ' Command mode
+  spi_write(cmd)
+
+  pinhigh(PIN_DC)  ' Data mode
+  spi_write(data1)
+  spi_write(data2)
+  spi_write(data3)
+
+  pinhigh(PIN_CS)  ' Deselect after transaction
+
+PRI spi_write(value) | bit_mask
+  '' Send byte via bit-banged SPI (MSB first, Mode 0)
+  '' @param value - byte to send
+  '' Mode 0: CPOL=0 (clock idle low), CPHA=0 (sample on rising edge)
+
+  ' Send 8 bits, MSB first
+  bit_mask := $80  ' Start with MSB
+
+  repeat 8
+    ' Set data bit on MOSI (while clock is low)
+    if (value & bit_mask)
+      pinhigh(PIN_MOSI)
+    else
+      pinlow(PIN_MOSI)
+
+    ' Setup time before clock rises
+    waitus(1)
+
+    ' Clock high (rising edge - data sampled here in Mode 0)
+    pinhigh(PIN_SCLK)
+
+    ' Keep clock high for symmetric waveform
+    waitus(1)
+
+    ' Clock low (falling edge - back to idle)
+    pinlow(PIN_SCLK)
+
+    ' Move to next bit
+    bit_mask >>= 1

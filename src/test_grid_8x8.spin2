@@ -1,0 +1,107 @@
+'' test_grid_8x8.spin2 - Test 8x8 Grid Drawing with Color Gradient
+'' Demonstrates magnetic field visualization on OLED display
+
+CON
+  _clkfreq = 250_000_000
+
+OBJ
+  oled : "isp_oled_driver"
+
+VAR
+  long sensor_values[64]  ' 8x8 array of sensor readings
+
+PUB main() | idx, row, col
+
+  debug("Test Grid 8x8: Starting...", 13, 10)
+
+  ' Initialize OLED
+  if oled.start(0)
+    debug("OLED initialized successfully", 13, 10)
+  else
+    debug("OLED initialization failed!", 13, 10)
+    return
+
+  ' Create test pattern 1: Gradient from blue to red
+  debug("Pattern 1: Linear gradient (blue to red)", 13, 10)
+  repeat idx from 0 to 63
+    sensor_values[idx] := idx * 16  ' Values 0-1008
+
+  oled.draw_grid_8x8(@sensor_values, 0, 1008)
+  waitms(3000)
+
+  ' Create test pattern 2: Checkerboard (hot/cold)
+  debug("Pattern 2: Checkerboard (hot/cold)", 13, 10)
+  repeat row from 0 to 7
+    repeat col from 0 to 7
+      idx := row * 8 + col
+      if ((row + col) & 1)
+        sensor_values[idx] := 1000  ' Hot (red)
+      else
+        sensor_values[idx] := 0     ' Cold (blue)
+
+  oled.draw_grid_8x8(@sensor_values, 0, 1000)
+  waitms(3000)
+
+  ' Create test pattern 3: Center hot spot
+  debug("Pattern 3: Center hot spot", 13, 10)
+  repeat row from 0 to 7
+    repeat col from 0 to 7
+      idx := row * 8 + col
+      ' Distance from center (3.5, 3.5)
+      sensor_values[idx] := 1000 - ((row - 3) * (row - 3) + (col - 3) * (col - 3)) * 50
+
+  oled.draw_grid_8x8(@sensor_values, 0, 1000)
+  waitms(3000)
+
+  ' Create test pattern 4: Bipolar (north/south poles)
+  debug("Pattern 4: Bipolar field (north/south)", 13, 10)
+  repeat row from 0 to 7
+    repeat col from 0 to 7
+      idx := row * 8 + col
+      if col < 4
+        sensor_values[idx] := -500  ' South pole (blue)
+      else
+        sensor_values[idx] := 500   ' North pole (red)
+
+  oled.draw_grid_8x8(@sensor_values, -500, 500)
+  waitms(3000)
+
+  debug("Test complete - display will cycle patterns", 13, 10)
+
+  ' Cycle through patterns continuously
+  repeat
+    ' Pattern 1
+    repeat idx from 0 to 63
+      sensor_values[idx] := idx * 16
+    oled.draw_grid_8x8(@sensor_values, 0, 1008)
+    waitms(2000)
+
+    ' Pattern 2
+    repeat row from 0 to 7
+      repeat col from 0 to 7
+        idx := row * 8 + col
+        if ((row + col) & 1)
+          sensor_values[idx] := 1000
+        else
+          sensor_values[idx] := 0
+    oled.draw_grid_8x8(@sensor_values, 0, 1000)
+    waitms(2000)
+
+    ' Pattern 3
+    repeat row from 0 to 7
+      repeat col from 0 to 7
+        idx := row * 8 + col
+        sensor_values[idx] := 1000 - ((row - 3) * (row - 3) + (col - 3) * (col - 3)) * 50
+    oled.draw_grid_8x8(@sensor_values, 0, 1000)
+    waitms(2000)
+
+    ' Pattern 4
+    repeat row from 0 to 7
+      repeat col from 0 to 7
+        idx := row * 8 + col
+        if col < 4
+          sensor_values[idx] := -500
+        else
+          sensor_values[idx] := 500
+    oled.draw_grid_8x8(@sensor_values, -500, 500)
+    waitms(2000)

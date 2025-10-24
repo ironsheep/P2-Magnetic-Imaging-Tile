@@ -1,0 +1,77 @@
+'' =================================================================================================
+''   File....... test_p8_only.spin2
+''   Purpose.... Test P8 specifically - diagnose why it's not toggling
+''   Author..... Stephen M Moraco
+''   Started.... Jan 2025
+'' =================================================================================================
+
+CON
+    _clkfreq = 200_000_000
+
+PUB main() | i
+
+    debug("================================================================================")
+    debug("P8 Diagnostic Test - Force P8 to toggle")
+    debug("================================================================================")
+    debug(" ")
+
+    debug("Testing P8 (CS pin) specifically...")
+    debug(" ")
+
+    ' Try multiple methods to force P8 to work
+
+    debug("Method 1: Using pinf() then pinl()/pinh()")
+    pinf(8)         ' Float/disable smart pin
+    waitms(100)
+
+    repeat 10
+        debug("  P8 HIGH")
+        pinh(8)
+        waitms(500)
+        debug("  P8 LOW")
+        pinl(8)
+        waitms(500)
+
+    debug(" ")
+    debug("Method 2: Using wrpin to explicitly set to simple output")
+
+    ' Explicitly configure as simple digital output (mode 0)
+    wrpin(8, 0)     ' Mode 0 = disabled/simple I/O
+    dirh(8)         ' Set direction to output
+
+    repeat 10
+        debug("  P8 HIGH (via dirh/dirl)")
+        outh(8)         ' Output high
+        waitms(500)
+        debug("  P8 LOW (via dirh/dirl)")
+        outl(8)         ' Output low
+        waitms(500)
+
+    debug(" ")
+    debug("Method 3: Using PASM to force the pin")
+
+    toggle_p8_pasm()
+
+    debug(" ")
+    debug("END_SESSION")
+
+PRI toggle_p8_pasm() | cycles
+
+    debug("Using PASM to toggle P8 20 times...")
+
+    cycles := 20
+
+    org
+        ' Configure P8 as output
+        drvh    #8              ' Drive P8 high (also sets direction to output)
+
+.loop
+        drvh    #8              ' Drive high
+        waitx   ##100_000_000   ' Wait 0.5s at 200MHz
+        drvl    #8              ' Drive low
+        waitx   ##100_000_000   ' Wait 0.5s
+
+        djnz    cycles, #.loop
+    end
+
+    debug("PASM toggle complete")

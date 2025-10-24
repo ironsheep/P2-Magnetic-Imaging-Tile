@@ -23,34 +23,37 @@ CON
   ERR_EMPTY   = -2
   ERR_INVALID = -3
 
-VAR
+DAT
+  ' Singleton shared state - all instances reference this same data
+  ' This enables zero-copy frame sharing across all subsystems
+
   ' Frame pool - all frames live here
-  byte  framePool[MAX_FRAMES * FRAME_SIZE]
+  framePool       byte  0[MAX_FRAMES * FRAME_SIZE]
 
   ' Free frame tracking
-  long  freeList[MAX_FRAMES]
-  long  freeHead
-  long  freeTail
-  long  freeCount
+  freeList        long  0[MAX_FRAMES]
+  freeHead        long  0
+  freeTail        long  0
+  freeCount       long  0
 
   ' FIFO structures - just hold pointers
-  long  sensorFIFO[FIFO_DEPTH]
-  long  sensorHead
-  long  sensorTail
-  long  sensorCount
+  sensorFIFO      long  0[FIFO_DEPTH]
+  sensorHead      long  0
+  sensorTail      long  0
+  sensorCount     long  0
 
-  long  hdmiFIFO[FIFO_DEPTH]
-  long  hdmiHead
-  long  hdmiTail
-  long  hdmiCount
+  hdmiFIFO        long  0[FIFO_DEPTH]
+  hdmiHead        long  0
+  hdmiTail        long  0
+  hdmiCount       long  0
 
-  long  oledFIFO[FIFO_DEPTH]
-  long  oledHead
-  long  oledTail
-  long  oledCount
+  oledFIFO        long  0[FIFO_DEPTH]
+  oledHead        long  0
+  oledTail        long  0
+  oledCount       long  0
 
   ' Lock for atomic operations
-  byte  lock
+  lock            byte  255  ' -1 = uninitialized
 
 PUB null()
   '' Not a top-level object

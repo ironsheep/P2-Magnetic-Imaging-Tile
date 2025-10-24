@@ -11,7 +11,6 @@
 '   - Direct PSRAM writing for real-time updates
 
 CON
-  HDMI_BASE_PIN = 8    ' Default HDMI pin group (can be overridden)
   mapx = 640'960
   mapy = 480'540
 
@@ -19,6 +18,7 @@ OBJ
 
   psram : "PSRAM_driver_RJA_Platform_1b"    ' PSRAM memory driver
   hdmi  : "isp_hdmi_640x480_24bpp"           ' ISP HDMI driver with correct VGA timing
+  fonts : "isp_hub75_fonts"                  ' Bitmap font library
 
 VAR
   long cog
@@ -26,17 +26,22 @@ VAR
   long psram_ptr
   long MapBase
   long row[mapx] 'for CLS operations
+  long current_font                          ' Current font selection
 
 
 
-PUB start()
+PUB start(hdmi_base_pin)
+'' Start PSRAM graphics system with HDMI output
+'' @param hdmi_base_pin - base pin for HDMI output (typically 0 for pin group 0: P0-P7)
 
   psram.start()
 
-  hdmi.start(HDMI_BASE_PIN, psram.pointer(), 0)
+  hdmi.start(hdmi_base_pin, psram.pointer(), 0)
 
   psram_ptr := psram.pointer() + cogid() * 12
 
+  ' Initialize default font
+  current_font := fonts.TEXT_FONT_5x7_DITH_DCNDR  ' 5x7 dithered with descenders
 
   'configure assembly
   array_mid_ptr := @frac_array + frac_array_mid
@@ -187,6 +192,128 @@ PUB FillSensorCell(cell_row, cell_col, base_x, base_y, cell_size, gap, cell_colo
 '' For magnetic field visualization
 
   FillRect(base_x + cell_col*(cell_size+gap)+1, base_y + cell_row*(cell_size+gap)+1, base_x + cell_col*(cell_size+gap)+cell_size-1, base_y + cell_row*(cell_size+gap)+cell_size-1, cell_color)
+
+'' =====================================
+'' Text Rendering Methods
+'' =====================================
+
+PUB SetFont(font_id)
+'' Set the current font for text rendering
+'' @param font_id - font selection from isp_hub75_fonts constants
+''   TEXT_FONT_5x7 (default), TEXT_FONT_8x8A, TEXT_FONT_8x8B
+
+  current_font := font_id
+
+PUB DrawChar(xPos, yPos, ch, clr) | pCharBitmap, charWidth, charHeight, rowOffset, colOffset, bitOffset, rowBits, pixClr, pixVal, dimClr
+'' Draw a single character at pixel coordinates
+'' @param xPos, yPos - top-left pixel position
+'' @param ch - ASCII character to draw
+'' @param clr - color in RRGGBBAA format
+
+  ' Get character bitmap from font library
+  pCharBitmap := fonts.getCharAddrForFont(current_font, ch)
+  if pCharBitmap == 0
+    return  ' Character not available
+
+  ' Get font dimensions
+  charWidth, charHeight := fonts.getGeometryOfFont(current_font)
+
+  ' Render character bitmap
+  if fonts.isDitheredFont(current_font)
+    ' Dithered font (2-bit per pixel for anti-aliasing)
+    dimClr := ReduceBrightness(clr, 50)  ' 50% brightness for gray level
+
+    repeat rowOffset from 0 to charHeight - 1
+      rowBits := WORD[pCharBitmap][rowOffset]  ' Read WORD for dithered fonts
+      repeat colOffset from 0 to charWidth - 1
+        bitOffset := colOffset * 2  ' 2 bits per pixel
+        pixVal := ((rowBits << bitOffset) & $C000) >> 14  ' Extract 2-bit value
+
+        ' Map pixel value to color:
+        '   3 = full color
+        '   1 = dimmed color (50%)
+        '   0,2 = black (background)
+        if pixVal == 3
+          pixClr := clr
+        elseif pixVal == 1
+          pixClr := dimClr
+        else
+          pixClr := $00000000  ' Transparent/black
+
+        if pixVal <> 0 && pixVal <> 2
+          FillRect(xPos + colOffset, yPos + rowOffset, xPos + colOffset, yPos + rowOffset, pixClr)
+  else
+    ' Standard 1-bit per pixel font
+    repeat rowOffset from 0 to charHeight - 1
+      rowBits := BYTE[pCharBitmap][rowOffset]
+      repeat colOffset from 0 to charWidth - 1
+        bitOffset := (charWidth - 1) - colOffset  ' Scan bits right-to-left
+        if (rowBits & (1 << bitOffset)) > 0
+          ' Bit is set - draw pixel
+          FillRect(xPos + colOffset, yPos + rowOffset, xPos + colOffset, yPos + rowOffset, clr)
+
+PUB DrawText(textX, textY, pString, clr) | char, xPos, charWidth, charHeight
+'' Draw a string of text at pixel coordinates
+'' @param textX, textY - top-left pixel position
+'' @param pString - pointer to zero-terminated string
+'' @param clr - color in RRGGBBAA format
+
+  ' Get font dimensions
+  charWidth, charHeight := fonts.getGeometryOfFont(current_font)
+
+  xPos := textX
+  repeat
+    char := BYTE[pString++]
+    if char == 0
+      quit  ' End of string
+
+    DrawChar(xPos, textY, char, clr)
+    xPos += charWidth + 1  ' Character width plus 1-pixel spacing
+
+PUB DrawTextCentered(centerX, textY, pString, clr) | textWidth, charWidth, charHeight, stringLen, startX, pTemp
+'' Draw centered text (horizontally centered at centerX)
+'' @param centerX - horizontal center position
+'' @param textY - top pixel position
+'' @param pString - pointer to zero-terminated string
+'' @param clr - color in RRGGBBAA format
+
+  ' Get font dimensions
+  charWidth, charHeight := fonts.getGeometryOfFont(current_font)
+
+  ' Calculate string length
+  stringLen := 0
+  pTemp := pString
+  repeat while BYTE[pTemp++] <> 0
+    stringLen++
+
+  ' Calculate text width (chars + spacing between)
+  textWidth := stringLen * (charWidth + 1) - 1  ' -1 removes trailing space
+
+  ' Calculate start position for centered text
+  startX := centerX - (textWidth / 2)
+
+  ' Draw the text
+  DrawText(startX, textY, pString, clr)
+
+PRI ReduceBrightness(rgbColor, percent) : dimmedColor | r, g, b, a
+'' Reduce the brightness of a color by the given percentage
+'' @param rgbColor - color in RRGGBBAA format
+'' @param percent - brightness percentage (0-100, where 50 = 50% brightness)
+'' @returns dimmed color in same RRGGBBAA format
+
+  ' Extract RGBA components
+  r := (rgbColor >> 24) & $FF
+  g := (rgbColor >> 16) & $FF
+  b := (rgbColor >> 8) & $FF
+  a := rgbColor & $FF
+
+  ' Scale RGB by percentage
+  r := (r * percent) / 100
+  g := (g * percent) / 100
+  b := (b * percent) / 100
+
+  ' Reassemble color
+  dimmedColor := (r << 24) | (g << 16) | (b << 8) | a
 
 PRI SendCommand(cmd,pArgs)|i
 

@@ -76,6 +76,42 @@ The Waveshare 1.5inch RGB OLED Module is a compact, high-contrast display module
 3. CS must be low during entire transaction
 4. Data sampled on SCL rising edge
 
+### Display Orientation Configuration
+
+**Physical Orientation (Standard Configuration):**
+- Ribbon connector positioned at **BOTTOM** when viewing display normally
+- Software coordinate (0,0) maps to physical **top-left corner** (opposite edge from ribbon)
+- **Display side (front)**: English text label is readable (right-side-up) with ribbon at bottom
+- **Component side (back)**: Label orientation differs - runs vertically, would be readable with ribbon at top/left
+
+**⚠️ Important Note on Module Labels:**
+The Waveshare module has labels on both sides that are oriented **differently**:
+- **Display side**: Label at ribbon connector edge, reads correctly in standard orientation (ribbon at bottom)
+- **Component side**: Label to left of ribbon connector, runs vertically, would read correctly if rotated 90° from standard orientation
+
+For consistent orientation, **always use the display side label as reference**, not the component side.
+
+**SSD1351 Remap Register Settings:**
+- Command: `$A0` (SET_REMAP)
+- Value: `$65`
+  - Bit 7:6 = `01` → 65K RGB color format
+  - Bit 5 = `1` → Enable COM split odd/even
+  - Bit 4 = `0` → Normal row address order (top to bottom)
+  - Bit 0 = `1` → **Column address remap** (fixes horizontal mirroring)
+
+**Coordinate Mapping:**
+```
+Physical Display (Ribbon at Bottom):
+┌────────────────┐
+│(0,0)     (127,0)│  ← Top edge
+│                 │
+│    Display      │
+│                 │
+│(0,127) (127,127)│  ← Bottom edge
+└────────────────┘
+      Ribbon
+```
+
 ## Display Capabilities
 
 ### Graphics Features
@@ -100,9 +136,12 @@ The Waveshare 1.5inch RGB OLED Module is a compact, high-contrast display module
 - Consider ambient light sensor for automatic brightness adjustment
 
 ### Update Rate Requirements
-- Target: 30-60 fps for smooth visualization
-- Maximum theoretical: >100 fps with optimized SPI transfer
-- Practical limit determined by sensor scan rate
+- **Display Refresh Rate**: 60 Hz (hardware limit)
+- **SPI Transfer Time**: 2.8ms per full 128×128 frame at 20MHz
+- **Maximum Send Rate**: ~357 fps (limited by SPI transfer)
+- **Practical Frame Rate**: 60 fps (matched to display refresh rate)
+- **Recommended Delay**: 16ms between frames to prevent display flooding
+- **Sensor Scan Rate**: Will determine actual update frequency
 
 ### Memory Requirements
 - Full frame buffer: 128×128×2 bytes = 32KB (16-bit color)

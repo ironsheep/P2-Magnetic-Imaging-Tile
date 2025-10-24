@@ -8,7 +8,7 @@
 
 CON
   ' Test mode configuration
-  TEST_MODE   = true      ' true = show test pattern, false = process FIFO
+  TEST_MODE   = false     ' true = show test pattern, false = process FIFO
 
   ' Display configuration
   GRID_X      = 200       ' Grid top-left X position
@@ -18,37 +18,69 @@ CON
 
   ' Color mapping ranges
   MIN_FIELD   = 0         ' Minimum field value
-  MAX_FIELD   = 65535     ' Maximum field value (16-bit)
-  MID_FIELD   = 32768     ' Neutral field value
+  MAX_FIELD   = 4095      ' Maximum field value (12-bit from sensor)
+  MID_FIELD   = 2048      ' Neutral field value (12-bit midpoint)
+
+  ' FIFO IDs (must match isp_frame_fifo_manager)
+  FIFO_HDMI   = 1
 
 OBJ
   fifo : "isp_frame_fifo_manager"
-  gfx  : "isp_psram_graphics"
+  gfx  : "isp_psram_graphics"      ' HDMI graphics system
 
 VAR
   long  cog_id
   long  frame_count
   long  display_mode
   long  color_palette[8]
+  long  current_frame_ptr
+  long  base_pin
+  long  grid_drawn              ' Flag: 0=not drawn, 1=drawn
+  word  frame_buffer[64]
 
 PUB null()
   '' Not a top-level object
 
-PUB start() : ok
+PUB start(hdmi_base_pin) : ok
   '' Start the HDMI display engine
+  '' @param hdmi_base_pin - base pin for HDMI output
   '' @returns cog_id if successful, -1 if failed
 
-  stop()
+  debug("HDMI Engine: Starting...", 13, 10)
+
+  ' Save pin configuration
+  base_pin := hdmi_base_pin
 
   ' Initialize color palette for magnetic field visualization
+  debug("HDMI Engine: Initializing palette...", 13, 10)
   init_palette()
+  debug("HDMI Engine: Palette initialized", 13, 10)
 
   ' Initialize variables
+  debug("HDMI Engine: Setting variables...", 13, 10)
   frame_count := 0
   display_mode := 0
+  current_frame_ptr := 0
+  grid_drawn := 0
+  cog_id := -1  ' Initialize to -1 (no COG running yet)
+  debug("HDMI Engine: Variables set", 13, 10)
 
+  ' Start HDMI graphics system with correct pin assignment
+  debug("HDMI Engine: Starting PSRAM graphics on pin ", udec(hdmi_base_pin), "...", 13, 10)
+  gfx.start(hdmi_base_pin)
+  debug("HDMI Engine: Graphics system ready", 13, 10)
+
+  ' Now stop any existing display COG before starting new one
+  stop()
+
+  debug("HDMI Engine: Starting display COG...", 13, 10)
   ' Start display COG
   cog_id := cogspin(NEWCOG, display_loop(), @frame_count)
+
+  if cog_id < 0
+    debug("HDMI Engine: ERROR - Failed to start COG!", 13, 10)
+  else
+    debug("HDMI Engine: COG ", udec(cog_id), " started successfully", 13, 10)
 
   return cog_id
 
@@ -70,21 +102,15 @@ PUB get_frame_count() : count
 
   return frame_count
 
-PUB show_test_pattern() | row, col, value
-  '' Display a test pattern directly (bypasses FIFO)
-  '' Useful for initial testing without full pipeline
+PUB get_current_frame() : ptr
+  '' Get pointer to current frame buffer (64 WORDs)
+  '' @returns pointer to frame_buffer array, or 0 if no frame available
 
-  ' Draw the sensor grid
-  gfx.DrawSensorGrid(GRID_X, GRID_Y, CELL_SIZE, CELL_GAP)
+  return current_frame_ptr
 
-  ' Fill with diagonal gradient pattern
-  repeat row from 0 to 7
-    repeat col from 0 to 7
-      value := ((row + col) * 4096) & $FFFF  ' Create gradient
-      gfx.FillSensorCell(row, col, GRID_X, GRID_Y, CELL_SIZE, CELL_GAP, field_to_color(value))
-
-  ' Add identifying text
-  ' gfx.DrawText(GRID_X, GRID_Y - 20, string("HDMI Test Pattern"))
+' PUB show_test_pattern() | row, col, value
+'   '' Display a test pattern directly (bypasses FIFO)
+'   '' Removed - graphics drawing now handled in main()
 
 PRI init_palette()
   '' Initialize color palette for field strength visualization
@@ -99,45 +125,101 @@ PRI init_palette()
   color_palette[6] := $FF8000FF  ' Strong positive - Orange
   color_palette[7] := $FF0000FF  ' Very strong positive - Red
 
-PRI display_loop() | framePtr, row, col, sensorVal, color, idx
+PRI display_loop() | framePtr, row, col, sensorIdx, sensorVal, cellColor
   '' Main display loop running in dedicated COG
 
+  debug("HDMI Engine Loop: COG started, TEST_MODE=", udec(TEST_MODE), 13, 10)
+
   if TEST_MODE
-    ' Test pattern mode - display once and idle
-    show_test_pattern()
+    ' Test pattern mode - just idle for now
+    ' (Graphics drawing moved to main)
+    debug("HDMI Engine Loop: TEST_MODE active, idling...", 13, 10)
     repeat
+      frame_count++
       waitms(1000)  ' Just keep COG alive
   else
-    ' Normal operation - process FIFO
-    ' Draw initial grid
-    gfx.DrawSensorGrid(GRID_X, GRID_Y, CELL_SIZE, CELL_GAP)
+    ' Normal operation - process FIFO frames and render to display
+    debug("HDMI Engine Loop: FIFO processing mode active", 13, 10)
+
+    ' DIAGNOSTIC: Comment out drawing to see if test pattern from gfx.start() appears
+    debug("HDMI Engine Loop: Skipping drawing for diagnostic, entering loop...", 13, 10)
+
+    ' ' Clear screen and draw grid on startup
+    ' debug("HDMI Engine Loop: Clearing screen...", 13, 10)
+    ' gfx.cls($00_00_00)  ' Black background
+
+    ' debug("HDMI Engine Loop: Drawing sensor grid...", 13, 10)
+    ' gfx.DrawSensorGrid(GRID_X, GRID_Y, CELL_SIZE, CELL_GAP)
+    ' grid_drawn := 1
+
+    ' ' Add text labels around the display
+    ' debug("HDMI Engine Loop: Drawing text labels...", 13, 10)
+    ' DrawStaticLabels()
+    ' debug("HDMI Engine Loop: Grid ready, waiting for frames...", 13, 10)
 
     repeat
-      ' Get frame from HDMI FIFO
-      framePtr := fifo.dequeue(fifo.FIFO_HDMI)
+      ' Dequeue frame from HDMI FIFO (blocking)
+      framePtr := fifo.dequeue(FIFO_HDMI)
 
-      if framePtr
-        ' Display the 8x8 sensor array
+      if framePtr <> 0
+        ' Render all 64 sensor cells to display
         repeat row from 0 to 7
           repeat col from 0 to 7
-            ' Get sensor value (already remapped to display order)
-            idx := row * 8 + col
-            sensorVal := word[framePtr][idx]
+            ' Get sensor value from frame
+            sensorIdx := row * 8 + col
+            sensorVal := WORD[framePtr][sensorIdx]
 
-            ' Map sensor value to color
-            color := field_to_color(sensorVal)
+            ' Convert sensor value to color
+            cellColor := field_to_color(sensorVal)
 
-            ' Fill the cell with the color
-            gfx.FillSensorCell(row, col, GRID_X, GRID_Y, CELL_SIZE, CELL_GAP, color)
+            ' Render cell to display
+            gfx.FillSensorCell(row, col, GRID_X, GRID_Y, CELL_SIZE, CELL_GAP, cellColor)
+
+        ' Increment frame counter
+        frame_count++
+
+        ' Debug output every 10 frames (every 30 seconds at 1 frame/3 sec)
+        if (frame_count // 10) == 0
+          debug("HDMI Engine: Rendered ", udec(frame_count), " frames", 13, 10)
+          debug("  Corner values: TL=", udec(WORD[framePtr][0]), " TR=", udec(WORD[framePtr][7]), " BL=", udec(WORD[framePtr][56]), " BR=", udec(WORD[framePtr][63]), 13, 10)
 
         ' Release frame back to pool
         fifo.releaseFrame(framePtr)
+      else
+        ' FIFO timeout - shouldn't happen in normal operation
+        debug("HDMI Engine: FIFO dequeue timeout!", 13, 10)
+        waitms(10)
 
-        ' Update frame counter
-        frame_count++
+PRI DrawStaticLabels() | row, col, labelX, labelY
+  '' Draw static text labels around the sensor grid display
+  '' Includes title, row/column labels, and placeholders for statistics
 
-        ' Optional: Add frame rate display or other overlays
-        ' gfx.DrawText(10, 10, string("FPS: "), frame_count)
+  ' Title at top center
+  gfx.DrawTextCentered(320, 10, @"Magnetic Imaging Tile Display", $FFFFFFFF)  ' White
+
+  ' Row labels (0-7) down left side
+  labelX := GRID_X - 20
+  repeat row from 0 to 7
+    labelY := GRID_Y + row * (CELL_SIZE + CELL_GAP) + 12  ' Centered in cell
+    gfx.DrawChar(labelX, labelY, "0" + row, $FFFF00FF)  ' Yellow
+
+  ' Column labels (0-7) across top
+  labelY := GRID_Y - 15
+  repeat col from 0 to 7
+    labelX := GRID_X + col * (CELL_SIZE + CELL_GAP) + 12  ' Centered in cell
+    gfx.DrawChar(labelX, labelY, "0" + col, $FFFF00FF)  ' Yellow
+
+  ' Statistics area (top right) - sample placeholders
+  gfx.DrawText(480, 50, @"Min: 1200", $00FF00FF)   ' Green
+  gfx.DrawText(480, 65, @"Max: 3000", $FF0000FF)   ' Red
+  gfx.DrawText(480, 80, @"Avg: 2100", $00FFFFFF)   ' Cyan
+
+  ' Frame counter (top right)
+  gfx.DrawText(480, 110, @"Frame: 0/10", $FFFFFFFF)  ' White
+
+  ' Status line (bottom left)
+  gfx.DrawText(10, 460, @"Mode: TEST_PATTERN", $FFFF00FF)  ' Yellow
+  gfx.DrawText(200, 460, @"FIFOs: S:0 H:1 Free:31", $00FF00FF)  ' Green
 
 PRI field_to_color(fieldVal) : color | index
   '' Convert magnetic field value to display color

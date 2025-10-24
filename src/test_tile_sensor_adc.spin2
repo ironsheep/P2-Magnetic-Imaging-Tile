@@ -1,0 +1,230 @@
+'' =================================================================================================
+''   File....... test_tile_sensor_adc.spin2
+''   Purpose.... Test ADC interface for Magnetic Imaging Tile - All 64 sensor verification
+''   Author..... Stephen M Moraco
+''               -- Copyright (c) 2025 Iron Sheep Productions, LLC
+''   E-mail..... stephen@ironsheep.biz
+''   Started.... Jan 2025
+''   Updated.... Jan 2025
+''
+'' =================================================================================================
+''
+''  PHASE 2 TEST: Verify all 64 sensors can be read
+''
+''  SUCCESS CRITERIA:
+''  1. All 64 sensors produce valid values (not stuck at 0 or 65535)
+''  2. Sensors show variation (multiplexer is working)
+''  3. Counter advances correctly through all positions
+''  4. No dead or stuck sensors
+''
+''  HARDWARE SETUP:
+''  - Connect magnetic tile to Pin Group 8 (P8-P15)
+''  - No magnetic field near sensors initially
+''  - Have small magnet ready for testing
+''
+''  TEST PROCEDURE:
+''  1. Read all 64 sensors sequentially
+''  2. Report value for each sensor
+''  3. Calculate statistics (min/max/avg/unique values)
+''  4. Verify multiplexer is switching correctly
+''
+'' =================================================================================================
+
+CON
+    _clkfreq = 200_000_000                  ' 200 MHz system clock
+
+    ' Pin group for magnetic tile (from README.md)
+    TILE_PIN_GROUP = 8                      ' Pin Group 8: P8-P15
+
+    ' Test parameters
+    NUM_SENSORS = 64                        ' Total sensors in 8x8 array
+    EXPECTED_ZERO_FIELD = 32768             ' Expected mid-scale value (16-bit)
+    MIN_UNIQUE_VALUES = 10                  ' Minimum unique values to prove multiplexer working
+
+OBJ
+    tile : "isp_tile_sensor"                ' Magnetic tile sensor driver
+
+VAR
+    LONG sensor_values[NUM_SENSORS]         ' All 64 sensor readings
+    LONG test_stats[6]                      ' min, max, avg, stddev, range, unique_count
+
+PUB main() | i, value, result
+
+    debug("================================================================================")
+    debug("Magnetic Tile ADC Test - Phase 2: All 64 Sensors")
+    debug("================================================================================")
+    debug(" ")
+
+    ' Initialize tile sensor (note: we're not starting background cog)
+    ' Pin group is now fixed at TILE_PIN_GROUP constant in driver
+    result := tile.start(0)  ' Pass 0 for fifo_obj (not used in test mode)
+
+    if not result
+        debug("ERROR: Failed to initialize tile sensor")
+        return
+
+    debug("Tile sensor initialized successfully")
+    debug("Pin Group: P8-P15 (fixed in driver)")
+    debug(" ")
+
+    ' Read all 64 sensors
+    debug("TEST: Reading All 64 Sensors")
+    debug("----------------------------")
+    debug("Stepping through counter positions 0-63...")
+    debug(" ")
+
+    tile.reset_counter_test()               ' Reset to sensor 0
+
+    repeat i from 0 to NUM_SENSORS-1
+        tile.advance_counter_test()         ' Advance to next sensor
+        sensor_values[i] := tile.read_single_sensor_bitbang()
+
+        ' Show every 8th sensor (one per row)
+        if (i+1) // 8 == 0
+            debug("  Sensor ", udec_(i), ": ", udec(sensor_values[i]), " (0x", uhex_word(sensor_values[i]), ")")
+
+    debug(" ")
+
+    ' Calculate statistics
+    calculate_stats(@sensor_values, NUM_SENSORS, @test_stats)
+
+    debug("SENSOR ARRAY RESULTS:")
+    debug("  Minimum value:   ", udec(test_stats[0]), " (0x", uhex_word(test_stats[0]), ")")
+    debug("  Maximum value:   ", udec(test_stats[1]), " (0x", uhex_word(test_stats[1]), ")")
+    debug("  Average value:   ", udec(test_stats[2]))
+    debug("  Std Deviation:   ", udec(test_stats[3]))
+    debug("  Range (max-min): ", udec(test_stats[4]))
+    debug("  Unique values:   ", udec(test_stats[5]))
+    debug(" ")
+
+    ' Evaluate multiplexer operation
+    if test_stats[5] < MIN_UNIQUE_VALUES
+        debug("FAIL: Too few unique values (", udec(test_stats[5]), " < ", udec(MIN_UNIQUE_VALUES), ")")
+        debug("      Multiplexer may not be switching correctly")
+        debug("      All sensors showing nearly same value")
+    else
+        debug("PASS: Multiplexer working (", udec(test_stats[5]), " unique values)")
+
+    debug(" ")
+
+    ' Check for stuck sensors
+    if test_stats[0] == 0
+        debug("WARN: At least one sensor reading 0 - possible wiring issue")
+    elseif test_stats[1] == 65535
+        debug("WARN: At least one sensor reading max - possible stuck ADC")
+    else
+        debug("PASS: All sensors in valid range")
+
+    debug(" ")
+
+    ' Summary
+    debug("SUMMARY:")
+    debug("  Total sensors tested: ", udec(NUM_SENSORS))
+    debug("  Value range: ", udec(test_stats[0]), " to ", udec(test_stats[1]))
+    debug("  Spread: ", udec(test_stats[4]), " counts")
+    if test_stats[5] >= MIN_UNIQUE_VALUES
+        debug("  PASS: Counter and multiplexer working correctly")
+    else
+        debug("  FAIL: Insufficient variation - check hardware")
+
+    debug(" ")
+    debug("================================================================================")
+    debug("AUTOMATED TESTS COMPLETE")
+    debug("================================================================================")
+    debug(" ")
+    debug("END_SESSION")  ' Marker for automated test script
+
+PRI calculate_stats(data_ptr, count, stats_ptr) | i, j, sum, min_val, max_val, avg, variance, diff, value, unique_count, is_unique
+
+    if data_ptr == 0 or stats_ptr == 0 or count == 0
+        return
+
+    ' Find min, max, and calculate sum
+    min_val := LONG[data_ptr][0]
+    max_val := LONG[data_ptr][0]
+    sum := 0
+
+    repeat i from 0 to count-1
+        value := LONG[data_ptr][i]
+        sum += value
+
+        if value < min_val
+            min_val := value
+        if value > max_val
+            max_val := value
+
+    ' Calculate average
+    avg := sum / count
+
+    ' Calculate variance (for std deviation)
+    variance := 0
+    repeat i from 0 to count-1
+        diff := LONG[data_ptr][i] - avg
+        variance += diff * diff
+
+    variance := variance / count
+
+    ' Count unique values (simple but slow O(n²) method - fine for 64 sensors)
+    unique_count := 0
+    repeat i from 0 to count-1
+        is_unique := true
+        ' Check if this value appeared earlier
+        repeat j from 0 to i-1
+            if LONG[data_ptr][i] == LONG[data_ptr][j]
+                is_unique := false
+                quit
+        if is_unique
+            unique_count++
+
+    ' Store results
+    LONG[stats_ptr][0] := min_val
+    LONG[stats_ptr][1] := max_val
+    LONG[stats_ptr][2] := avg
+    LONG[stats_ptr][3] := sqrt_approx(variance)  ' Std deviation
+    LONG[stats_ptr][4] := max_val - min_val      ' Range
+    LONG[stats_ptr][5] := unique_count           ' Unique values
+
+PRI sqrt_approx(x) : result | guess, new_guess, i
+'' Fast integer square root using Newton's method
+
+    if x <= 1
+        return x
+
+    guess := x >> 1                         ' Initial guess: x/2
+
+    ' Newton iterations
+    repeat i from 0 to 7                    ' 8 iterations sufficient
+        new_guess := (guess + x / guess) >> 1
+        if new_guess == guess
+            return guess                    ' Converged
+        guess := new_guess
+
+    return guess
+
+CON { license }
+{{
+
+ -------------------------------------------------------------------------------------------------
+  MIT License
+
+  Copyright (c) 2025 Iron Sheep Productions, LLC
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+ =================================================================================================
+}}

@@ -1,0 +1,119 @@
+'' =================================================================================================
+''   File....... test_pin_binary.spin2
+''   Purpose.... Binary counter on pins - identify which physical wire is which
+''   Author..... Stephen M Moraco
+''   Started.... Jan 2025
+'' =================================================================================================
+
+CON
+    _clkfreq = 200_000_000
+
+    TILE_PIN_GROUP = 8
+
+    ' Pin offsets within group
+    PIN_CS = 0      ' Bit 0 of counter
+    PIN_CCLK = 1    ' Bit 1 of counter
+    PIN_MISO = 2    ' Bit 2 of counter (normally input, but we'll drive it for this test)
+    PIN_CLRb = 3    ' Bit 3 of counter
+    PIN_SCLK = 4    ' Bit 4 of counter
+
+VAR
+    LONG abs_pin_cs
+    LONG abs_pin_cclk
+    LONG abs_pin_miso
+    LONG abs_pin_clrb
+    LONG abs_pin_sclk
+
+PUB main() | count
+
+    debug("================================================================================")
+    debug("Binary Counter Test - Identify Physical Pins")
+    debug("================================================================================")
+    debug(" ")
+
+    ' Calculate absolute pin numbers
+    abs_pin_cs := TILE_PIN_GROUP + PIN_CS
+    abs_pin_cclk := TILE_PIN_GROUP + PIN_CCLK
+    abs_pin_miso := TILE_PIN_GROUP + PIN_MISO
+    abs_pin_clrb := TILE_PIN_GROUP + PIN_CLRb
+    abs_pin_sclk := TILE_PIN_GROUP + PIN_SCLK
+
+    debug("Pin assignments (bit positions in counter):")
+    debug("  P", udec(abs_pin_cs), " (CS)   = Bit 0 (LSB)")
+    debug("  P", udec(abs_pin_cclk), " (CCLK) = Bit 1")
+    debug("  P", udec(abs_pin_miso), " (MISO) = Bit 2")
+    debug("  P", udec(abs_pin_clrb), " (CLRb) = Bit 3")
+    debug("  P", udec(abs_pin_sclk), " (SCLK) = Bit 4 (MSB)")
+    debug(" ")
+
+    ' Configure all pins as simple outputs
+    pinf(abs_pin_cs)
+    pinf(abs_pin_cclk)
+    pinf(abs_pin_miso)
+    pinf(abs_pin_clrb)
+    pinf(abs_pin_sclk)
+
+    ' Force CS high initially to see if it can be driven
+    debug("Setting CS (P", udec(abs_pin_cs), ") HIGH for 1 second...")
+    pinh(abs_pin_cs)
+    pinl(abs_pin_cclk)
+    pinl(abs_pin_miso)
+    pinl(abs_pin_clrb)
+    pinl(abs_pin_sclk)
+    waitms(1000)
+
+    debug("Setting CS LOW for 1 second...")
+    pinl(abs_pin_cs)
+    waitms(1000)
+
+    debug(" ")
+    debug("Starting binary counter 0-31, repeating 3 times...")
+    debug("Each count held for 200ms")
+    debug(" ")
+
+    repeat 3
+        repeat count from 0 to 31
+            ' Output count as 5-bit binary
+            if (count & $01)
+                pinh(abs_pin_cs)
+            else
+                pinl(abs_pin_cs)
+
+            if (count & $02)
+                pinh(abs_pin_cclk)
+            else
+                pinl(abs_pin_cclk)
+
+            if (count & $04)
+                pinh(abs_pin_miso)
+            else
+                pinl(abs_pin_miso)
+
+            if (count & $08)
+                pinh(abs_pin_clrb)
+            else
+                pinl(abs_pin_clrb)
+
+            if (count & $10)
+                pinh(abs_pin_sclk)
+            else
+                pinl(abs_pin_sclk)
+
+            waitms(200)
+
+    ' Set all low at end
+    pinl(abs_pin_cs)
+    pinl(abs_pin_cclk)
+    pinl(abs_pin_miso)
+    pinl(abs_pin_clrb)
+    pinl(abs_pin_sclk)
+
+    debug(" ")
+    debug("Counter complete. Pin identification:")
+    debug("  Fastest toggle (every 200ms):   Bit 0 = P", udec(abs_pin_cs), " (CS)")
+    debug("  2nd fastest (every 400ms):      Bit 1 = P", udec(abs_pin_cclk), " (CCLK)")
+    debug("  3rd fastest (every 800ms):      Bit 2 = P", udec(abs_pin_miso), " (MISO)")
+    debug("  4th fastest (every 1.6s):       Bit 3 = P", udec(abs_pin_clrb), " (CLRb)")
+    debug("  Slowest toggle (every 3.2s):    Bit 4 = P", udec(abs_pin_sclk), " (SCLK)")
+    debug(" ")
+    debug("END_SESSION")

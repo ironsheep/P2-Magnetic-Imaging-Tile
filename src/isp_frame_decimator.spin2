@@ -1,0 +1,322 @@
+'' =================================================================================================
+''   File....... isp_frame_decimator.spin2
+''   Purpose.... Frame rate decimator - converts sensor 375 fps to display 60 fps
+''   Author..... Stephen M Moraco
+''               -- Copyright (c) 2025 Iron Sheep Productions, LLC
+''               -- see below for terms of use
+''   E-mail..... stephen@ironsheep.biz
+''   Started.... Jan 2025
+''   Updated.... Jan 2025
+''
+'' =================================================================================================
+
+CON { decimator constants }
+
+    ' Decimation ratios
+    SENSOR_RATE_HZ  = 375           ' Sensor acquisition rate
+    DISPLAY_RATE_HZ = 60            ' Display refresh rate
+    DECIMATION_RATIO = 6            ' 375 / 60 = 6.25, use 6
+
+    ' FIFO IDs (must match isp_frame_fifo_manager)
+    FIFO_SENSOR = 0
+    FIFO_HDMI   = 1
+    FIFO_OLED   = 2
+
+CON { decimator modes }
+
+    #0
+    MODE_STOPPED                    ' = 0
+    MODE_HDMI_ONLY                  ' = 1 - HDMI output only (6:1 decimation)
+    MODE_DUAL_DISPLAY               ' = 2 - Both HDMI and OLED (6:1 decimation)
+    MODE_PASSTHROUGH                ' = 3 - 1:1 passthrough (no decimation, HDMI only)
+
+OBJ
+    fifo : "isp_frame_fifo_manager" ' Multi-FIFO frame pool manager
+
+VAR { decimator variables }
+
+    LONG    cog_id                  ' Background cog ID (-1 = stopped, >=0 = running)
+    LONG    decimator_mode          ' Current decimation mode
+    LONG    frames_processed        ' Total frames processed
+    LONG    frames_dropped          ' Frames skipped due to decimation
+    LONG    frames_output_hdmi      ' Frames sent to HDMI
+    LONG    frames_output_oled      ' Frames sent to OLED
+
+PUB null()
+'' This is not a top-level object
+'' @returns nothing - placeholder method for non-top-level object
+    cog_id := -1                    ' Initialize to stopped state
+
+PUB start() : success
+'' Start the decimator and begin background processing
+'' @returns TRUE if successful, FALSE if failed to start
+
+    if cog_id >= 0
+        return TRUE                 ' Already running
+
+    ' Initialize variables
+    decimator_mode := MODE_PASSTHROUGH ' Start with 1:1 passthrough for testing
+    frames_processed := 0
+    frames_dropped := 0
+    frames_output_hdmi := 0
+    frames_output_oled := 0
+
+    ' Start background cog with parameter block
+    cog_id := coginit(NEWCOG, @decimator_cog_entry, @cog_id)
+
+    ' Return success based on cog_id validity
+    return (cog_id >= 0)
+
+PUB stop()
+'' Stop the decimator and terminate background cog operation
+'' @returns nothing - stops all decimation operations
+
+    if cog_id >= 0
+        cogstop(cog_id)
+        cog_id := -1
+
+PUB set_mode(mode)
+'' Set decimation mode for output configuration
+'' @param mode - MODE_STOPPED (0), MODE_HDMI_ONLY (1), or MODE_DUAL_DISPLAY (2)
+'' @returns nothing - updates decimation configuration
+
+    decimator_mode := mode
+
+PUB get_stats(stats_ptr)
+'' Get comprehensive decimator statistics
+'' @param stats_ptr - pointer to LONG array[5] to receive stats: [0]=processed, [1]=dropped, [2]=hdmi_out, [3]=oled_out, [4]=mode
+'' @returns nothing - fills provided array with statistics
+
+    if stats_ptr == 0
+        return
+
+    LONG[stats_ptr][0] := frames_processed
+    LONG[stats_ptr][1] := frames_dropped
+    LONG[stats_ptr][2] := frames_output_hdmi
+    LONG[stats_ptr][3] := frames_output_oled
+    LONG[stats_ptr][4] := decimator_mode
+
+PUB is_running() : state
+'' Check if decimator background cog is currently running
+'' @returns TRUE if running, FALSE if stopped
+
+    return (cog_id >= 0)
+
+DAT { background cog code }
+
+                        ORG     0
+
+decimator_cog_entry
+                        ' Get parameter pointer (points to cog_id)
+                        mov     param_ptr, ptra
+
+                        ' Load addresses from parameter block
+                        ' Offset structure: cog_id(0), mode(4), processed(8), dropped(12),
+                        '                  hdmi_out(16), oled_out(20)
+
+                        mov     temp, param_ptr
+                        add     temp, #4
+                        mov     mode_ptr, temp           ' Pointer to decimator_mode
+
+                        mov     temp, param_ptr
+                        add     temp, #8
+                        mov     processed_ptr, temp      ' Pointer to frames_processed
+
+                        mov     temp, param_ptr
+                        add     temp, #12
+                        mov     dropped_ptr, temp        ' Pointer to frames_dropped
+
+                        mov     temp, param_ptr
+                        add     temp, #16
+                        mov     hdmi_out_ptr, temp       ' Pointer to frames_output_hdmi
+
+                        mov     temp, param_ptr
+                        add     temp, #20
+                        mov     oled_out_ptr, temp       ' Pointer to frames_output_oled
+
+                        ' Load FIFO object address (singleton shared instance)
+                        ' TODO: FIFO interface needs proper implementation
+                        ' mov     fifo_obj, ##@fifo        ' BROKEN: Can't reference OBJ from PASM this way
+
+                        ' Initialize decimation counter
+                        mov     frame_counter, #0
+
+decimation_loop
+                        ' Check mode - wait if stopped
+                        rdlong  temp, mode_ptr
+                        tjz     temp, #decimation_loop   ' Skip if MODE_STOPPED
+
+                        mov     current_mode, temp       ' Save current mode
+
+                        ' Dequeue frame from sensor FIFO (blocking)
+                        call    #dequeue_sensor_frame
+                        tjz     frame_ptr, #decimation_loop  ' Skip if no frame available
+
+                        ' Increment processed counter
+                        call    #increment_processed
+
+                        ' Check for passthrough mode (1:1, no decimation)
+                        cmp     current_mode, #3 wz      ' MODE_PASSTHROUGH = 3
+                if_z    jmp     #output_hdmi_only        ' Pass every frame through
+
+                        ' Normal decimation mode (6:1)
+                        ' Check if this frame should be output (every 6th frame)
+                        mov     temp, frame_counter
+                        add     frame_counter, #1        ' Increment for next time
+                        and     frame_counter, #(DECIMATION_RATIO-1)  ' Wrap at decimation ratio
+
+                        cmp     temp, #0 wz              ' Output on frame 0 of cycle
+                if_nz   jmp     #drop_frame
+
+                        ' Output frame to display FIFOs based on mode
+                        cmp     current_mode, #1 wz      ' MODE_HDMI_ONLY = 1
+                if_z    jmp     #output_hdmi_only
+
+output_dual_display
+                        ' Clone frame for OLED (need separate buffer)
+                        call    #clone_frame_to_oled
+                        ' Fall through to HDMI output
+
+output_hdmi_only
+                        ' Send frame to HDMI FIFO
+                        call    #commit_to_hdmi
+                        jmp     #decimation_loop
+
+drop_frame
+                        ' Release frame back to pool without outputting
+                        call    #release_frame
+                        call    #increment_dropped
+                        jmp     #decimation_loop
+
+decimation_exit
+                        cogstop #0
+
+dequeue_sensor_frame
+                        ' Call FIFO manager's dequeue(FIFO_SENSOR) method
+                        mov     ptra, fifo_obj           ' Object pointer
+                        mov     pa, #FIFO_SENSOR         ' FIFO ID
+                        rdlong  temp, ptra               ' Get vtable pointer
+                        add     temp, #(7*4)             ' Offset to dequeue() (method index 7)
+                        rdlong  temp, temp               ' Get method address
+                        call    temp                     ' Call method, result in ptra
+                        mov     frame_ptr, ptra          ' Save frame buffer pointer
+dequeue_sensor_frame_ret ret
+
+commit_to_hdmi
+                        ' Call FIFO manager's commitFrame(FIFO_HDMI, framePtr)
+                        mov     ptra, fifo_obj           ' Object pointer
+                        mov     pa, #FIFO_HDMI           ' FIFO_HDMI = 1
+                        mov     pb, frame_ptr            ' Frame pointer
+                        rdlong  temp, ptra               ' Get vtable pointer
+                        add     temp, #(6*4)             ' Offset to commitFrame()
+                        rdlong  temp, temp               ' Get method address
+                        call    temp                     ' Call method
+
+                        ' Increment HDMI output counter
+                        rdlong  temp, hdmi_out_ptr
+                        add     temp, #1
+                        wrlong  temp, hdmi_out_ptr
+commit_to_hdmi_ret      ret
+
+clone_frame_to_oled
+                        ' Get new frame buffer for OLED
+                        mov     ptra, fifo_obj           ' Object pointer
+                        rdlong  temp, ptra               ' Get vtable pointer
+                        add     temp, #(5*4)             ' Offset to getNextFrame()
+                        rdlong  temp, temp               ' Get method address
+                        call    temp                     ' Call method, result in ptra
+                        mov     oled_frame_ptr, ptra     ' Save OLED frame buffer pointer
+
+                        ' Copy 128 bytes (64 WORDs) from source to destination
+                        mov     src_addr, frame_ptr
+                        mov     dst_addr, oled_frame_ptr
+                        mov     copy_count, #64          ' 64 WORDs
+
+clone_copy_loop
+                        rdword  temp, src_addr
+                        wrword  temp, dst_addr
+                        add     src_addr, #2
+                        add     dst_addr, #2
+                        djnz    copy_count, #clone_copy_loop
+
+                        ' Commit OLED frame
+                        mov     ptra, fifo_obj           ' Object pointer
+                        mov     pa, #FIFO_OLED           ' FIFO_OLED = 2
+                        mov     pb, oled_frame_ptr       ' OLED frame pointer
+                        rdlong  temp, ptra               ' Get vtable pointer
+                        add     temp, #(6*4)             ' Offset to commitFrame()
+                        rdlong  temp, temp               ' Get method address
+                        call    temp                     ' Call method
+
+                        ' Increment OLED output counter
+                        rdlong  temp, oled_out_ptr
+                        add     temp, #1
+                        wrlong  temp, oled_out_ptr
+clone_frame_to_oled_ret ret
+
+release_frame
+                        ' Call FIFO manager's releaseFrame(framePtr)
+                        mov     ptra, fifo_obj           ' Object pointer
+                        mov     pa, frame_ptr            ' Frame pointer to release
+                        rdlong  temp, ptra               ' Get vtable pointer
+                        add     temp, #(8*4)             ' Offset to releaseFrame() (method index 8)
+                        rdlong  temp, temp               ' Get method address
+                        call    temp                     ' Call method
+release_frame_ret       ret
+
+increment_processed
+                        rdlong  temp, processed_ptr
+                        add     temp, #1
+                        wrlong  temp, processed_ptr
+increment_processed_ret ret
+
+increment_dropped
+                        rdlong  temp, dropped_ptr
+                        add     temp, #1
+                        wrlong  temp, dropped_ptr
+increment_dropped_ret   ret
+
+' Variables
+param_ptr               LONG    0
+mode_ptr                LONG    0
+processed_ptr           LONG    0
+dropped_ptr             LONG    0
+hdmi_out_ptr            LONG    0
+oled_out_ptr            LONG    0
+fifo_obj                LONG    0
+frame_ptr               LONG    0
+oled_frame_ptr          LONG    0
+frame_counter           LONG    0
+current_mode            LONG    0
+src_addr                LONG    0
+dst_addr                LONG    0
+copy_count              LONG    0
+temp                    LONG    0
+
+CON { license }
+{{
+
+ -------------------------------------------------------------------------------------------------
+  MIT License
+
+  Copyright (c) 2025 Iron Sheep Productions, LLC
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+ =================================================================================================
+}}

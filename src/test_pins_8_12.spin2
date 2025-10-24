@@ -1,0 +1,85 @@
+'' =================================================================================================
+''   File....... test_pins_8_12.spin2
+''   Purpose.... Binary counter on P8-P12 for logic analyzer identification
+''   Author..... Stephen M Moraco
+''   Started.... Jan 2025
+'' =================================================================================================
+
+CON
+    _clkfreq = 200_000_000
+
+PUB main() | count, i
+
+    debug("================================================================================")
+    debug("Binary Counter Test - P8, P9, P10, P11, P12")
+    debug("================================================================================")
+    debug(" ")
+    debug("Pin mapping:")
+    debug("  P8  = Bit 0 (LSB) - CS")
+    debug("  P9  = Bit 1       - CCLK")
+    debug("  P10 = Bit 2       - MISO")
+    debug("  P11 = Bit 3       - CLRb")
+    debug("  P12 = Bit 4 (MSB) - SCLK")
+    debug(" ")
+
+    ' Configure all pins as simple outputs
+    pinf(8)         ' Disable smart pin mode
+    pinf(9)
+    pinf(10)
+    pinf(11)
+    pinf(12)
+
+    waitms(10)      ' Small delay after disabling smart pins
+
+    ' Set all low initially - pinh/pinl automatically set direction to output
+    pinl(8)
+    pinl(9)
+    pinl(10)
+    pinl(11)
+    pinl(12)
+
+    debug("Starting binary count 0-31, repeating 3 times...")
+    debug("Each count held for 200ms")
+    debug(" ")
+
+    repeat 3
+        repeat count from 0 to 31
+            ' Output count as 5-bit binary on P8-P12
+            if (count & $01)
+                pinh(8)
+            else
+                pinl(8)
+
+            if (count & $02)
+                pinh(9)
+            else
+                pinl(9)
+
+            if (count & $04)
+                pinh(10)
+            else
+                pinl(10)
+
+            if (count & $08)
+                pinh(11)
+            else
+                pinl(11)
+
+            if (count & $10)
+                pinh(12)
+            else
+                pinl(12)
+
+            waitms(200)
+
+    ' Set all low at end
+    pinl(8)
+    pinl(9)
+    pinl(10)
+    pinl(11)
+    pinl(12)
+
+    debug(" ")
+    debug("Counter complete.")
+    debug(" ")
+    debug("END_SESSION")
