@@ -1,5 +1,5 @@
 '************************************************
-'*  ISP HDMI 640x480 16bpp Driver (RGB565)     *
+'*  ISP HDMI 640x480 32bpp Driver (RRGGBBAA)   *
 '*  Iron Sheep Productions, LLC                *
 '*  Based on original HDMI driver by RJA       *
 '*  Modified for proper VGA 640x480 @ 60Hz     *
@@ -57,7 +57,14 @@ PUB start(hdmi_base_pin, psram_command_ptr, psram_screen_base) : okay
   ram_bas := psram_screen_base
   pix_bas := @pix
 
-  return cog := coginit(newcog, @driver, @setup) + 1
+  debug("HDMI: psram_cmd=", UHEX_LONG(psram_command_ptr), " screen_base=", UDEC(psram_screen_base), " pix_buf=", UHEX_LONG(@pix), 13, 10)
+
+  ' TEST: Pre-fill pixel buffer with RED to verify HDMI output path
+  debug("Pre-filling HDMI pixel buffer with RED...", 13, 10)
+  longfill(@pix, $FF0000FF, xpix*2)  ' Fill both line buffers with red
+  debug("HDMI buffer pre-filled", 13, 10)
+
+  return cog := coginit(COGEXEC_NEW, @driver, @setup) + 1
 
 
 PUB set_screen_base(psram_screen_base)
@@ -87,6 +94,10 @@ DAT             org
 driver          setq    #4-1                    'get setup
                 rdlong  setup_,ptra
 
+                ' CRITICAL: Force pins to known state before reconfiguring
+                fltl    pin_grp_                'float all 8 pins (clear any prior config)
+                wrpin   #0,pin_grp_             'clear pin modes
+
                 wrpin   ##pin_cfg,pin_grp_      'enable HDMI pins as 75-ohm 1-bit DACs
                 drvl    pin_grp_
 
@@ -102,7 +113,7 @@ driver          setq    #4-1                    'get setup
 
                 setcmod #$100                   'enable HDMI
 
-                rdfast  #xpix*2/16,pix_bas_     'set up fast read for alternating pixel lines
+                rdfast  #xpix*2/16,pix_bas_     'set up fast read for alternating pixel lines (80 * 64-byte blocks = 5120 bytes = 1280 longs)
 
                 cogid   pa                      'get this cog's psram command pointer
                 mul     pa,#12
@@ -188,3 +199,5 @@ cmd_                            'command structure for psram driver
 cmd_hub         res     1
 cmd_ram         res     1
 cmd_len         res     1
+
+                fit     $1F0            'must fit in cog RAM (496 longs max)

@@ -35,10 +35,18 @@ PUB start(hdmi_base_pin)
 '' @param hdmi_base_pin - base pin for HDMI output (typically 0 for pin group 0: P0-P7)
 
   psram.start()
-
-  hdmi.start(hdmi_base_pin, psram.pointer(), 0)
+  debug("PSRAM ptr: ", UHEX_LONG(psram.pointer()), 13, 10)
 
   psram_ptr := psram.pointer() + cogid() * 12
+  debug("Main cog PSRAM cmd ptr: ", UHEX_LONG(psram_ptr), 13, 10)
+
+  ' PRE-FILL PSRAM with solid red BEFORE starting HDMI
+  debug("Pre-filling PSRAM with RED...", 13, 10)
+  clear_screen(0, $FF0000FF)
+  debug("Pre-fill complete, starting HDMI...", 13, 10)
+
+  hdmi.start(hdmi_base_pin, psram.pointer(), 0)
+  debug("HDMI started: base_pin=", UDEC(hdmi_base_pin), " screen_base=0", 13, 10)
 
   ' Initialize default font
   current_font := fonts.TEXT_FONT_5x7_DITH_DCNDR  ' 5x7 dithered with descenders
@@ -70,6 +78,14 @@ PUB start(hdmi_base_pin)
   FillSensorCell(0, 0, 100, 50, 40, 5, $FF0000FF)  ' Red
   FillSensorCell(3, 3, 100, 50, 40, 5, $00FF00FF)  ' Green
   FillSensorCell(7, 7, 100, 50, 40, 5, $0000FFFF)  ' Blue
+
+  ' DIAGNOSTIC: Read back first pixel from PSRAM to verify data is there
+  waitms(100)  ' Wait for HDMI to process a few frames
+  long[psram_ptr][0] := @row[0]    ' Hub destination
+  long[psram_ptr][1] := 0          ' PSRAM address 0 (first pixel)
+  long[psram_ptr][2] := 4          ' Read 4 longs (first 4 pixels)
+  repeat while long[psram_ptr][2]  ' Wait for completion
+  debug("PSRAM readback [0-3]: ", UHEX_LONG(row[0]), " ", UHEX_LONG(row[1]), " ", UHEX_LONG(row[2]), " ", UHEX_LONG(row[3]), 13, 10)
 
   return
 
@@ -119,6 +135,8 @@ PUB FillRect(rx1, ry1, rx2, ry2, rcolor) | ry, rx, psram_addr
   rx2 := 0 #> rx2 <# (mapx-1)
   ry1 := 0 #> ry1 <# (mapy-1)
   ry2 := 0 #> ry2 <# (mapy-1)
+
+  debug("FillRect: (", UDEC(rx1), ",", UDEC(ry1), ")-(", UDEC(rx2), ",", UDEC(ry2), ") clr=", UHEX_LONG(rcolor), 13, 10)
 
   ' Fill the row buffer with the color
   longfill(@row[rx1], rcolor, rx2-rx1+1)
@@ -177,21 +195,33 @@ PUB DrawSensorGrid(base_x, base_y, cell_size, gap) | r, c, gx, gy
 '' cell_size: size of each sensor cell in pixels
 '' gap: gap between cells
 
-  ' Draw horizontal lines
+  debug("DrawSensorGrid: (", UDEC(base_x), ",", UDEC(base_y), ") cell=", UDEC(cell_size), " gap=", UDEC(gap), 13, 10)
+
+  ' Draw horizontal lines (9 lines for 8 cells)
   repeat r from 0 to 8
     gy := base_y + r * (cell_size + gap)
-    DrawHLine(base_x, base_x + 8*(cell_size+gap)-gap, gy, $FF_FF_FF)
+    DrawHLine(base_x, base_x + 8*(cell_size+gap), gy, $FFFFFFFF)  ' White RRGGBBAA
 
-  ' Draw vertical lines
+  ' Draw vertical lines (9 lines for 8 cells)
   repeat c from 0 to 8
     gx := base_x + c * (cell_size + gap)
-    DrawVLine(gx, base_y, base_y + 8*(cell_size+gap)-gap, $FF_FF_FF)
+    DrawVLine(gx, base_y, base_y + 8*(cell_size+gap), $FFFFFFFF)  ' White RRGGBBAA
 
-PUB FillSensorCell(cell_row, cell_col, base_x, base_y, cell_size, gap, cell_color)
+  debug("DrawSensorGrid done", 13, 10)
+
+PUB FillSensorCell(cell_row, cell_col, base_x, base_y, cell_size, gap, cell_color) | stride
 '' Fill a single sensor cell with color
 '' For magnetic field visualization
+'' Uses 4-pixel inset from grid lines, properly centered in cell
 
-  FillRect(base_x + cell_col*(cell_size+gap)+1, base_y + cell_row*(cell_size+gap)+1, base_x + cell_col*(cell_size+gap)+cell_size-1, base_y + cell_row*(cell_size+gap)+cell_size-1, cell_color)
+  ' Cell interior is between grid lines: (cell_size+gap) pixels apart
+  ' Use symmetric inset of 4 pixels from each interior edge for perfect centering
+  stride := cell_size + gap
+  FillRect(base_x + cell_col*stride + 4, ...
+           base_y + cell_row*stride + 4, ...
+           base_x + cell_col*stride + stride - 4, ...
+           base_y + cell_row*stride + stride - 4, ...
+           cell_color)
 
 '' =====================================
 '' Text Rendering Methods
@@ -402,6 +432,7 @@ PUB cls(clr)
 
 PRI clear_screen(ptr,clr) | i
 
+  debug("Clear: psram_base=", UDEC(ptr), " color=", UHEX_LONG(clr), 13, 10)
   longfill(@row[0],clr,mapx)         '(Destination, Value, Count)
 
   repeat i from 0 to mapy 'mapy with i
@@ -409,6 +440,10 @@ PRI clear_screen(ptr,clr) | i
     long[psram_ptr][1] := i * mapx + ptr
     long[psram_ptr][2] := -mapx
     repeat while long[psram_ptr][2]
+    if (i // 120) == 0
+      debug("  line ", UDEC(i), 13, 10)
+
+  debug("Clear done", 13, 10)
 
 
 

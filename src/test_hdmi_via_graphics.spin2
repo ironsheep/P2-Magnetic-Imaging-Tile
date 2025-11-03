@@ -1,0 +1,25 @@
+'' Test HDMI using the ISP graphics wrapper
+'' This uses the same PSRAM + HDMI combo that your main app uses
+
+CON
+  _CLKFREQ = 250_000_000
+  HDMI_BASE_PIN = 0
+
+OBJ
+  gfx : "isp_psram_graphics"
+
+PUB main()
+
+  debug("=== HDMI TEST WITH PIN RESET FIX ===", 13, 10)
+  debug("Testing with explicit pin clearing...", 13, 10)
+
+  '' Start graphics system (includes PSRAM + HDMI)
+  gfx.start(HDMI_BASE_PIN)
+
+  debug("Graphics system started", 13, 10)
+  debug("Monitor should show: dark green bg + grid + colored cells", 13, 10)
+
+  '' Wait
+  repeat
+    waitms(5000)
+    debug("Running...", 13, 10)

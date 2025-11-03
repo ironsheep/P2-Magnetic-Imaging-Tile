@@ -26,6 +26,16 @@ The SparkFun Magnetic Imaging Tile V3 is an 8×8 array of Hall effect sensors ca
 
 #### HDMI Connection (Pin Group 0: P0-P7)
 
+#### PSRAM Connection (P2 Edge 32MB - DIRB Pins 8-23 → P40-P55)
+
+| Pin Range | Function  | Description                                    |
+| --------- | --------- | ---------------------------------------------- |
+| P40-P55   | Data Bus  | 16-bit PSRAM data (DIRB bits 8-23 + 32 = P40-P55) |
+| P56       | CK        | PSRAM Clock                                    |
+| P57       | CS        | PSRAM Chip Select                              |
+
+**Note:** PSRAM driver uses `DIRB` register for data pins. The bit pattern `$00FF_FF00` (bits 8-23) maps to physical pins P40-P55 (add 32 to DIRB bit numbers to get physical pin numbers).
+
 #### Magnetic Tile Connection (Pin Group 8: P8-P15)
 
 | Pin      | Function | Wire Color | LA Ch Color   | Description                |
