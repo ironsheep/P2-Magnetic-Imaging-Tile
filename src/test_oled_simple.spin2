@@ -1,0 +1,57 @@
+'' Test OLED driver in isolation - simple "tall thin man"
+'' Just verify the OLED displays SOMETHING
+
+CON
+  _CLKFREQ = 250_000_000
+  OLED_BASE_PIN = 16
+
+OBJ
+  oled : "isp_oled_driver"
+
+PUB main()
+
+  debug("=== OLED SIMPLE TEST ===" , 13, 10)
+  debug("Testing OLED driver in isolation", 13, 10)
+
+  ' Initialize OLED driver
+  if not oled.start(OLED_BASE_PIN)
+    debug("ERROR: OLED init failed!", 13, 10)
+    return
+
+  debug("OLED initialized successfully", 13, 10)
+
+  ' Set orientation for hardware setup (ribbon to LEFT)
+  debug("Setting orientation to ORIENTATION_270 (ribbon LEFT)...", 13, 10)
+  oled.set_orientation(oled.ORIENTATION_270)
+  waitms(100)
+
+  ' Clear to black
+  debug("Clearing display to black...", 13, 10)
+  oled.clear()
+  waitms(1000)
+
+  ' Use fill_screen() instead of draw_bitmap() - bypasses streaming COG
+  ' RGB565 format: $F800 = red, $07E0 = green, $001F = blue
+
+  debug("Drawing RED screen...", 13, 10)
+  oled.fill_screen($F800)  ' RED
+  waitms(2000)
+
+  debug("Drawing GREEN screen...", 13, 10)
+  oled.fill_screen($07E0)  ' GREEN
+  waitms(2000)
+
+  debug("Drawing BLUE screen...", 13, 10)
+  oled.fill_screen($001F)  ' BLUE
+  waitms(2000)
+
+  debug("Drawing WHITE screen...", 13, 10)
+  oled.fill_screen($FFFF)  ' WHITE
+  waitms(2000)
+
+  debug("OLED test complete - should have seen RED, GREEN, BLUE, WHITE", 13, 10)
+
+  ' Loop with status
+  repeat
+    waitms(5000)
+    debug("OLED still running...", 13, 10)

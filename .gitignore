@@ -219,3 +219,14 @@ DOCs/DRV5053.txt
 pnut-term-settings.json
 /.p2kb-cache
 /OBEX
+/src/tests/hdmi_obsolete
+/src/tests
+src/chip_hdmi_640x480.spin2
+src/psram_driver.spin2
+src/test_chip_hdmi.spin2
+src/test_hdmi_chip_pattern.spin2
+src/test_psram_300mhz.spin2
+src/test_psram_only.spin2
+src/test_psram_readback.spin2
+src/test_hdmi_minimal.spin2
+src/test_hdmi_hub_pattern.spin2

@@ -1,0 +1,67 @@
+'' Test HDMI with simple fill pattern
+'' Mimics isp_psram_graphics approach: start HDMI first, then draw
+
+CON
+  _CLKFREQ = 250_000_000
+  HDMI_BASE_PIN = 0
+  SCREEN_WIDTH = 640
+  SCREEN_HEIGHT = 480
+
+OBJ
+  psram : "PSRAM_driver_RJA_Platform_1b"
+  hdmi  : "isp_hdmi_640x480_24bpp"
+
+VAR
+  LONG psram_cmd_ptr
+  LONG screen_base
+  LONG row[SCREEN_WIDTH]
+
+PUB main()
+
+  debug("=== HDMI SIMPLE FILL TEST ===", 13, 10)
+
+  '' Start PSRAM
+  psram.start()
+  debug("PSRAM started", 13, 10)
+
+  '' Start HDMI FIRST (like isp_psram_graphics does)
+  screen_base := 0
+  hdmi.start(HDMI_BASE_PIN, psram.pointer(), screen_base)
+  debug("HDMI started", 13, 10)
+
+  '' Get our per-cog command pointer for writing
+  psram_cmd_ptr := psram.pointer() + cogid() * 12
+
+  '' Wait a moment
+  waitms(100)
+
+  '' Now fill screen with solid red (like cls does)
+  debug("Filling screen with red...", 13, 10)
+  fillScreen($FF0000FF)
+  debug("Fill complete", 13, 10)
+
+  '' Wait and then fill with green
+  waitms(2000)
+  debug("Filling screen with green...", 13, 10)
+  fillScreen($00FF00FF)
+  debug("Fill complete", 13, 10)
+
+  '' Main loop
+  repeat
+    waitms(5000)
+    debug("Running...", 13, 10)
+
+PRI fillScreen(color) | y
+
+  '' Fill row buffer with color
+  longfill(@row[0], color, SCREEN_WIDTH)
+
+  '' Write row to each line of screen
+  repeat y from 0 to SCREEN_HEIGHT-1
+    LONG[psram_cmd_ptr][0] := @row[0]               ' HUB source
+    LONG[psram_cmd_ptr][1] := y * SCREEN_WIDTH      ' PSRAM destination
+    LONG[psram_cmd_ptr][2] := -SCREEN_WIDTH         ' Negative = write
+    repeat while LONG[psram_cmd_ptr][2]             ' Wait for completion
+
+    if (y // 60) == 0
+      debug("Line ", UDEC(y), 13, 10)
