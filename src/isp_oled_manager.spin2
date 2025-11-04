@@ -31,6 +31,13 @@ CON
   MAX_FIELD   = 4095      ' Maximum field value (12-bit from sensor)
   MID_FIELD   = 2048      ' Neutral field value (12-bit midpoint)
 
+  ' Display orientation constants (pass-through to driver)
+  ' Use these when mounting OLED in different orientations
+  ORIENTATION_0   = 0  ' Ribbon at BOTTOM (standard/default)
+  ORIENTATION_90  = 1  ' Ribbon at RIGHT (rotated 90° clockwise)
+  ORIENTATION_180 = 2  ' Ribbon at TOP (upside down)
+  ORIENTATION_270 = 3  ' Ribbon at LEFT (rotated 90° counter-clockwise)
+
 OBJ
   fifo : "isp_frame_fifo_manager"
   oled : "isp_oled_driver"
@@ -52,6 +59,10 @@ PUB start(oled_base_pin) : ok
   '' @returns cog_id if successful, -1 if failed
 
   debug("OLED Manager: Starting...", 13, 10)
+
+  ' Initialize COG ID FIRST (critical - must be set before calling stop()!)
+  cog_id := -1
+
   stop()
 
   ' Save pin configuration
@@ -86,10 +97,11 @@ PUB start(oled_base_pin) : ok
 PUB stop()
   '' Stop the OLED manager
 
-  if cog_id >= 0
+  ' Validate COG ID is in valid range (0-7) before stopping
+  if cog_id >= 0 and cog_id <= 7
     cogstop(cog_id)
-    cog_id := -1
     oled.stop()
+  cog_id := -1
 
 PUB set_update_mode(mode)
   '' Set display update mode
@@ -101,6 +113,19 @@ PUB get_frame_count() : count
   '' Get number of frames displayed
 
   return frame_count
+
+PUB set_orientation(new_orientation)
+  '' Set display orientation (pass-through to driver)
+  '' @param new_orientation - ORIENTATION_0, ORIENTATION_90, ORIENTATION_180, or ORIENTATION_270
+  '' Call this after start() to configure orientation for panel mounting
+
+  oled.set_orientation(new_orientation)
+
+PUB get_orientation() : current
+  '' Get current display orientation (pass-through to driver)
+  '' @returns current orientation (0-3)
+
+  return oled.get_orientation()
 
 PUB show_test_pattern() | row, col, sensorVal, pattern
   '' Display a test pattern directly (bypasses FIFO)
@@ -168,6 +193,10 @@ PRI oled_loop() | framePtr, row, col, sensorVal, color, idx, changed
       framePtr := fifo.dequeue(FIFO_OLED)
 
       if framePtr <> 0
+        ' Log first frame received
+        if frame_count == 0
+          debug("OLED Manager: First frame received! (ptr=", uhex_long(framePtr), ")", 13, 10)
+
         ' Check if frame has changed (for differential mode)
         changed := false
         if update_mode == MODE_DIFFERENTIAL
@@ -182,16 +211,12 @@ PRI oled_loop() | framePtr, row, col, sensorVal, color, idx, changed
         ' Debug output every 60 frames (~1 second at 60 fps)
         if (frame_count // 60) == 0
           debug("OLED Manager: Processed ", udec(frame_count), " frames", 13, 10)
-          debug("  Corner values: TL=", udec(word[framePtr][0]), " TR=", udec(word[framePtr][7]), \
-                " BL=", udec(word[framePtr][56]), " BR=", udec(word[framePtr][63]), 13, 10)
+          debug("  Corner values: TL=", udec(word[framePtr][0]), " TR=", udec(word[framePtr][7]), " BL=", udec(word[framePtr][56]), " BR=", udec(word[framePtr][63]), 13, 10)
 
         ' Update display if changed or in full update mode
         if changed or (update_mode == MODE_FULL_UPDATE)
-          ' Build display buffer from sensor data
-          build_display_buffer(framePtr)
-
-          ' Send to OLED
-          oled.draw_bitmap(0, 0, OLED_WIDTH, OLED_HEIGHT, @frame_buffer)
+          ' Draw sensor data directly using draw_rect() (avoids streaming COG)
+          draw_sensor_grid(framePtr)
 
           ' Save frame for differential comparison
           wordmove(@last_frame, framePtr, 64)
@@ -203,9 +228,31 @@ PRI oled_loop() | framePtr, row, col, sensorVal, color, idx, changed
         debug("OLED Manager: FIFO dequeue timeout!", 13, 10)
         waitms(10)
 
-PRI build_display_buffer(framePtr) | row, col, sensorIdx, sensorVal, color, x, y, pixelIdx
-  '' Convert sensor frame to OLED display buffer
+PRI draw_sensor_grid(framePtr) | row, col, sensorIdx, sensorVal, color, x_pos, y_pos
+  '' Draw sensor grid directly to OLED using draw_rect() (avoids streaming COG hang)
   '' @param framePtr - pointer to sensor frame data
+
+  ' Process each sensor cell and draw directly
+  repeat row from 0 to 7
+    repeat col from 0 to 7
+      ' Get sensor value
+      sensorIdx := row * 8 + col
+      sensorVal := word[framePtr][sensorIdx]
+
+      ' Convert to RGB565 color
+      color := field_to_rgb565(sensorVal)
+
+      ' Calculate cell position
+      x_pos := col * CELL_WIDTH
+      y_pos := row * CELL_HEIGHT
+
+      ' Draw filled rectangle for this cell using Spin2 bit-bang (works!)
+      oled.draw_rect(x_pos, y_pos, CELL_WIDTH, CELL_HEIGHT, color)
+
+PRI build_display_buffer(framePtr) | row, col, sensorIdx, sensorVal, color, x, y, pixelIdx
+  '' Convert sensor frame to OLED display buffer (LEGACY - for test pattern only)
+  '' @param framePtr - pointer to sensor frame data
+  '' NOTE: This builds a buffer for draw_bitmap() which hangs. Use draw_sensor_grid() instead.
 
   ' Process each sensor
   repeat row from 0 to 7

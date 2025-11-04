@@ -48,6 +48,9 @@ PUB start(hdmi_base_pin) : ok
 
   debug("HDMI Engine: Starting...", 13, 10)
 
+  ' Initialize COG ID FIRST (critical - must be set before calling stop()!)
+  cog_id := -1
+
   ' Save pin configuration
   base_pin := hdmi_base_pin
 
@@ -62,15 +65,14 @@ PUB start(hdmi_base_pin) : ok
   display_mode := 0
   current_frame_ptr := 0
   grid_drawn := 0
-  cog_id := -1  ' Initialize to -1 (no COG running yet)
   debug("HDMI Engine: Variables set", 13, 10)
 
-  ' Start HDMI graphics system with correct pin assignment
+  ' Start HDMI graphics system (engine owns graphics subsystem)
   debug("HDMI Engine: Starting PSRAM graphics on pin ", udec(hdmi_base_pin), "...", 13, 10)
   gfx.start(hdmi_base_pin)
   debug("HDMI Engine: Graphics system ready", 13, 10)
 
-  ' Now stop any existing display COG before starting new one
+  ' Stop any existing display COG before starting new one
   stop()
 
   debug("HDMI Engine: Starting display COG...", 13, 10)
@@ -87,9 +89,10 @@ PUB start(hdmi_base_pin) : ok
 PUB stop()
   '' Stop the HDMI display engine
 
-  if cog_id >= 0
+  ' Validate COG ID is in valid range (0-7) before stopping
+  if cog_id >= 0 and cog_id <= 7
     cogstop(cog_id)
-    cog_id := -1
+  cog_id := -1
 
 PUB set_display_mode(mode)
   '' Set display visualization mode
@@ -141,27 +144,28 @@ PRI display_loop() | framePtr, row, col, sensorIdx, sensorVal, cellColor
     ' Normal operation - process FIFO frames and render to display
     debug("HDMI Engine Loop: FIFO processing mode active", 13, 10)
 
-    ' DIAGNOSTIC: Comment out drawing to see if test pattern from gfx.start() appears
-    debug("HDMI Engine Loop: Skipping drawing for diagnostic, entering loop...", 13, 10)
+    ' Clear screen and draw grid on startup
+    debug("HDMI Engine Loop: Clearing screen...", 13, 10)
+    gfx.cls($00_00_00)  ' Black background
 
-    ' ' Clear screen and draw grid on startup
-    ' debug("HDMI Engine Loop: Clearing screen...", 13, 10)
-    ' gfx.cls($00_00_00)  ' Black background
+    debug("HDMI Engine Loop: Drawing sensor grid...", 13, 10)
+    gfx.DrawSensorGrid(GRID_X, GRID_Y, CELL_SIZE, CELL_GAP)
+    grid_drawn := 1
 
-    ' debug("HDMI Engine Loop: Drawing sensor grid...", 13, 10)
-    ' gfx.DrawSensorGrid(GRID_X, GRID_Y, CELL_SIZE, CELL_GAP)
-    ' grid_drawn := 1
-
-    ' ' Add text labels around the display
-    ' debug("HDMI Engine Loop: Drawing text labels...", 13, 10)
-    ' DrawStaticLabels()
-    ' debug("HDMI Engine Loop: Grid ready, waiting for frames...", 13, 10)
+    ' Add text labels around the display
+    debug("HDMI Engine Loop: Drawing text labels...", 13, 10)
+    DrawStaticLabels()
+    debug("HDMI Engine Loop: Grid ready, waiting for frames...", 13, 10)
 
     repeat
       ' Dequeue frame from HDMI FIFO (blocking)
       framePtr := fifo.dequeue(FIFO_HDMI)
 
       if framePtr <> 0
+        ' Log first frame received
+        if frame_count == 0
+          debug("HDMI Engine: First frame received! (ptr=", uhex_long(framePtr), ")", 13, 10)
+
         ' Render all 64 sensor cells to display
         repeat row from 0 to 7
           repeat col from 0 to 7

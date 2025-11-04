@@ -33,10 +33,12 @@ VAR
 PUB null()
   '' Not a top-level object
 
-PUB start(fifo_obj) : ok
+PUB start() : ok
   '' Start the frame processor COG
-  '' @param fifo_obj - pointer to frame FIFO manager
   '' @returns cog_id if successful, -1 if failed
+
+  ' Initialize COG ID FIRST (critical - must be set before calling stop()!)
+  cog_id := -1
 
   stop()
 
@@ -49,7 +51,7 @@ PUB start(fifo_obj) : ok
   oled_counter := 0
 
   ' Start processing COG
-  cog_id := cogspin(NEWCOG, processor_loop(fifo_obj), @stats)
+  cog_id := cogspin(NEWCOG, processor_loop(), @stats)
 
   return cog_id
 
@@ -83,9 +85,10 @@ PUB get_stats(stat_ptr)
 
   longmove(stat_ptr, @stats, 4)
 
-PRI processor_loop(fifo_obj) | framePtr, sendHDMI, sendOLED
+PRI processor_loop() | framePtr, sendHDMI, sendOLED, hdmiPtr, oledPtr
   '' Main processing loop running in dedicated COG
-  '' @param fifo_obj - pointer to FIFO manager
+
+  debug("Frame Processor: Loop started", 13, 10)
 
   repeat
     ' Wait for frame from sensor FIFO
@@ -94,6 +97,10 @@ PRI processor_loop(fifo_obj) | framePtr, sendHDMI, sendOLED
     if framePtr
       ' Update frame counter
       frame_counter++
+
+      ' Debug every 30 frames (every 0.5 sec at 60fps)
+      if (frame_counter // 30) == 1
+        debug("Processor: Frame ", udec(frame_counter), " from sensor (ptr=", uhex_long(framePtr), ")", 13, 10)
 
       ' Process frame based on mode
       case processing_mode
@@ -113,17 +120,35 @@ PRI processor_loop(fifo_obj) | framePtr, sendHDMI, sendOLED
           sendOLED := (++oled_counter // oled_decimation) == 0
 
       ' Route to appropriate display FIFOs
+      ' Note: Independent checks allow frame to go to BOTH displays
+      ' Each display gets its own copy to prevent ownership conflicts
+
       if sendHDMI
-        if fifo.commitFrame(fifo.FIFO_HDMI, framePtr) < 0
-          ' HDMI FIFO full, release frame
-          fifo.releaseFrame(framePtr)
-      elseif sendOLED
-        if fifo.commitFrame(fifo.FIFO_OLED, framePtr) < 0
-          ' OLED FIFO full, release frame
-          fifo.releaseFrame(framePtr)
-      else
-        ' Frame not needed by any display, release it
-        fifo.releaseFrame(framePtr)
+        hdmiPtr := fifo.getNextFrame()
+        if hdmiPtr
+          wordmove(hdmiPtr, framePtr, 64)  ' Copy 64 words (128 bytes)
+          if fifo.commitFrame(fifo.FIFO_HDMI, hdmiPtr) < 0
+            ' HDMI FIFO full, release the copy
+            debug("Processor: HDMI FIFO FULL!", 13, 10)
+            fifo.releaseFrame(hdmiPtr)
+          else
+            if (frame_counter // 30) == 1
+              debug("Processor: -> HDMI (frame ", udec(frame_counter), ")", 13, 10)
+
+      if sendOLED
+        oledPtr := fifo.getNextFrame()
+        if oledPtr
+          wordmove(oledPtr, framePtr, 64)  ' Copy 64 words (128 bytes)
+          if fifo.commitFrame(fifo.FIFO_OLED, oledPtr) < 0
+            ' OLED FIFO full, release the copy
+            debug("Processor: OLED FIFO FULL!", 13, 10)
+            fifo.releaseFrame(oledPtr)
+          else
+            if (frame_counter // 30) == 1
+              debug("Processor: -> OLED (frame ", udec(frame_counter), ")", 13, 10)
+
+      ' Always release the original sensor frame
+      fifo.releaseFrame(framePtr)
 
       ' Update statistics
       stats[0] := frame_counter

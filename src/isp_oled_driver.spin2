@@ -28,6 +28,16 @@ CON
   WIDTH  = 128
   HEIGHT = 128
 
+  ' Display orientation (for panel mounting flexibility)
+  ' Standard: Ribbon at BOTTOM, (0,0) at top-left
+  ORIENTATION_0   = 0  ' Ribbon at BOTTOM (standard/default)
+  ORIENTATION_90  = 1  ' Ribbon at RIGHT (rotated 90° clockwise)
+  ORIENTATION_180 = 2  ' Ribbon at TOP (upside down)
+  ORIENTATION_270 = 3  ' Ribbon at LEFT (rotated 90° counter-clockwise)
+
+  ' Default orientation
+  DEFAULT_ORIENTATION = ORIENTATION_0
+
   ' Mailbox indices for PASM2 streaming COG
   MB_LUT_PTR    = 0  ' Bit-reverse lookup table pointer
   MB_FRAME_PTR  = 1  ' Frame data pointer
@@ -67,10 +77,20 @@ CON
 
 VAR
   long  initialized
+  long  orientation      ' Current display orientation (0-3)
   long  bitrev_lut[256]  ' Lookup table for bit-reversed bytes
   long  cog_id           ' COG ID for streaming engine (-1 = not running)
   long  mailbox[5]       ' [0]=lut_ptr, [1]=frame_ptr, [2]=byte_count, [3]=go_flag, [4]=status
   byte  frame_buffer[WIDTH * HEIGHT * 2]  ' Full frame buffer for PASM2 streaming
+
+DAT
+  ' Remap register values for each orientation
+  ' Format: $A0 command data - controls row/column order and color mode
+  ' Bit 7:6 = 01 (65K RGB), Bit 5 = 1 (COM split), Bit 4 = row order, Bit 1 = col order, Bit 0 = col remap
+  remap_values  byte  $65   ' ORIENTATION_0: Ribbon BOTTOM (standard)
+                byte  $76   ' ORIENTATION_90: Ribbon RIGHT (swap + flip)
+                byte  $62   ' ORIENTATION_180: Ribbon TOP (both flipped)
+                byte  $71   ' ORIENTATION_270: Ribbon LEFT (swap + flip)
 
 PUB null()
   '' Not a top-level object
@@ -84,13 +104,20 @@ PUB start(pin_base) : ok | clk_period, i, temp
   debug("  Pin assignments: MOSI=P", udec(PIN_MOSI), " SCLK=P", udec(PIN_SCLK))
   debug(" CS=P", udec(PIN_CS), " DC=P", udec(PIN_DC), " RST=P", udec(PIN_RST), 13, 10)
 
-  ' Initialize COG management
+  ' Initialize COG management and orientation
   cog_id := -1
+  orientation := DEFAULT_ORIENTATION
   mailbox[MB_LUT_PTR]    := @bitrev_lut
   mailbox[MB_FRAME_PTR]  := 0
   mailbox[MB_BYTE_COUNT] := 0
   mailbox[MB_GO_FLAG]    := 0
   mailbox[MB_STATUS]     := 0
+
+  case orientation
+    ORIENTATION_0:   debug("  Display orientation: ", udec(orientation), " (Ribbon BOTTOM)", 13, 10)
+    ORIENTATION_90:  debug("  Display orientation: ", udec(orientation), " (Ribbon RIGHT)", 13, 10)
+    ORIENTATION_180: debug("  Display orientation: ", udec(orientation), " (Ribbon TOP)", 13, 10)
+    ORIENTATION_270: debug("  Display orientation: ", udec(orientation), " (Ribbon LEFT)", 13, 10)
 
   ' Build bit-reverse lookup table for fast SPI transmission
   debug("  Building bit-reverse LUT...", 13, 10)
@@ -180,8 +207,8 @@ PUB init_display()
   debug("    Init step 5: Mux ratio (CA 7F)", 13, 10)
   write_cmd_data1(CMD_MUX_RATIO, $7F)  ' 128 MUX
 
-  debug("    Init step 6: Set remap (A0 65)", 13, 10)
-  write_cmd_data1(CMD_SET_REMAP, $65)  ' A[7:6]=01 65k, A[5]=1 COM split, A[0]=1 Column remap
+  debug("    Init step 6: Set remap (A0 ", uhex_byte(byte[@remap_values][orientation]), ")", 13, 10)
+  write_cmd_data1(CMD_SET_REMAP, byte[@remap_values][orientation])  ' Orientation-specific remap
 
   debug("    Init step 7: Start line (A1 00)", 13, 10)
   write_cmd_data1(CMD_START_LINE, $00)
@@ -266,6 +293,25 @@ PUB display_off()
   '' Turn display off
 
   write_command(CMD_DISPLAY_OFF)
+
+PUB set_orientation(new_orientation)
+  '' Set display orientation for panel mounting
+  '' @param new_orientation - ORIENTATION_0, ORIENTATION_90, ORIENTATION_180, or ORIENTATION_270
+  '' NOTE: Requires re-initialization to take effect (call after start())
+
+  if new_orientation >= 0 and new_orientation <= 3
+    orientation := new_orientation
+    ' Apply new remap setting
+    write_cmd_data1(CMD_SET_REMAP, byte[@remap_values][orientation])
+    debug("OLED: Orientation set to ", udec(orientation), 13, 10)
+  else
+    debug("OLED: Invalid orientation ", udec(new_orientation), " (must be 0-3)", 13, 10)
+
+PUB get_orientation() : current
+  '' Get current display orientation
+  '' @returns current orientation (0-3)
+
+  return orientation
 
 PUB set_window(x1, y1, x2, y2)
   '' Set drawing window

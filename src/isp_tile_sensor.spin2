@@ -65,7 +65,8 @@ OBJ
 
 VAR { tile sensor variables }
 
-    LONG    cog_id                      ' Background cog ID (-1 = stopped, >=0 = running)
+    LONG    cog_id                      ' PASM acquisition COG ID (-1 = stopped, >=0 = running)
+    LONG    manager_cog_id              ' Spin2 FIFO manager COG ID
     LONG    frame_count                 ' Total frames captured
     LONG    error_count                 ' SPI/sensor error count
     LONG    acquisition_mode            ' Current acquisition mode
@@ -83,6 +84,10 @@ VAR { tile sensor variables }
 
     ' Test pattern state
     LONG    test_pattern_frame_num      ' Current test pattern frame (0-4)
+
+    ' Mailbox for Spin2 <-> PASM communication
+    LONG    mailbox_frame_ptr           ' Frame buffer pointer (Spin2 provides, PASM writes to)
+    LONG    mailbox_go_flag             ' Handshake: 1=PASM capture, 0=PASM done
 
 CON { acquisition modes }
 
@@ -116,6 +121,11 @@ PUB start(sensor_base_pin) : success
 '' @param sensor_base_pin - base pin for sensor interface
 '' @returns TRUE if successful, FALSE if failed to start
 
+    ' Initialize COG IDs FIRST (critical - must be set before any checks!)
+    if cog_id == 0
+        cog_id := -1
+        manager_cog_id := -1
+
     if cog_id >= 0
         return TRUE                     ' Already running
 
@@ -125,18 +135,32 @@ PUB start(sensor_base_pin) : success
     ' Initialize variables
     frame_count := 0
     error_count := 0
-    acquisition_mode := MODE_STOPPED
+    acquisition_mode := MODE_TEST_PATTERN  ' Start in test mode so FIFO manager runs
     frame_rate_target := 375            ' Default 375 Hz (1/4 max speed)
     min_frame_time := $7FFFFFFF
     max_frame_time := 0
     baseline_valid := FALSE             ' No baseline until calibrated
 
-    ' Configure sensor pins
-    ' TODO: setup_pins() removed due to compilation issues - pins configured in PASM section
-    ' setup_pins()
+    ' Initialize mailbox
+    mailbox_frame_ptr := 0
+    mailbox_go_flag := 0
 
-    ' Start background cog with parameter block
+    ' Start Spin2 FIFO manager COG (manages FIFO operations)
+    debug("Sensor: Launching FIFO manager COG...", 13, 10)
+    manager_cog_id := cogspin(NEWCOG, fifo_manager_loop(), 0)
+    if manager_cog_id < 0
+        debug("Sensor: ERROR - FIFO manager COG failed!", 13, 10)
+        return FALSE
+    debug("Sensor: FIFO manager COG ", udec(manager_cog_id), " launched", 13, 10)
+
+    ' Start PASM acquisition COG (reads sensors, writes to buffers)
+    debug("Sensor: Launching PASM acquisition COG...", 13, 10)
     cog_id := coginit(NEWCOG, @sensor_cog_entry, @frame_count)
+    if cog_id < 0
+        debug("Sensor: ERROR - PASM acquisition COG failed!", 13, 10)
+        cogstop(manager_cog_id)
+        return FALSE
+    debug("Sensor: PASM acquisition COG ", udec(cog_id), " launched", 13, 10)
 
     ' Return success based on cog_id validity
     return (cog_id >= 0)
@@ -145,10 +169,13 @@ PUB stop()
 '' Stop the tile sensor and terminate background cog operation
 '' @returns nothing - stops all sensor operations
 
-    if cog_id >= 0
+    if cog_id >= 0 and cog_id <= 7
         cogstop(cog_id)
         cog_id := -1
-        ' FIFO manager stopped by main, not here
+
+    if manager_cog_id >= 0 and manager_cog_id <= 7
+        cogstop(manager_cog_id)
+        manager_cog_id := -1
 
 PUB set_acquisition_mode(mode)
 '' Set the sensor acquisition mode for different capture speeds
@@ -387,6 +414,37 @@ PUB read_all_sensors_test(buffer_ptr) | i, value
         if i < 63                        ' Don't advance after last sensor
             advance_counter_test()
 
+PRI fifo_manager_loop() | framePtr
+'' Spin2 FIFO manager loop running in dedicated COG
+'' Manages FIFO operations and coordinates with PASM acquisition COG via mailbox
+
+    debug("Sensor FIFO Manager: Loop started", 13, 10)
+
+    repeat
+        ' Check if acquisition is active
+        if acquisition_mode == MODE_STOPPED
+            waitms(10)
+            next
+
+        ' Get frame buffer from FIFO
+        framePtr := fifo.getNextFrame()
+        if framePtr == 0
+            ' No buffers available, wait and retry
+            waitms(1)
+            next
+
+        ' Provide buffer to PASM COG and signal to capture
+        mailbox_frame_ptr := framePtr
+        mailbox_go_flag := 1
+
+        ' Wait for PASM to complete capture
+        repeat until mailbox_go_flag == 0
+
+        ' Commit completed frame to sensor FIFO
+        if fifo.commitFrame(fifo.FIFO_SENSOR, framePtr) < 0
+            ' FIFO full - release frame back to pool
+            fifo.releaseFrame(framePtr)
+
 DAT { background cog code }
 
                         ORG     0
@@ -416,9 +474,12 @@ sensor_cog_entry
                         add     temp, #156               ' 28 + 128 bytes baseline array
                         mov     baseline_valid_ptr, temp ' Pointer to baseline_valid flag
 
-                        ' Load FIFO object address (singleton shared instance)
-                        ' TODO: FIFO interface needs proper implementation
-                        ' mov     fifo_obj, ##@fifo        ' BROKEN: Can't reference OBJ from PASM this way
+                        ' Calculate mailbox addresses
+                        mov     temp, param_ptr
+                        add     temp, #160               ' Offset to mailbox_frame_ptr
+                        mov     mailbox_ptr_addr, temp
+                        add     temp, #4                 ' Offset to mailbox_go_flag
+                        mov     mailbox_go_addr, temp
 
                         ' Fixed pin assignments (TILE_PIN_GROUP = 8)
                         mov     cs_pin, #8
@@ -434,29 +495,27 @@ sensor_cog_entry
                         getqx   frame_period             ' frame_period = clkfreq / 375
 
 acquisition_loop
+                        ' Wait for Spin2 FIFO manager to provide buffer (mailbox_go_flag == 1)
+                        rdlong  temp, mailbox_go_addr
+                        tjz     temp, #acquisition_loop
+
+                        ' Get frame buffer pointer from mailbox
+                        rdlong  frame_ptr, mailbox_ptr_addr
+
                         ' Record frame start time
                         getct   frame_start_time
 
-                        ' Check acquisition mode - continue unless explicitly stopped
-                        rdlong  temp, acq_mode_ptr
-                        cmp     temp, #MODE_STOPPED wz
-                if_z    jmp     #acquisition_loop
-
-                        ' Get frame buffer for new data from FIFO manager
-                        call    #get_frame_buffer
-                        tjz     frame_ptr, #acquisition_loop  ' Skip if no buffer available
-
                         ' Capture sensor frame with remapping and baseline subtraction
                         call    #capture_frame
-
-                        ' Commit frame to sensor FIFO
-                        call    #commit_frame_buffer
 
                         ' Update frame count
                         mov     temp2, param_ptr         ' frame_count at offset 0
                         rdlong  temp, temp2
                         add     temp, #1
                         wrlong  temp, temp2
+
+                        ' Signal completion by clearing go flag (tells Spin2 we're done)
+                        wrlong  #0, mailbox_go_addr
 
                         ' Frame rate control - wait for frame period
                         call    #frame_rate_control
@@ -465,29 +524,6 @@ acquisition_loop
 
 acquisition_exit
                         cogstop #0
-
-get_frame_buffer
-                        ' Call FIFO manager's getNextFrame() method
-                        ' Setup for Spin2 object method call from PASM
-                        mov     ptra, fifo_obj           ' Object pointer
-                        rdlong  temp, ptra               ' Get vtable pointer
-                        add     temp, #(5*4)             ' Offset to getNextFrame() (method index 5)
-                        rdlong  temp, temp               ' Get method address
-                        call    temp                     ' Call method, result in ptra
-                        mov     frame_ptr, ptra          ' Save frame buffer pointer
-get_frame_buffer_ret    ret
-
-commit_frame_buffer
-                        ' Call FIFO manager's commitFrame(FIFO_SENSOR, framePtr) method
-                        ' Method signature: commitFrame(fifoID, framePtr)
-                        mov     ptra, fifo_obj           ' Object pointer
-                        mov     pa, #0                   ' FIFO_SENSOR = 0
-                        mov     pb, frame_ptr            ' Frame pointer
-                        rdlong  temp, ptra               ' Get vtable pointer
-                        add     temp, #(6*4)             ' Offset to commitFrame() (method index 6)
-                        rdlong  temp, temp               ' Get method address
-                        call    temp                     ' Call method
-commit_frame_buffer_ret ret
 
 capture_frame
                         ' Check if in test pattern mode
@@ -702,7 +738,8 @@ acq_mode_ptr            LONG    0
 frame_rate_ptr          LONG    0
 baseline_ptr            LONG    0
 baseline_valid_ptr      LONG    0
-fifo_obj                LONG    0
+mailbox_ptr_addr        LONG    0
+mailbox_go_addr         LONG    0
 cs_pin                  LONG    0
 cclk_pin                LONG    0
 miso_pin                LONG    0
