@@ -50,6 +50,9 @@ VAR
   word  last_frame[64]    ' Previous frame for differential updates
   byte  frame_buffer[OLED_WIDTH * OLED_HEIGHT * 2]  ' OLED display buffer (RGB565)
 
+  ' COG stack (64 longs per P2KB recommendations)
+  long  oled_cog_stack[64]
+
 PUB null()
   '' Not a top-level object
 
@@ -85,7 +88,7 @@ PUB start(oled_base_pin) : ok
 
   debug("OLED Manager: Starting display COG...", 13, 10)
   ' Start display COG
-  cog_id := cogspin(NEWCOG, oled_loop(), @frame_count)
+  cog_id := cogspin(NEWCOG, oled_loop(), @oled_cog_stack)
 
   if cog_id < 0
     debug("OLED Manager: ERROR - Failed to start COG!", 13, 10)

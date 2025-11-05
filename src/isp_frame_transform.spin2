@@ -30,6 +30,9 @@ VAR
   long  oled_counter
   long  stats[4]                 ' Performance statistics
 
+  ' COG stack (64 longs per P2KB recommendations)
+  long  processor_cog_stack[64]
+
 PUB null()
   '' Not a top-level object
 
@@ -51,7 +54,7 @@ PUB start() : ok
   oled_counter := 0
 
   ' Start processing COG
-  cog_id := cogspin(NEWCOG, processor_loop(), @stats)
+  cog_id := cogspin(NEWCOG, processor_loop(), @processor_cog_stack)
 
   return cog_id
 

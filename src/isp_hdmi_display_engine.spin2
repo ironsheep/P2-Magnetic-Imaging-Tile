@@ -38,6 +38,9 @@ VAR
   long  grid_drawn              ' Flag: 0=not drawn, 1=drawn
   word  frame_buffer[64]
 
+  ' COG stack (64 longs per P2KB recommendations)
+  long  display_cog_stack[64]
+
 PUB null()
   '' Not a top-level object
 
@@ -77,7 +80,7 @@ PUB start(hdmi_base_pin) : ok
 
   debug("HDMI Engine: Starting display COG...", 13, 10)
   ' Start display COG
-  cog_id := cogspin(NEWCOG, display_loop(), @frame_count)
+  cog_id := cogspin(NEWCOG, display_loop(), @display_cog_stack)
 
   if cog_id < 0
     debug("HDMI Engine: ERROR - Failed to start COG!", 13, 10)
@@ -154,12 +157,15 @@ PRI display_loop() | framePtr, row, col, sensorIdx, sensorVal, cellColor
 
     ' Add text labels around the display
     debug("HDMI Engine Loop: Drawing text labels...", 13, 10)
-    DrawStaticLabels()
+    ' TEMPORARY: Comment out to isolate hang
+    ' DrawStaticLabels()
     debug("HDMI Engine Loop: Grid ready, waiting for frames...", 13, 10)
 
     repeat
       ' Dequeue frame from HDMI FIFO (blocking)
+      debug("HDMI Engine: [DEQ] Calling dequeue(FIFO_HDMI)...", 13, 10)
       framePtr := fifo.dequeue(FIFO_HDMI)
+      debug("HDMI Engine: [DEQ] Returned from dequeue, ptr=", uhex_long(framePtr), 13, 10)
 
       if framePtr <> 0
         ' Log first frame received
@@ -181,13 +187,10 @@ PRI display_loop() | framePtr, row, col, sensorIdx, sensorVal, cellColor
 
         ' Increment frame counter
         frame_count++
-
-        ' Debug output every 10 frames (every 30 seconds at 1 frame/3 sec)
-        if (frame_count // 10) == 0
-          debug("HDMI Engine: Rendered ", udec(frame_count), " frames", 13, 10)
-          debug("  Corner values: TL=", udec(WORD[framePtr][0]), " TR=", udec(WORD[framePtr][7]), " BL=", udec(WORD[framePtr][56]), " BR=", udec(WORD[framePtr][63]), 13, 10)
+        debug("HDMI Engine: Frame ", udec(frame_count), " rendered, corner values: TL=", udec(WORD[framePtr][0]), " TR=", udec(WORD[framePtr][7]), 13, 10)
 
         ' Release frame back to pool
+        debug("HDMI Engine: Releasing frame ptr=", uhex_long(framePtr), 13, 10)
         fifo.releaseFrame(framePtr)
       else
         ' FIFO timeout - shouldn't happen in normal operation

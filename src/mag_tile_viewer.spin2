@@ -25,14 +25,32 @@ OBJ
 
   ' Display engines
   hdmi_engine : "isp_hdmi_display_engine"    ' HDMI display consumer (owns gfx)
-  oled_mgr    : "isp_oled_manager"           ' OLED display consumer
+  oled        : "isp_oled_single_cog"        ' OLED single-COG driver (replaces old multi-COG stack)
 
-  ' Data acquisition and processing
+  ' Data acquisition
   sensor      : "isp_tile_sensor"            ' Magnetic tile sensor interface
-  processor   : "isp_frame_processor"        ' Frame routing/decimation
 
 VAR
-  long  system_status
+  LONG  system_status
+
+  ' Decimation state (integrated into main COG)
+  LONG  processing_mode
+  LONG  hdmi_decimation
+  LONG  oled_decimation
+  LONG  frame_counter
+  LONG  hdmi_counter
+  LONG  oled_counter
+
+CON { decimation constants }
+
+  ' Default decimation ratios
+  DEFAULT_HDMI_DECIMATION = 9    ' Every 9th frame to HDMI
+  DEFAULT_OLED_DECIMATION = 27   ' Every 27th frame to OLED
+
+  ' Processing modes
+  MODE_DECIMATION = 0            ' Simple frame skipping
+  MODE_AVERAGING  = 1            ' Average multiple frames
+  MODE_PEAK       = 2            ' Peak detection across frames
 
 PUB main() | success
 
@@ -52,30 +70,33 @@ PUB main() | success
     return
   debug("  HDMI engine ready", 13, 10)
 
-  ' Start OLED manager
-  debug("Starting OLED manager (P16-P23)...", 13, 10)
-  if oled_mgr.start(OLED_BASE_PIN) < 0
-    debug("ERROR: Failed to start OLED manager", 13, 10)
+  ' Start OLED single-COG driver (P16-P23)
+  debug("Starting OLED single-COG driver...", 13, 10)
+  if not oled.start(OLED_BASE_PIN)
+    debug("ERROR: Failed to start OLED driver", 13, 10)
     return
-  debug("  OLED manager ready", 13, 10)
+  debug("  OLED driver ready", 13, 10)
 
   ' Configure OLED orientation for hardware setup (ribbon to LEFT)
-  oled_mgr.set_orientation(oled_mgr.ORIENTATION_270)
+  oled.set_orientation(oled.ORIENTATION_270)
   debug("  OLED orientation set to 270 deg (ribbon LEFT)", 13, 10)
 
-  ' Start frame processor for data routing
-  debug("Starting frame processor...", 13, 10)
-  if processor.start() < 0  ' Uses its own fifo object declared in OBJ block
-    debug("ERROR: Failed to start frame processor", 13, 10)
-    return
-  debug("  Frame processor ready", 13, 10)
+  ' Initialize decimation state (integrated into main COG)
+  debug("Initializing decimation in main COG...", 13, 10)
+  processing_mode := MODE_DECIMATION
+  frame_counter := 0
+  hdmi_counter := 0
+  oled_counter := 0
 
-  ' Configure processor for test mode (bypass decimation)
+  ' Configure decimation based on test mode
   if TEST_MODE
-    processor.set_decimation(1, 1)  ' Send EVERY frame to both displays
-    debug("  Processor in TEST MODE - no decimation (1:1)", 13, 10)
+    hdmi_decimation := 1  ' Send EVERY frame to HDMI
+    oled_decimation := 1  ' Send EVERY frame to OLED
+    debug("  Decimation in TEST MODE - 1:1 (no decimation)", 13, 10)
   else
-    debug("  Processor in NORMAL mode - decimation 9:27", 13, 10)
+    hdmi_decimation := DEFAULT_HDMI_DECIMATION
+    oled_decimation := DEFAULT_OLED_DECIMATION
+    debug("  Decimation in NORMAL mode - HDMI ", udec(hdmi_decimation), ":1, OLED ", udec(oled_decimation), ":1", 13, 10)
 
   ' Start sensor interface
   debug("Starting sensor interface (P8-P15)...", 13, 10)
@@ -97,17 +118,88 @@ PUB main() | success
   debug("System initialization complete!", 13, 10)
   debug(" ", 13, 10)
   debug("=== PIPELINE ACTIVE ===", 13, 10)
-  debug("Data flow: Sensor -> FIFO -> Processor -> HDMI/OLED", 13, 10)
+  debug("Data flow: Sensor -> Sensor FIFO -> Main COG (decimator) -> HDMI/OLED FIFOs", 13, 10)
   debug(" ", 13, 10)
 
-  ' Main monitoring loop
-  repeat
-    waitms(5000)
-    debug("System running - HDMI frames: ", udec(hdmi_engine.get_frame_count()))
-    debug(", OLED frames: ", udec(oled_mgr.get_frame_count()), 13, 10)
+  ' Main decimation loop (runs in main COG)
+  decimation_loop()
 
-    ' Monitor FIFO depths to see data flow
-    debug("  FIFO depths - Sensor: ", udec(fifo.getQueueDepth(fifo.FIFO_SENSOR)))
-    debug(", HDMI: ", udec(fifo.getQueueDepth(fifo.FIFO_HDMI)))
-    debug(", OLED: ", udec(fifo.getQueueDepth(fifo.FIFO_OLED)))
-    debug(", Free: ", udec(fifo.getFreeFrames()), 13, 10)
+PRI decimation_loop() | framePtr, sendHDMI, sendOLED, hdmiPtr, oledPtr
+'' Main decimation loop running in main COG
+'' Dequeues frames from sensor FIFO, applies decimation, routes to display FIFOs
+
+  debug("Main COG: Decimation loop started", 13, 10)
+
+  repeat
+    ' Wait for frame from sensor FIFO
+    debug("Main COG: [DEQ] Waiting for frame from SENSOR FIFO...", 13, 10)
+    framePtr := fifo.dequeue(fifo.FIFO_SENSOR)
+    debug("Main COG: [DEQ] Got frame from SENSOR FIFO, ptr=", uhex_long(framePtr), 13, 10)
+
+    if framePtr
+      ' Update frame counter
+      frame_counter++
+
+      ' Debug every 30 frames (every 0.5 sec at 60fps)
+      if (frame_counter // 30) == 1
+        debug("Main COG: Frame ", udec(frame_counter), " from sensor (ptr=", uhex_long(framePtr), ")", 13, 10)
+        debug("  FIFO depths - Sensor: ", udec(fifo.getQueueDepth(fifo.FIFO_SENSOR)))
+        debug(", HDMI: ", udec(fifo.getQueueDepth(fifo.FIFO_HDMI)))
+        debug(", OLED: ", udec(fifo.getQueueDepth(fifo.FIFO_OLED)))
+        debug(", Free: ", udec(fifo.getFreeFrames()), 13, 10)
+        debug("  Display frames - HDMI: ", udec(hdmi_engine.get_frame_count()))
+        debug(", OLED: ", udec(oled.get_frame_count()), 13, 10)
+
+      ' Process frame based on mode
+      case processing_mode
+        MODE_DECIMATION:
+          ' Simple decimation - pass through selected frames
+          hdmi_counter++
+          oled_counter++
+          sendHDMI := (hdmi_counter // hdmi_decimation) == 0
+          sendOLED := (oled_counter // oled_decimation) == 0
+
+        MODE_AVERAGING:
+          ' TODO: Implement frame averaging
+          hdmi_counter++
+          oled_counter++
+          sendHDMI := (hdmi_counter // hdmi_decimation) == 0
+          sendOLED := (oled_counter // oled_decimation) == 0
+
+        MODE_PEAK:
+          ' TODO: Implement peak detection
+          hdmi_counter++
+          oled_counter++
+          sendHDMI := (hdmi_counter // hdmi_decimation) == 0
+          sendOLED := (oled_counter // oled_decimation) == 0
+
+      ' Route to appropriate display FIFOs
+      ' Note: Independent checks allow frame to go to BOTH displays
+      ' Each display gets its own copy to prevent ownership conflicts
+
+      if sendHDMI
+        hdmiPtr := fifo.getNextFrame()
+        if hdmiPtr
+          WORDMOVE(hdmiPtr, framePtr, 64)  ' Copy 64 words (128 bytes)
+          debug("Main COG: [ENQ] Committing to HDMI FIFO, ptr=", uhex_long(hdmiPtr), 13, 10)
+          if fifo.commitFrame(fifo.FIFO_HDMI, hdmiPtr) < 0
+            ' HDMI FIFO full, release the copy
+            debug("Main COG: [ENQ] HDMI FIFO FULL! Releasing", 13, 10)
+            fifo.releaseFrame(hdmiPtr)
+          else
+            debug("Main COG: [ENQ] HDMI committed (frame ", udec(frame_counter), ")", 13, 10)
+
+      if sendOLED
+        oledPtr := fifo.getNextFrame()
+        if oledPtr
+          WORDMOVE(oledPtr, framePtr, 64)  ' Copy 64 words (128 bytes)
+          debug("Main COG: [ENQ] Committing to OLED FIFO, ptr=", uhex_long(oledPtr), 13, 10)
+          if fifo.commitFrame(fifo.FIFO_OLED, oledPtr) < 0
+            ' OLED FIFO full, release the copy
+            debug("Main COG: [ENQ] OLED FIFO FULL! Releasing", 13, 10)
+            fifo.releaseFrame(oledPtr)
+          else
+            debug("Main COG: [ENQ] OLED committed (frame ", udec(frame_counter), ")", 13, 10)
+
+      ' Always release the original sensor frame
+      fifo.releaseFrame(framePtr)

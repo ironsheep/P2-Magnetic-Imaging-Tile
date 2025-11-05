@@ -230,3 +230,4 @@ src/test_psram_only.spin2
 src/test_psram_readback.spin2
 src/test_hdmi_minimal.spin2
 src/test_hdmi_hub_pattern.spin2
+/tasks/archives

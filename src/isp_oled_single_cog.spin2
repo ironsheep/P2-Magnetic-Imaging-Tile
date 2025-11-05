@@ -1,0 +1,566 @@
+'' =================================================================================================
+''   File....... isp_oled_single_cog.spin2
+''   Purpose.... Single-COG OLED driver with integrated FIFO management
+''   Author..... Stephen M Moraco
+''               -- Copyright (c) 2025 Iron Sheep Productions, LLC
+''               -- see below for terms of use
+''   E-mail..... stephen@ironsheep.biz
+''   Started.... Jan 2025
+''   Updated.... Jan 2025
+''
+'' =================================================================================================
+''
+'' Consolidated single-COG OLED solution that combines:
+''   - FIFO frame dequeue and management
+''   - Sensor data to color conversion (8x8 grid)
+''   - Direct SPI transmission to 128x128 OLED display
+''
+'' Hardware: 128x128 SPI OLED (SSD1351 controller)
+'' Pin connections (fixed pins):
+''   P16: MOSI - SPI Data
+''   P18: SCLK - SPI Clock
+''   P20: CS   - Chip Select
+''   P22: DC   - Data/Command
+''   P23: RST  - Reset
+''
+'' Display: 8x8 sensor grid scaled to 128x128 pixels (16x16 pixels per cell)
+''
+'' =================================================================================================
+
+CON
+  ' Pin offsets from base pin (non-consecutive group)
+  OFFSET_MOSI = 0   ' Base + 0 = MOSI - Smart Pin SYNC_TX
+  OFFSET_SCLK = 2   ' Base + 2 = SCLK - Smart Pin PULSE
+  OFFSET_CS   = 4   ' Base + 4 = CS - GPIO
+  OFFSET_DC   = 6   ' Base + 6 = DC - GPIO
+  OFFSET_RST  = 7   ' Base + 7 = RST - GPIO
+
+  ' SPI timing
+  SPI_FREQ = 20_000_000   ' 20 MHz SPI clock (maximum per datasheet)
+
+  ' Display dimensions
+  WIDTH  = 128
+  HEIGHT = 128
+
+  ' Sensor grid configuration
+  SENSOR_GRID_SIZE = 8
+  CELL_WIDTH  = WIDTH / SENSOR_GRID_SIZE    ' 16 pixels per cell
+  CELL_HEIGHT = HEIGHT / SENSOR_GRID_SIZE   ' 16 pixels per cell
+
+  ' Display orientation
+  ORIENTATION_0   = 0  ' Ribbon at BOTTOM (standard/default)
+  ORIENTATION_90  = 1  ' Ribbon at RIGHT (rotated 90° clockwise)
+  ORIENTATION_180 = 2  ' Ribbon at TOP (upside down)
+  ORIENTATION_270 = 3  ' Ribbon at LEFT (rotated 90° counter-clockwise)
+
+  DEFAULT_ORIENTATION = ORIENTATION_270  ' Ribbon LEFT for hardware setup
+
+  ' SSD1351 OLED commands (subset needed for operation)
+  CMD_SET_COLUMN      = $15  ' Set Column Address
+  CMD_SET_ROW         = $75  ' Set Row Address
+  CMD_WRITE_RAM       = $5C  ' Write RAM Command
+  CMD_SET_REMAP       = $A0  ' Set Re-map & Color Depth
+  CMD_START_LINE      = $A1  ' Set Display Start Line
+  CMD_DISPLAY_OFFSET  = $A2  ' Set Display Offset
+  CMD_NORMAL_DISPLAY  = $A6  ' Normal Display
+  CMD_FUNCTION_SEL    = $AB  ' Function Selection
+  CMD_DISPLAY_OFF     = $AE  ' Sleep Mode ON (Display OFF)
+  CMD_DISPLAY_ON      = $AF  ' Sleep Mode OFF (Display ON)
+  CMD_PRECHARGE       = $B1  ' Set Phase Length
+  CMD_ENHANCEDISPLAY  = $B2  ' Display Enhancement
+  CMD_CLOCKDIV        = $B3  ' Set Front Clock Divider
+  CMD_SET_VSL         = $B4  ' Set Segment Low Voltage
+  CMD_SET_GPIO        = $B5  ' Set GPIO
+  CMD_PRECHARGE2      = $B6  ' Set Second Precharge Period
+  CMD_LINEAR_LUT      = $B9  ' Use Built-in Linear LUT
+  CMD_PRECHARGE_V     = $BB  ' Set Pre-charge Voltage
+  CMD_VCOMH           = $BE  ' Set VCOMH Voltage
+  CMD_CONTRAST        = $C1  ' Set Contrast Current
+  CMD_MASTER_CONTRAST = $C7  ' Master Contrast Current Control
+  CMD_MUX_RATIO       = $CA  ' Set MUX Ratio
+  CMD_COMMAND_LOCK    = $FD  ' Set Command Lock
+
+  ' Color mapping ranges
+  MIN_FIELD   = 0         ' Minimum field value
+  MAX_FIELD   = 4095      ' Maximum field value (12-bit from sensor)
+  MID_FIELD   = 2048      ' Neutral field value (12-bit midpoint)
+
+OBJ
+  fifo : "isp_frame_fifo_manager"
+
+VAR
+  LONG  cog_id            ' COG ID (-1 = not running)
+  LONG  frame_count       ' Total frames displayed
+  LONG  orientation       ' Current display orientation (0-3)
+  LONG  base_pin          ' Base pin for OLED interface
+  LONG  bitrev_lut[256]   ' Bit-reverse lookup table for SPI
+
+  ' Calculated pin numbers (set during init based on base_pin)
+  LONG  pin_mosi
+  LONG  pin_sclk
+  LONG  pin_cs
+  LONG  pin_dc
+  LONG  pin_rst
+
+  ' COG stack (64 longs per P2KB recommendations)
+  LONG  display_cog_stack[64]
+
+DAT
+  ' Remap register values for each orientation
+  remap_values  BYTE  $65   ' ORIENTATION_0: Ribbon BOTTOM
+                BYTE  $76   ' ORIENTATION_90: Ribbon RIGHT
+                BYTE  $62   ' ORIENTATION_180: Ribbon TOP
+                BYTE  $71   ' ORIENTATION_270: Ribbon LEFT
+
+PUB null()
+'' This is not a top-level object
+'' @returns nothing - placeholder method for non-top-level object
+  cog_id := -1
+
+PUB init(oled_base_pin) : success
+'' Initialize OLED hardware ONLY (no background COG)
+'' Use this for driver testing with display_frame()
+'' @param oled_base_pin - base pin for OLED interface (typically 16)
+'' @returns TRUE if successful
+
+  cog_id := -1
+  frame_count := 0
+  orientation := DEFAULT_ORIENTATION
+  base_pin := oled_base_pin
+
+  ' Calculate pin numbers from base
+  pin_mosi := base_pin + OFFSET_MOSI
+  pin_sclk := base_pin + OFFSET_SCLK
+  pin_cs   := base_pin + OFFSET_CS
+  pin_dc   := base_pin + OFFSET_DC
+  pin_rst  := base_pin + OFFSET_RST
+
+  debug("OLED: Initializing hardware on pin group ", udec(base_pin), "...", 13, 10)
+  init_hardware()
+  debug("OLED: Hardware ready", 13, 10)
+
+  return TRUE
+
+PUB start(oled_base_pin) : success
+'' Start the single-COG OLED driver with integrated FIFO management
+'' @param oled_base_pin - base pin for OLED interface (typically 16)
+'' @returns TRUE if successful, FALSE if failed to start
+
+  ' CRITICAL: Initialize cog_id first (defaults to 0, needs to be -1)
+  if cog_id == 0
+    cog_id := -1
+
+  if cog_id >= 0
+    return TRUE  ' Already running
+
+  ' Initialize variables
+  frame_count := 0
+  orientation := DEFAULT_ORIENTATION
+  base_pin := oled_base_pin
+
+  ' Calculate pin numbers from base
+  pin_mosi := base_pin + OFFSET_MOSI
+  pin_sclk := base_pin + OFFSET_SCLK
+  pin_cs   := base_pin + OFFSET_CS
+  pin_dc   := base_pin + OFFSET_DC
+  pin_rst  := base_pin + OFFSET_RST
+
+  debug("OLED Single-COG: Starting on pin group ", udec(base_pin), "...", 13, 10)
+
+  ' Hardware initialization (done in main COG before launching background COG)
+  init_hardware()
+
+  ' Start background COG with Spin2 loop (easier FIFO access)
+  debug("OLED Single-COG: Launching display COG...", 13, 10)
+  cog_id := cogspin(NEWCOG, display_loop(), @display_cog_stack)
+
+  if cog_id < 0
+    debug("OLED Single-COG: ERROR - COG failed to start!", 13, 10)
+    return FALSE
+
+  debug("OLED Single-COG: COG ", udec(cog_id), " started successfully", 13, 10)
+  return TRUE
+
+PUB stop()
+'' Stop the OLED driver and terminate background cog operation
+'' @returns nothing - stops all operations
+
+  if cog_id >= 0 and cog_id <= 7
+    cogstop(cog_id)
+    cog_id := -1
+
+PUB set_orientation(new_orientation)
+'' Set display orientation for panel mounting flexibility
+'' @param new_orientation - ORIENTATION_0 (0), ORIENTATION_90 (1), ORIENTATION_180 (2), or ORIENTATION_270 (3)
+'' @returns nothing - updates display orientation
+
+  if new_orientation >= 0 and new_orientation <= 3
+    orientation := new_orientation
+
+PUB get_frame_count() : count
+'' Get total number of frames displayed
+'' @returns frame count as LONG
+
+  return frame_count
+
+PUB display_frame(framePtr) | row, col, sensor_idx, value, color, x, y, px, py
+'' Display a single frame to OLED (for testing - no FIFO, no background COG)
+'' @param framePtr - pointer to 64-WORD sensor frame buffer
+'' @returns nothing - renders frame and returns immediately
+''
+'' USE THIS FOR DRIVER TESTING - bypasses all FIFO/COG complexity
+
+  debug("OLED: display_frame() called with ptr=", uhex_long(framePtr), 13, 10)
+
+  ' Render 8x8 sensor grid to 128x128 display
+  ' Each sensor cell = 16x16 pixels
+  repeat row from 0 to 7
+    repeat col from 0 to 7
+      ' Calculate sensor index in frame buffer
+      sensor_idx := (row * 8) + col
+
+      ' Read sensor value (WORD)
+      value := WORD[framePtr][sensor_idx]
+
+      ' Convert sensor value to color
+      color := value_to_color(value, MIN_FIELD, MAX_FIELD)
+
+      ' Calculate pixel position (top-left of cell)
+      x := col * CELL_WIDTH
+      y := row * CELL_HEIGHT
+
+      ' Set drawing window for this cell (16x16 pixels)
+      set_window(x, y, x + CELL_WIDTH - 1, y + CELL_HEIGHT - 1)
+
+      ' Fill cell with color (16x16 = 256 pixels)
+      repeat px from 0 to CELL_WIDTH - 1
+        repeat py from 0 to CELL_HEIGHT - 1
+          send_pixel_data(color)
+
+  debug("OLED: Frame displayed successfully", 13, 10)
+
+PRI init_hardware() | clk_period, temp, i
+'' Initialize OLED hardware (GPIO pins, Smart Pins, display controller)
+'' @returns nothing - performs hardware setup
+
+  debug("OLED Single-COG: Initializing hardware...", 13, 10)
+
+  ' Build bit-reverse lookup table (copied from working driver)
+  debug("  Building bit-reverse LUT...", 13, 10)
+  repeat i from 0 to 255
+    temp := i << 24
+    temp REV= 31
+    bitrev_lut[i] := temp
+
+  ' Configure GPIO pins (CS, DC, RST)
+  PINHIGH(pin_cs)    ' CS high (deselected)
+  PINLOW(pin_dc)     ' DC low (default to command mode)
+  PINHIGH(pin_rst)   ' RST high (not in reset)
+
+  ' Calculate clock period for desired SPI frequency
+  clk_period := 2 #> (CLKFREQ / SPI_FREQ) <# $FFFF
+
+  debug("  Clock period: ", udec(clk_period), " ticks for ", udec(SPI_FREQ), " Hz", 13, 10)
+
+  ' Configure SCLK as pulse mode for clock generation (copied from working driver)
+  PINSTART(pin_sclk, P_OE | P_PULSE, clk_period | (clk_period >> 1) << 16, 0)
+
+  ' Configure MOSI as Sync Serial TX mode (copied from working driver)
+  ' Add clock pin offset in bits 24-26
+  PINSTART(pin_mosi, P_OE | P_SYNC_TX | ((pin_sclk - pin_mosi) & %111) << 24, %1_00000 | 7, 0)
+
+  ' Hardware reset sequence
+  debug("  Performing hardware reset...", 13, 10)
+  PINLOW(pin_rst)
+  WAITMS(10)
+  PINHIGH(pin_rst)
+  WAITMS(10)
+
+  ' Initialize display controller
+  debug("  Initializing SSD1351 controller...", 13, 10)
+  init_display()
+
+  debug("  Hardware initialization complete", 13, 10)
+
+PRI init_display()
+'' Initialize SSD1351 OLED controller with optimized settings
+'' @returns nothing - sends initialization command sequence
+
+  ' Command lock - unlock normal commands
+  send_command(CMD_COMMAND_LOCK)
+  send_data($12)
+
+  ' Display off during configuration
+  send_command(CMD_DISPLAY_OFF)
+
+  ' Clock divider - Fosc=1, divider=1 (fastest)
+  send_command(CMD_CLOCKDIV)
+  send_data($F1)
+
+  ' MUX ratio - 128 rows
+  send_command(CMD_MUX_RATIO)
+  send_data($7F)
+
+  ' Set remap and color depth based on orientation
+  send_command(CMD_SET_REMAP)
+  send_data(BYTE[@remap_values][orientation])
+  send_data($00)
+
+  ' Start line
+  send_command(CMD_START_LINE)
+  send_data($00)
+
+  ' Display offset
+  send_command(CMD_DISPLAY_OFFSET)
+  send_data($00)
+
+  ' Set GPIO
+  send_command(CMD_SET_GPIO)
+  send_data($00)
+
+  ' Function selection
+  send_command(CMD_FUNCTION_SEL)
+  send_data($01)
+
+  ' Precharge period
+  send_command(CMD_PRECHARGE)
+  send_data($32)
+
+  ' VCOMH voltage
+  send_command(CMD_VCOMH)
+  send_data($05)
+
+  ' Normal display mode
+  send_command(CMD_NORMAL_DISPLAY)
+
+  ' Contrast settings (R, G, B)
+  send_command(CMD_CONTRAST)
+  send_data($C8)  ' Color A (Red)
+  send_data($80)  ' Color B (Green)
+  send_data($C8)  ' Color C (Blue)
+
+  ' Master contrast
+  send_command(CMD_MASTER_CONTRAST)
+  send_data($0F)
+
+  ' Linear grayscale LUT
+  send_command(CMD_LINEAR_LUT)
+
+  ' Precharge voltage
+  send_command(CMD_PRECHARGE_V)
+  send_data($17)
+
+  ' Second precharge period
+  send_command(CMD_PRECHARGE2)
+  send_data($01)
+
+  ' VSL
+  send_command(CMD_SET_VSL)
+  send_data($A0)
+  send_data($B5)
+  send_data($55)
+
+  ' Display enhancement
+  send_command(CMD_ENHANCEDISPLAY)
+  send_data($A4)
+  send_data($00)
+  send_data($00)
+
+  ' Display ON
+  send_command(CMD_DISPLAY_ON)
+
+  WAITMS(100)
+
+PRI send_command(cmd)
+'' Send command byte to OLED controller (COPIED FROM WORKING DRIVER)
+'' @param cmd - command byte
+
+  PINLOW(pin_cs)   ' Select display
+  PINLOW(pin_dc)   ' Command mode
+  spi_write(cmd)
+  PINHIGH(pin_cs)  ' Deselect after command
+
+PRI send_data(data)
+'' Send data byte to OLED controller (COPIED FROM WORKING DRIVER)
+'' @param data - data byte
+
+  PINLOW(pin_cs)   ' Select display
+  PINHIGH(pin_dc)  ' Data mode
+  spi_write(data)
+  PINHIGH(pin_cs)  ' Deselect after data
+
+PRI spi_write(value)
+'' Send byte via Smart Pin SPI (COPIED EXACTLY FROM WORKING DRIVER)
+'' @param value - byte to send
+
+  ' Load pre-computed bit-reversed value
+  WYPIN(pin_mosi, bitrev_lut[value & $FF])
+
+  ' Trigger 8 clock pulses
+  WYPIN(pin_sclk, 8)
+
+  ' Wait for transmission complete
+  repeat until PINR(pin_sclk)
+
+PRI set_window(x1, y1, x2, y2)
+'' Set active drawing window on OLED display
+'' @param x1 - starting column (0-127)
+'' @param y1 - starting row (0-127)
+'' @param x2 - ending column (0-127)
+'' @param y2 - ending row (0-127)
+'' @returns nothing - configures drawing area
+
+  send_command(CMD_SET_COLUMN)
+  send_data(x1)
+  send_data(x2)
+
+  send_command(CMD_SET_ROW)
+  send_data(y1)
+  send_data(y2)
+
+  send_command(CMD_WRITE_RAM)
+
+PRI value_to_color(value, min_val, max_val) : color | range, normalized, r, g, b
+'' Convert sensor value to RGB565 color using bipolar color mapping
+'' @param value - sensor value
+'' @param min_val - minimum expected value
+'' @param max_val - maximum expected value
+'' @returns RGB565 color (16-bit)
+''
+'' Color mapping:
+''   Below midpoint -> Blue (cold)
+''   At midpoint -> Green (neutral)
+''   Above midpoint -> Red (hot)
+
+  range := max_val - min_val
+  if range == 0
+    return $07E0  ' Green if no range
+
+  ' Normalize to 0-255 range
+  normalized := ((value - min_val) * 255) / range
+  normalized := 0 #> normalized <# 255
+
+  ' Bipolar color mapping
+  if normalized < 128
+    ' Blue to Green (cold to neutral)
+    r := 0
+    g := (normalized * 2)
+    b := 255 - (normalized * 2)
+  else
+    ' Green to Red (neutral to hot)
+    r := ((normalized - 128) * 2)
+    g := 255 - ((normalized - 128) * 2)
+    b := 0
+
+  ' Convert 8-bit RGB to 5-6-5 RGB565 format
+  color := ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
+
+PRI display_loop() | framePtr, row, col, sensor_idx, value, color, x, y, px, py
+'' Background COG display loop - dequeues frames and renders to OLED
+'' Runs in dedicated COG, integrates FIFO management and display rendering
+
+  debug("OLED Single-COG: Display loop started", 13, 10)
+
+  repeat
+    ' Dequeue frame from OLED FIFO
+    debug("OLED: [DEQ] Calling dequeue(FIFO_OLED)...", 13, 10)
+    framePtr := fifo.dequeue(fifo.FIFO_OLED)
+    debug("OLED: [DEQ] Returned from dequeue, ptr=", uhex_long(framePtr), 13, 10)
+
+    if framePtr == 0
+      ' No frame available, wait and retry
+      debug("OLED: No frame (timeout), waiting 5ms...", 13, 10)
+      WAITMS(5)
+      next
+
+    ' Frame available - render 8x8 sensor grid to 128x128 display
+    ' Each sensor cell = 16x16 pixels
+
+    debug("OLED: Rendering frame, first value=", uhex_long(WORD[framePtr][0]), 13, 10)
+
+    repeat row from 0 to 7
+      repeat col from 0 to 7
+        ' Calculate sensor index in frame buffer
+        sensor_idx := (row * 8) + col
+
+        ' Read sensor value (WORD)
+        value := WORD[framePtr][sensor_idx]
+
+        ' Convert sensor value to color
+        color := value_to_color(value, MIN_FIELD, MAX_FIELD)
+
+        ' Calculate pixel position (top-left of cell)
+        x := col * CELL_WIDTH
+        y := row * CELL_HEIGHT
+
+        ' Debug first cell only
+        if row == 0 and col == 0
+          debug("OLED: Cell[0,0] value=", uhex_long(value), " color=", uhex_long(color), " win=(",udec(x),",",udec(y),")", 13, 10)
+
+        ' Set drawing window for this cell (16x16 pixels)
+        set_window(x, y, x + CELL_WIDTH - 1, y + CELL_HEIGHT - 1)
+
+        ' Fill cell with color (16x16 = 256 pixels)
+        ' Keep CS LOW for entire cell and send all pixels at once
+        PINLOW(pin_cs)
+        PINHIGH(pin_dc)   ' Data mode
+
+        ' Send 256 pixels (each 2 bytes) - unroll to reduce loop overhead
+        repeat 256
+          spi_write(color >> 8)
+          spi_write(color & $FF)
+
+        PINHIGH(pin_cs)   ' Deselect after cell complete
+
+    ' Release frame back to pool
+    debug("OLED: Releasing frame ptr=", uhex_long(framePtr), 13, 10)
+    fifo.releaseFrame(framePtr)
+
+    ' Increment frame count
+    frame_count++
+    debug("OLED: Frame ", udec(frame_count), " rendered", 13, 10)
+
+PRI send_pixel_data(color)
+'' Send RGB565 pixel data (2 bytes) to OLED via SPI (USES WORKING SPI CODE)
+'' @param color - RGB565 color value (16-bit)
+'' @returns nothing - transmits high byte then low byte
+
+  ' Keep CS low for both bytes (efficient multi-byte transaction)
+  PINLOW(pin_cs)      ' Select display
+  PINHIGH(pin_dc)     ' Data mode
+
+  ' Send high byte
+  spi_write(color >> 8)
+
+  ' Send low byte
+  spi_write(color & $FF)
+
+  PINHIGH(pin_cs)     ' Deselect after both bytes
+
+CON { license }
+{{
+
+ -------------------------------------------------------------------------------------------------
+  MIT License
+
+  Copyright (c) 2025 Iron Sheep Productions, LLC
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+ =================================================================================================
+}}

@@ -1,0 +1,255 @@
+'' =================================================================================================
+''   File....... test_fifo_regression.spin2
+''   Purpose.... FIFO regression test - validate frame pool and FIFO operations
+''   Author..... Stephen M Moraco
+''               -- Copyright (c) 2025 Iron Sheep Productions, LLC
+''               -- see below for terms of use
+''   E-mail..... stephen@ironsheep.biz
+''   Started.... Jan 2025
+''   Updated.... Jan 2025
+''
+'' =================================================================================================
+''
+'' FIFO Regression Test:
+''   - Producer COG: Enqueues 6 frames with sequence numbers and checksums
+''   - Consumer COG: Dequeues frames, validates data integrity
+''   - Tests: Data integrity, ordering, thread-safety, blocking, frame pool lifecycle
+''
+'' Expected result: All frames received in order with matching checksums
+''
+'' =================================================================================================
+
+CON
+  _CLKFREQ = 250_000_000  ' 250 MHz system clock
+
+  ' Test configuration
+  FRAME_COUNT = 6         ' Number of frames to send through pipeline
+
+OBJ
+  fifo : "isp_frame_fifo_manager"
+
+VAR
+  LONG  producer_cog
+  LONG  consumer_cog
+  LONG  test_complete
+
+  ' COG stacks (64 longs each per P2KB recommendations)
+  LONG  producer_stack[64]
+  LONG  consumer_stack[64]
+
+PUB main()
+
+  debug("=== FIFO PIPELINE REGRESSION TEST ===", 13, 10)
+  debug("Testing frame pool integrity, ordering, and thread-safety", 13, 10)
+  debug(" ", 13, 10)
+
+  ' Initialize test state
+  producer_cog := -1
+  consumer_cog := -1
+  test_complete := 0
+
+  ' Initialize FIFO manager
+  debug("Initializing FIFO manager...", 13, 10)
+  if not fifo.start()
+    debug("ERROR: Failed to start FIFO manager!", 13, 10)
+    return
+  debug("FIFO manager initialized", 13, 10)
+  debug("  Free frames: ", udec(fifo.getFreeFrames()), 13, 10)
+  debug(" ", 13, 10)
+
+  ' Start producer COG
+  debug("Starting producer COG...", 13, 10)
+  producer_cog := cogspin(NEWCOG, producer_loop(), @producer_stack)
+  if producer_cog < 0
+    debug("ERROR: Failed to start producer COG!", 13, 10)
+    return
+  debug("  Producer COG ", udec(producer_cog), " started", 13, 10)
+
+  ' Start consumer COG
+  debug("Starting consumer COG...", 13, 10)
+  consumer_cog := cogspin(NEWCOG, consumer_loop(), @consumer_stack)
+  if consumer_cog < 0
+    debug("ERROR: Failed to start consumer COG!", 13, 10)
+    return
+  debug("  Consumer COG ", udec(consumer_cog), " started", 13, 10)
+  debug(" ", 13, 10)
+
+  debug("=== TEST RUNNING ===" , 13, 10)
+  debug("Producer will enqueue ", udec(FRAME_COUNT), " frames", 13, 10)
+  debug("Consumer will dequeue and validate all frames", 13, 10)
+  debug(" ", 13, 10)
+
+  ' Wait for test to complete
+  repeat until test_complete == 2
+    WAITMS(100)
+
+  debug(" ", 13, 10)
+  debug("=== TEST COMPLETE ===", 13, 10)
+  debug("Both COGs finished - check logs for data integrity", 13, 10)
+  debug("Final free frames: ", udec(fifo.getFreeFrames()), 13, 10)
+  debug(" ", 13, 10)
+
+  ' Clean shutdown
+  if producer_cog >= 0
+    cogstop(producer_cog)
+  if consumer_cog >= 0
+    cogstop(consumer_cog)
+  fifo.stop()
+
+PRI show_status(labelPtr) | sensor_depth, free_count
+'' Display current FIFO status (depths and free frame count)
+'' @param labelPtr - pointer to descriptive label string
+
+  sensor_depth := fifo.getQueueDepth(fifo.FIFO_SENSOR)
+  free_count := fifo.getFreeFrames()
+
+  debug(ZSTR_(labelPtr), ": SENSOR_FIFO=", udec(sensor_depth), ", FREE=", udec(free_count), 13, 10)
+
+PRI producer_loop() | framePtr, seq, checksum, i
+
+  debug("PRODUCER: Started", 13, 10)
+  show_status(@"PRODUCER: Initial state")
+
+  ' Send FRAME_COUNT frames through pipeline
+  repeat seq from 1 to FRAME_COUNT
+    debug("PRODUCER: --- Frame ", udec(seq), " START ---", 13, 10)
+
+    ' Get frame from pool
+    debug("PRODUCER: Calling getNextFrame()...", 13, 10)
+    framePtr := fifo.getNextFrame()
+    if framePtr == 0
+      debug("PRODUCER: ERROR - getNextFrame() returned NULL!", 13, 10)
+      test_complete++
+      return
+    debug("PRODUCER: getNextFrame() returned frame at ", uhex_long(framePtr), 13, 10)
+
+    ' Build frame with sequence number and checksum
+    ' Format: [0]=sequence, [1..62]=test data, [63]=checksum
+
+    ' Store sequence number in first word
+    WORD[framePtr][0] := seq
+
+    ' Fill middle with test pattern (makes checksum unique per frame)
+    ' Use a simple pattern: word[i] = seq * 100 + i
+    repeat i from 1 to 62
+      WORD[framePtr][i] := (seq * 100) + i
+
+    ' Calculate checksum (simple: sum all words except last)
+    checksum := 0
+    repeat i from 0 to 62
+      checksum += WORD[framePtr][i]
+
+    ' Store checksum in last word (mask to 16 bits)
+    WORD[framePtr][63] := checksum & $FFFF
+
+    debug("PRODUCER: Frame ", udec(seq), " built with checksum ", uhex_word(checksum & $FFFF), 13, 10)
+
+    ' Commit frame to SENSOR FIFO
+    debug("PRODUCER: Calling commitFrame(SENSOR, ", uhex_long(framePtr), ")...", 13, 10)
+    if fifo.commitFrame(fifo.FIFO_SENSOR, framePtr) < 0
+      debug("PRODUCER: ERROR - commitFrame() returned error (FIFO FULL)!", 13, 10)
+      fifo.releaseFrame(framePtr)
+      test_complete++
+      return
+    debug("PRODUCER: commitFrame() SUCCESS", 13, 10)
+
+    show_status(@"PRODUCER: Status")
+
+    ' Small delay to allow consumer to process (makes test more realistic)
+    WAITMS(50)
+
+  debug("PRODUCER: All ", udec(FRAME_COUNT), " frames enqueued", 13, 10)
+  show_status(@"PRODUCER: Final state")
+  test_complete++
+
+PRI consumer_loop() | framePtr, seq, expected_seq, stored_checksum, calculated_checksum, i, received_count
+
+  debug("CONSUMER: Started", 13, 10)
+  show_status(@"CONSUMER: Initial state")
+
+  expected_seq := 1
+  received_count := 0
+
+  ' Process all frames
+  repeat while received_count < FRAME_COUNT
+    debug("CONSUMER: --- Waiting for frame ", udec(expected_seq), " ---", 13, 10)
+
+    ' Dequeue frame from SENSOR FIFO
+    debug("CONSUMER: Calling dequeue(SENSOR)...", 13, 10)
+    framePtr := fifo.dequeue(fifo.FIFO_SENSOR)
+
+    if framePtr == 0
+      debug("CONSUMER: ERROR - dequeue() returned NULL!", 13, 10)
+      test_complete++
+      return
+    debug("CONSUMER: dequeue() returned frame at ", uhex_long(framePtr), 13, 10)
+
+    ' Extract sequence number from first word
+    seq := WORD[framePtr][0]
+
+    ' Extract stored checksum from last word
+    stored_checksum := WORD[framePtr][63]
+
+    ' Recalculate checksum to verify integrity
+    calculated_checksum := 0
+    repeat i from 0 to 62
+      calculated_checksum += WORD[framePtr][i]
+    calculated_checksum &= $FFFF
+
+    ' Validate sequence order
+    if seq <> expected_seq
+      debug("CONSUMER: ERROR - Sequence mismatch! Expected ", udec(expected_seq), ", got ", udec(seq), 13, 10)
+    else
+      debug("CONSUMER: Sequence OK - received frame ", udec(seq), 13, 10)
+
+    ' Validate checksum
+    if stored_checksum <> calculated_checksum
+      debug("CONSUMER: ERROR - Checksum mismatch! Stored=", uhex_word(stored_checksum), ", Calculated=", uhex_word(calculated_checksum), 13, 10)
+    else
+      debug("CONSUMER: Checksum OK - ", uhex_word(stored_checksum), 13, 10)
+
+    ' Release frame back to pool
+    debug("CONSUMER: Calling releaseFrame(", uhex_long(framePtr), ")...", 13, 10)
+    fifo.releaseFrame(framePtr)
+    debug("CONSUMER: releaseFrame() complete", 13, 10)
+
+    show_status(@"CONSUMER: Status")
+
+    ' Update counters
+    expected_seq++
+    received_count++
+
+    ' Small delay between frames
+    WAITMS(20)
+
+  debug("CONSUMER: All ", udec(FRAME_COUNT), " frames received and validated", 13, 10)
+  show_status(@"CONSUMER: Final state")
+  test_complete++
+
+CON { license }
+{{
+
+ -------------------------------------------------------------------------------------------------
+  MIT License
+
+  Copyright (c) 2025 Iron Sheep Productions, LLC
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+ =================================================================================================
+}}

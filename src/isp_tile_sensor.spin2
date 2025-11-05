@@ -71,6 +71,7 @@ VAR { tile sensor variables }
     LONG    error_count                 ' SPI/sensor error count
     LONG    acquisition_mode            ' Current acquisition mode
     LONG    frame_rate_target           ' Target frame rate (Hz)
+    LONG    test_frame_counter          ' Test mode: current frame index (0-5)
 
     ' Performance monitoring
     LONG    last_frame_time             ' Timestamp of last frame
@@ -88,6 +89,9 @@ VAR { tile sensor variables }
     ' Mailbox for Spin2 <-> PASM communication
     LONG    mailbox_frame_ptr           ' Frame buffer pointer (Spin2 provides, PASM writes to)
     LONG    mailbox_go_flag             ' Handshake: 1=PASM capture, 0=PASM done
+
+    ' COG stack (64 longs per P2KB recommendations)
+    LONG    manager_cog_stack[64]       ' Stack for FIFO manager COG
 
 CON { acquisition modes }
 
@@ -147,7 +151,7 @@ PUB start(sensor_base_pin) : success
 
     ' Start Spin2 FIFO manager COG (manages FIFO operations)
     debug("Sensor: Launching FIFO manager COG...", 13, 10)
-    manager_cog_id := cogspin(NEWCOG, fifo_manager_loop(), 0)
+    manager_cog_id := cogspin(NEWCOG, fifo_manager_loop(), @manager_cog_stack)
     if manager_cog_id < 0
         debug("Sensor: ERROR - FIFO manager COG failed!", 13, 10)
         return FALSE
@@ -414,36 +418,150 @@ PUB read_all_sensors_test(buffer_ptr) | i, value
         if i < 63                        ' Don't advance after last sensor
             advance_counter_test()
 
-PRI fifo_manager_loop() | framePtr
+PRI fifo_manager_loop() | framePtr, patternPtr
 '' Spin2 FIFO manager loop running in dedicated COG
 '' Manages FIFO operations and coordinates with PASM acquisition COG via mailbox
+'' Test mode: generates patterns directly in Spin2 (no PASM needed)
 
     debug("Sensor FIFO Manager: Loop started", 13, 10)
 
+    test_frame_counter := 0
+
     repeat
         ' Check if acquisition is active
+        debug("Sensor FIFO Manager: acquisition_mode=", udec(acquisition_mode), " (MODE_STOPPED=0, MODE_TEST_PATTERN=4)", 13, 10)
         if acquisition_mode == MODE_STOPPED
+            debug("Sensor FIFO Manager: Mode is STOPPED, waiting...", 13, 10)
             waitms(10)
             next
 
+        ' Test mode: 10-second delay between frames (skip for first frame)
+        if acquisition_mode == MODE_TEST_PATTERN and test_frame_counter > 0
+            debug("Sensor FIFO Manager: TEST MODE - waiting 10 seconds before frame ", udec(test_frame_counter), "...", 13, 10)
+            ' Break into 1-second chunks to ensure proper timing
+            repeat 10
+                waitms(1000)
+            debug("Sensor FIFO Manager: TEST MODE - wait complete, generating frame ", udec(test_frame_counter), 13, 10)
+
         ' Get frame buffer from FIFO
+        debug("Sensor FIFO Manager: Getting frame from pool...", 13, 10)
         framePtr := fifo.getNextFrame()
+        debug("Sensor FIFO Manager: Got frame, ptr=", uhex_long(framePtr), 13, 10)
         if framePtr == 0
             ' No buffers available, wait and retry
+            debug("Sensor FIFO Manager: No frames available, waiting...", 13, 10)
             waitms(1)
             next
 
-        ' Provide buffer to PASM COG and signal to capture
-        mailbox_frame_ptr := framePtr
-        mailbox_go_flag := 1
+        ' Handle test mode vs real sensor mode
+        if acquisition_mode == MODE_TEST_PATTERN
+            ' TEST MODE: Generate pattern directly in Spin2 (no PASM needed)
+            debug("Sensor FIFO Manager: TEST MODE - generating digit ", udec(test_frame_counter), 13, 10)
 
-        ' Wait for PASM to complete capture
-        repeat until mailbox_go_flag == 0
+            ' Select pattern based on counter
+            case test_frame_counter
+                0: patternPtr := @digit_0_pattern
+                1: patternPtr := @digit_1_pattern
+                2: patternPtr := @digit_2_pattern
+                3: patternPtr := @digit_3_pattern
+                4: patternPtr := @digit_4_pattern
+                5: patternPtr := @digit_5_pattern
+
+            ' Copy pattern to frame buffer (64 WORDs = 128 bytes)
+            WORDMOVE(framePtr, patternPtr, 64)
+            debug("Sensor FIFO Manager: Pattern copied to frame buffer", 13, 10)
+
+            ' Increment counter
+            test_frame_counter++
+
+            ' Stop after 6 frames
+            if test_frame_counter >= 6
+                debug("Sensor FIFO Manager: TEST MODE complete - 6 frames generated", 13, 10)
+                acquisition_mode := MODE_STOPPED
+        else
+            ' REAL SENSOR MODE: Use PASM via mailbox
+            debug("Sensor FIFO Manager: Setting mailbox - ptr=", uhex_long(framePtr), ", go_flag=1", 13, 10)
+            mailbox_frame_ptr := framePtr
+            mailbox_go_flag := 1
+
+            ' Wait for PASM to complete capture
+            debug("Sensor FIFO Manager: Waiting for PASM to complete (go_flag=0)...", 13, 10)
+            repeat until mailbox_go_flag == 0
+            debug("Sensor FIFO Manager: PASM completed", 13, 10)
 
         ' Commit completed frame to sensor FIFO
+        debug("Sensor FIFO Manager: [ENQ] Committing frame to SENSOR FIFO, ptr=", uhex_long(framePtr), 13, 10)
         if fifo.commitFrame(fifo.FIFO_SENSOR, framePtr) < 0
             ' FIFO full - release frame back to pool
+            debug("Sensor FIFO Manager: [ENQ] SENSOR FIFO FULL! Releasing frame", 13, 10)
             fifo.releaseFrame(framePtr)
+        else
+            debug("Sensor FIFO Manager: [ENQ] Frame committed successfully", 13, 10)
+
+DAT { test pattern digit data - 8x8 WORD arrays in HUB memory }
+
+' Each digit is 64 WORDs (128 bytes) representing an 8x8 grid
+' Background: $0100, Digit pixels use unique values for color differentiation
+
+digit_0_pattern         ' Digit "0" - 0x1000
+        WORD    $0100, $1000, $1000, $1000, $1000, $1000, $1000, $0100
+        WORD    $1000, $1000, $0100, $0100, $0100, $0100, $1000, $1000
+        WORD    $1000, $0100, $0100, $0100, $0100, $0100, $0100, $1000
+        WORD    $1000, $0100, $0100, $0100, $0100, $0100, $0100, $1000
+        WORD    $1000, $0100, $0100, $0100, $0100, $0100, $0100, $1000
+        WORD    $1000, $0100, $0100, $0100, $0100, $0100, $0100, $1000
+        WORD    $1000, $1000, $0100, $0100, $0100, $0100, $1000, $1000
+        WORD    $0100, $1000, $1000, $1000, $1000, $1000, $1000, $0100
+
+digit_1_pattern         ' Digit "1" - 0x2000
+        WORD    $0100, $0100, $0100, $2000, $2000, $0100, $0100, $0100
+        WORD    $0100, $0100, $2000, $2000, $2000, $0100, $0100, $0100
+        WORD    $0100, $0100, $0100, $2000, $2000, $0100, $0100, $0100
+        WORD    $0100, $0100, $0100, $2000, $2000, $0100, $0100, $0100
+        WORD    $0100, $0100, $0100, $2000, $2000, $0100, $0100, $0100
+        WORD    $0100, $0100, $0100, $2000, $2000, $0100, $0100, $0100
+        WORD    $0100, $0100, $0100, $2000, $2000, $0100, $0100, $0100
+        WORD    $0100, $0100, $0100, $2000, $2000, $0100, $0100, $0100
+
+digit_2_pattern         ' Digit "2" - 0x3000
+        WORD    $0100, $3000, $3000, $3000, $3000, $3000, $0100, $0100
+        WORD    $3000, $3000, $0100, $0100, $0100, $3000, $3000, $0100
+        WORD    $0100, $0100, $0100, $0100, $0100, $3000, $3000, $0100
+        WORD    $0100, $0100, $0100, $0100, $3000, $3000, $0100, $0100
+        WORD    $0100, $0100, $0100, $3000, $3000, $0100, $0100, $0100
+        WORD    $0100, $0100, $3000, $3000, $0100, $0100, $0100, $0100
+        WORD    $0100, $3000, $3000, $0100, $0100, $0100, $0100, $0100
+        WORD    $3000, $3000, $3000, $3000, $3000, $3000, $3000, $0100
+
+digit_3_pattern         ' Digit "3" - 0x4000
+        WORD    $0100, $4000, $4000, $4000, $4000, $4000, $0100, $0100
+        WORD    $4000, $4000, $0100, $0100, $0100, $4000, $4000, $0100
+        WORD    $0100, $0100, $0100, $0100, $0100, $4000, $4000, $0100
+        WORD    $0100, $0100, $4000, $4000, $4000, $4000, $0100, $0100
+        WORD    $0100, $0100, $0100, $0100, $0100, $4000, $4000, $0100
+        WORD    $0100, $0100, $0100, $0100, $0100, $4000, $4000, $0100
+        WORD    $4000, $4000, $0100, $0100, $0100, $4000, $4000, $0100
+        WORD    $0100, $4000, $4000, $4000, $4000, $4000, $0100, $0100
+
+digit_4_pattern         ' Digit "4" - 0x5000
+        WORD    $0100, $0100, $0100, $5000, $5000, $5000, $0100, $0100
+        WORD    $0100, $0100, $5000, $5000, $5000, $5000, $0100, $0100
+        WORD    $0100, $5000, $5000, $0100, $5000, $5000, $0100, $0100
+        WORD    $5000, $5000, $0100, $0100, $5000, $5000, $0100, $0100
+        WORD    $5000, $5000, $5000, $5000, $5000, $5000, $5000, $0100
+        WORD    $0100, $0100, $0100, $0100, $5000, $5000, $0100, $0100
+        WORD    $0100, $0100, $0100, $0100, $5000, $5000, $0100, $0100
+        WORD    $0100, $0100, $0100, $0100, $5000, $5000, $0100, $0100
+
+digit_5_pattern         ' Digit "5" - 0x6000
+        WORD    $6000, $6000, $6000, $6000, $6000, $6000, $6000, $0100
+        WORD    $6000, $6000, $0100, $0100, $0100, $0100, $0100, $0100
+        WORD    $6000, $6000, $0100, $0100, $0100, $0100, $0100, $0100
+        WORD    $6000, $6000, $6000, $6000, $6000, $6000, $0100, $0100
+        WORD    $0100, $0100, $0100, $0100, $0100, $6000, $6000, $0100
+        WORD    $0100, $0100, $0100, $0100, $0100, $6000, $6000, $0100
+        WORD    $6000, $6000, $0100, $0100, $0100, $6000, $6000, $0100
+        WORD    $0100, $6000, $6000, $6000, $6000, $6000, $0100, $0100
 
 DAT { background cog code }
 
@@ -476,7 +594,7 @@ sensor_cog_entry
 
                         ' Calculate mailbox addresses
                         mov     temp, param_ptr
-                        add     temp, #160               ' Offset to mailbox_frame_ptr
+                        add     temp, #176               ' Offset to mailbox_frame_ptr (44 longs * 4 bytes)
                         mov     mailbox_ptr_addr, temp
                         add     temp, #4                 ' Offset to mailbox_go_flag
                         mov     mailbox_go_addr, temp
@@ -526,12 +644,8 @@ acquisition_exit
                         cogstop #0
 
 capture_frame
-                        ' Check if in test pattern mode
-                        rdlong  temp, acq_mode_ptr
-                        cmp     temp, #4 wz              ' MODE_TEST_PATTERN = 4
-                if_z    jmp     #generate_test_pattern
-
-                        ' Normal acquisition mode
+                        ' Real sensor acquisition mode (test patterns handled by Spin2)
+                        ' PASM only used for real hardware timing-critical operations
                         ' Reset sensor counter to position 0
                         call    #reset_sensor_counter
 
@@ -608,82 +722,6 @@ skip_baseline
                 if_nz   jmp     #capture_subtile_loop
 
 capture_frame_ret       ret
-
-generate_test_pattern
-                        ' Generate synthetic test pattern for display verification
-                        ' Corner markers with distinct values
-                        '
-                        ' Frame layout (8x8 grid):
-                        '   TL=3000   ...   TR=2500
-                        '    ...     1200     ...
-                        '   BL=2000   ...   BR=1500
-
-                        ' Fill entire frame with baseline value (1200)
-                        mov     linear_index, #0
-                        mov     sensor_value, ##1200
-
-fill_baseline_loop
-                        ' Calculate store address
-                        mov     store_addr, frame_ptr
-                        mov     temp, linear_index
-                        shl     temp, #1                 ' WORD offset (* 2)
-                        add     store_addr, temp
-                        wrword  sensor_value, store_addr
-
-                        ' Next position
-                        add     linear_index, #1
-                        cmp     linear_index, #64 wz
-                if_nz   jmp     #fill_baseline_loop
-
-                        ' Set corner markers (in logical 8x8 grid positions)
-                        ' TL corner: row=0, col=0 -> index=0
-                        mov     store_addr, frame_ptr
-                        mov     sensor_value, ##3000
-                        wrword  sensor_value, store_addr
-
-                        ' TR corner: row=0, col=7 -> index=7
-                        mov     store_addr, frame_ptr
-                        add     store_addr, #14          ' 7 * 2 bytes
-                        mov     sensor_value, ##2500
-                        wrword  sensor_value, store_addr
-
-                        ' BL corner: row=7, col=0 -> index=56
-                        mov     store_addr, frame_ptr
-                        add     store_addr, #112         ' 56 * 2 bytes
-                        mov     sensor_value, ##2000
-                        wrword  sensor_value, store_addr
-
-                        ' BR corner: row=7, col=7 -> index=63
-                        mov     store_addr, frame_ptr
-                        add     store_addr, #126         ' 63 * 2 bytes
-                        mov     sensor_value, ##1500
-                        wrword  sensor_value, store_addr
-
-                        ' Center marker: row=3, col=3 -> index=27
-                        mov     store_addr, frame_ptr
-                        add     store_addr, #54          ' 27 * 2 bytes
-                        mov     sensor_value, ##2200
-                        wrword  sensor_value, store_addr
-
-                        ' Center marker: row=3, col=4 -> index=28
-                        mov     store_addr, frame_ptr
-                        add     store_addr, #56          ' 28 * 2 bytes
-                        mov     sensor_value, ##2200
-                        wrword  sensor_value, store_addr
-
-                        ' Center marker: row=4, col=3 -> index=35
-                        mov     store_addr, frame_ptr
-                        add     store_addr, #70          ' 35 * 2 bytes
-                        mov     sensor_value, ##2200
-                        wrword  sensor_value, store_addr
-
-                        ' Center marker: row=4, col=4 -> index=36
-                        mov     store_addr, frame_ptr
-                        add     store_addr, #72          ' 36 * 2 bytes
-                        mov     sensor_value, ##2200
-                        wrword  sensor_value, store_addr
-
-generate_test_pattern_ret ret
 
 reset_sensor_counter
                         ' Pulse CLRb low to reset counter

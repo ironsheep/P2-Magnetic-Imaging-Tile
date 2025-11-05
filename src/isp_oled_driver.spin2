@@ -83,6 +83,9 @@ VAR
   long  mailbox[5]       ' [0]=lut_ptr, [1]=frame_ptr, [2]=byte_count, [3]=go_flag, [4]=status
   byte  frame_buffer[WIDTH * HEIGHT * 2]  ' Full frame buffer for PASM2 streaming
 
+  ' COG stack (64 longs per P2KB recommendations)
+  long  stream_cog_stack[64]
+
 DAT
   ' Remap register values for each orientation
   ' Format: $A0 command data - controls row/column order and color mode
@@ -160,7 +163,7 @@ PUB start(pin_base) : ok | clk_period, i, temp
 
   ' Launch streaming COG
   debug("  Starting PASM2 streaming COG...", 13, 10)
-  cog_id := cogspin(NEWCOG, stream_cog(), @mailbox)
+  cog_id := cogspin(NEWCOG, stream_cog(), @stream_cog_stack)
   if cog_id < 0
     debug("  ERROR: Failed to start streaming COG!", 13, 10)
     return FALSE
