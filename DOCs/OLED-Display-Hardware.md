@@ -92,14 +92,62 @@ The Waveshare module has labels on both sides that are oriented **differently**:
 For consistent orientation, **always use the display side label as reference**, not the component side.
 
 **SSD1351 Remap Register Settings:**
-- Command: `$A0` (SET_REMAP)
-- Value: `$65`
-  - Bit 7:6 = `01` → 65K RGB color format
-  - Bit 5 = `1` → Enable COM split odd/even
-  - Bit 4 = `0` → Normal row address order (top to bottom)
-  - Bit 0 = `1` → **Column address remap** (fixes horizontal mirroring)
 
-**Coordinate Mapping:**
+The SSD1351 controller supports four display orientations via the remap register (command `$A0`):
+
+| Orientation | Remap Value | Ribbon Position | Description |
+|-------------|-------------|-----------------|-------------|
+| **0° (Default)** | `$65` | BOTTOM | Standard orientation, (0,0) at top-left |
+| **90°** | `$76` | RIGHT | Rotated 90° clockwise |
+| **180°** | `$62` | TOP | Upside down |
+| **270°** | `$71` | LEFT | Rotated 90° counter-clockwise |
+
+**ORIENTATION_270 Details (Ribbon LEFT - Project Configuration):**
+- Remap value: `$71`
+  - Bit 7:6 = `01` → 65K BGR color format (⚠️ Note: BGR not RGB!)
+  - Bit 6 = `1` → 65K color mode
+  - Bit 5 = `1` → Enable COM split odd/even
+  - Bit 4 = `1` → Reverse COM scan direction (bottom to top)
+  - Bit 0 = `1` → Column address remap enabled
+
+**Critical Implementation Details for ORIENTATION_270:**
+
+1. **Color Format**: SSD1351 expects **BGR565**, not RGB565
+   - Bit packing: `[B4:B0][G5:G0][R4:R0]` (blue MSB, red LSB)
+   - Must swap red/blue channels during color conversion
+
+2. **Pixel Ordering**: Must send pixels in **row-major order**
+   - Hardware expects: row 0 (all columns), row 1 (all columns), etc.
+   - Incorrect column-major order causes incomplete/scrambled fills
+
+3. **Coordinate Transformation**: Columns are **horizontally mirrored**
+   - Buffer column 0 → Physical right edge
+   - Buffer column 7 → Physical left edge
+   - Software must reverse: `x = (7 - col) * CELL_WIDTH`
+
+4. **Hardware Offset**: Display has built-in 2-cell offset
+   - ROW_OFFSET = -32 (pixels) required to align corners
+   - COLUMN_OFFSET = 0 for this orientation
+   - **Note**: With 270° rotation, ROW affects horizontal (columns), COLUMN affects vertical (rows)
+
+**⚠️ Orientation-Specific Offsets:**
+Testing has confirmed values for ORIENTATION_270 only. Other orientations (0°, 90°, 180°) will require diagnostic testing to determine their specific offset values. The coordinate transformation and offset requirements are orientation-dependent.
+
+**Coordinate Mapping (ORIENTATION_270, Ribbon LEFT):**
+```
+Physical Display (Ribbon at LEFT):
+┌────────────────┐
+│(7,0)       (7,7)│  ← Top edge
+│                 │
+R   Display       │
+i                 │
+b (0,0)       (0,7)│  ← Bottom edge
+b └────────────────┘
+o
+n
+```
+
+**Standard Orientation (ORIENTATION_0, Ribbon BOTTOM):**
 ```
 Physical Display (Ribbon at Bottom):
 ┌────────────────┐
