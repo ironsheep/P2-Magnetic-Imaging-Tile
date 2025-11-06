@@ -100,6 +100,12 @@ VAR
   LONG  base_pin          ' Base pin for OLED interface
   LONG  bitrev_lut[256]   ' Bit-reverse lookup table for SPI
 
+  ' Frame timing measurements (in system clock cycles)
+  LONG  last_frame_cycles ' Cycles taken for last frame display
+  LONG  min_frame_cycles  ' Minimum cycles observed
+  LONG  max_frame_cycles  ' Maximum cycles observed
+  LONG  total_frames_timed ' Number of frames included in timing stats
+
   ' Calculated pin numbers (set during init based on base_pin)
   LONG  pin_mosi
   LONG  pin_sclk
@@ -208,14 +214,33 @@ PUB get_frame_count() : count
 
   return frame_count
 
-PUB display_frame(framePtr) | row, col, sensor_idx, value, color, x, y, px, py
+PUB get_timing_stats(last_us_ptr, min_us_ptr, max_us_ptr, avg_us_ptr) | avg_cycles
+'' Get frame timing statistics
+'' @param last_us_ptr - pointer to receive last frame time in microseconds
+'' @param min_us_ptr - pointer to receive minimum frame time in microseconds
+'' @param max_us_ptr - pointer to receive maximum frame time in microseconds
+'' @param avg_us_ptr - pointer to receive average frame time in microseconds
+'' @returns nothing - writes statistics to provided pointers
+
+  if last_us_ptr
+    LONG[last_us_ptr] := last_frame_cycles / 250
+  if min_us_ptr
+    LONG[min_us_ptr] := min_frame_cycles / 250
+  if max_us_ptr
+    LONG[max_us_ptr] := max_frame_cycles / 250
+  if avg_us_ptr
+    ' Note: Could add running average if needed, for now just return last
+    LONG[avg_us_ptr] := last_frame_cycles / 250
+
+PUB display_frame(framePtr) | row, col, sensor_idx, value, color, x, y, px, py, start_cycles, end_cycles, elapsed_cycles
 '' Display a single frame to OLED (for testing - no FIFO, no background COG)
 '' @param framePtr - pointer to 64-WORD sensor frame buffer
 '' @returns nothing - renders frame and returns immediately
 ''
 '' USE THIS FOR DRIVER TESTING - bypasses all FIFO/COG complexity
 
-  debug("OLED: display_frame() called with ptr=", uhex_long(framePtr), 13, 10)
+  ' Start timing measurement
+  start_cycles := GETCT()
 
   ' Render 8x8 sensor grid to 128x128 display
   ' Each sensor cell = 16x16 pixels
@@ -242,15 +267,40 @@ PUB display_frame(framePtr) | row, col, sensor_idx, value, color, x, y, px, py
       PINHIGH(pin_dc)     ' Data mode
 
       ' Send pixels in row-major order (row by row, not column by column)
-      repeat py from 0 to CELL_HEIGHT - 1
-        repeat px from 0 to CELL_WIDTH - 1
-          ' Send color as 2 bytes (high byte, low byte)
-          spi_write(color >> 8)
-          spi_write(color & $FF)
+      ' Optimize: send color bytes with minimal waiting
+      repeat 256  ' 16x16 pixels, unrolled loop
+        spi_write_fast(color >> 8)
+        spi_write_fast(color & $FF)
 
+      ' Wait for final byte to complete before deasserting CS
+      repeat until PINR(pin_sclk)
       PINHIGH(pin_cs)     ' Deselect after entire block
 
-  debug("OLED: Frame displayed successfully", 13, 10)
+  ' End timing measurement and update statistics
+  end_cycles := GETCT()
+  elapsed_cycles := end_cycles - start_cycles
+  last_frame_cycles := elapsed_cycles
+
+  ' Update min/max statistics
+  if total_frames_timed == 0
+    min_frame_cycles := elapsed_cycles
+    max_frame_cycles := elapsed_cycles
+  else
+    if elapsed_cycles < min_frame_cycles
+      min_frame_cycles := elapsed_cycles
+    if elapsed_cycles > max_frame_cycles
+      max_frame_cycles := elapsed_cycles
+
+  total_frames_timed++
+
+  ' Report timing after 6th frame (for test programs that only display 6 frames)
+  if total_frames_timed == 6
+    ' Calculate timing in microseconds and frames per second
+    ' At 250 MHz: 1 cycle = 4 ns, so cycles / 250 = microseconds
+    debug("OLED: Frame timing summary (6 frames)", 13, 10)
+    debug("  Last: ", udec(elapsed_cycles / 250), " us = ", udec(250_000_000 / elapsed_cycles), " fps", 13, 10)
+    debug("  Min: ", udec(min_frame_cycles / 250), " us = ", udec(250_000_000 / min_frame_cycles), " fps", 13, 10)
+    debug("  Max: ", udec(max_frame_cycles / 250), " us = ", udec(250_000_000 / max_frame_cycles), " fps", 13, 10)
 
 PRI init_hardware() | clk_period, temp, i
 '' Initialize OLED hardware (GPIO pins, Smart Pins, display controller)
@@ -414,6 +464,22 @@ PRI spi_write(value)
 
   ' Wait for transmission complete
   repeat until PINR(pin_sclk)
+
+PRI spi_write_fast(value)
+'' Send byte via Smart Pin SPI - OPTIMIZED (no wait between consecutive bytes)
+'' @param value - byte to send
+'' NOTE: Caller must wait for final transmission to complete
+
+  ' Wait for previous transmission to complete before loading new data
+  repeat until PINR(pin_sclk)
+
+  ' Load pre-computed bit-reversed value
+  WYPIN(pin_mosi, bitrev_lut[value & $FF])
+
+  ' Trigger 8 clock pulses
+  WYPIN(pin_sclk, 8)
+
+  ' Return immediately without waiting - allows pipelining
 
 PRI set_window(x1, y1, x2, y2)
 '' Set active drawing window on OLED display
