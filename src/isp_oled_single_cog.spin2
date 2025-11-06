@@ -42,6 +42,11 @@ CON
   WIDTH  = 128
   HEIGHT = 128
 
+  ' Display coordinate offsets (adjust if display is shifted)
+  ' NOTE: With ORIENTATION_270, logical columns map to physical rows and vice versa
+  COLUMN_OFFSET = 0    ' Affects physical rows (vertical shift)
+  ROW_OFFSET = -32     ' Affects physical columns (negative = shift left, 2 cells * 16 pixels)
+
   ' Sensor grid configuration
   SENSOR_GRID_SIZE = 8
   CELL_WIDTH  = WIDTH / SENSOR_GRID_SIZE    ' 16 pixels per cell
@@ -141,9 +146,10 @@ PUB init(oled_base_pin) : success
 
   return TRUE
 
-PUB start(oled_base_pin) : success
+PUB start(oled_base_pin, oled_orientation) : success
 '' Start the single-COG OLED driver with integrated FIFO management
 '' @param oled_base_pin - base pin for OLED interface (typically 16)
+'' @param oled_orientation - display orientation (0-3), use ORIENTATION_* constants
 '' @returns TRUE if successful, FALSE if failed to start
 
   ' CRITICAL: Initialize cog_id first (defaults to 0, needs to be -1)
@@ -155,7 +161,7 @@ PUB start(oled_base_pin) : success
 
   ' Initialize variables
   frame_count := 0
-  orientation := DEFAULT_ORIENTATION
+  orientation := oled_orientation   ' Set orientation BEFORE launching COG
   base_pin := oled_base_pin
 
   ' Calculate pin numbers from base
@@ -167,10 +173,7 @@ PUB start(oled_base_pin) : success
 
   debug("OLED Single-COG: Starting on pin group ", udec(base_pin), "...", 13, 10)
 
-  ' Hardware initialization (done in main COG before launching background COG)
-  init_hardware()
-
-  ' Start background COG with Spin2 loop (easier FIFO access)
+  ' Start background COG - it will initialize its own hardware
   debug("OLED Single-COG: Launching display COG...", 13, 10)
   cog_id := cogspin(NEWCOG, display_loop(), @display_cog_stack)
 
@@ -226,16 +229,26 @@ PUB display_frame(framePtr) | row, col, sensor_idx, value, color, x, y, px, py
       color := value_to_color(value, MIN_FIELD, MAX_FIELD)
 
       ' Calculate pixel position (top-left of cell)
-      x := col * CELL_WIDTH
+      ' Column mirrored: col 0 -> x=112, col 7 -> x=0 (reverse for ORIENTATION_270)
+      x := (7 - col) * CELL_WIDTH
       y := row * CELL_HEIGHT
 
       ' Set drawing window for this cell (16x16 pixels)
       set_window(x, y, x + CELL_WIDTH - 1, y + CELL_HEIGHT - 1)
 
       ' Fill cell with color (16x16 = 256 pixels)
-      repeat px from 0 to CELL_WIDTH - 1
-        repeat py from 0 to CELL_HEIGHT - 1
-          send_pixel_data(color)
+      ' Keep CS/DC asserted for entire block (efficient streaming)
+      PINLOW(pin_cs)      ' Select display
+      PINHIGH(pin_dc)     ' Data mode
+
+      ' Send pixels in row-major order (row by row, not column by column)
+      repeat py from 0 to CELL_HEIGHT - 1
+        repeat px from 0 to CELL_WIDTH - 1
+          ' Send color as 2 bytes (high byte, low byte)
+          spi_write(color >> 8)
+          spi_write(color & $FF)
+
+      PINHIGH(pin_cs)     ' Deselect after entire block
 
   debug("OLED: Frame displayed successfully", 13, 10)
 
@@ -411,12 +424,12 @@ PRI set_window(x1, y1, x2, y2)
 '' @returns nothing - configures drawing area
 
   send_command(CMD_SET_COLUMN)
-  send_data(x1)
-  send_data(x2)
+  send_data(x1 + COLUMN_OFFSET)
+  send_data(x2 + COLUMN_OFFSET)
 
   send_command(CMD_SET_ROW)
-  send_data(y1)
-  send_data(y2)
+  send_data(y1 + ROW_OFFSET)
+  send_data(y2 + ROW_OFFSET)
 
   send_command(CMD_WRITE_RAM)
 
@@ -452,13 +465,16 @@ PRI value_to_color(value, min_val, max_val) : color | range, normalized, r, g, b
     g := 255 - ((normalized - 128) * 2)
     b := 0
 
-  ' Convert 8-bit RGB to 5-6-5 RGB565 format
-  color := ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
+  ' Convert 8-bit RGB to 5-6-5 BGR565 format (SSD1351 expects BGR, not RGB)
+  color := ((b >> 3) << 11) | ((g >> 2) << 5) | (r >> 3)
 
-PRI display_loop() | framePtr, row, col, sensor_idx, value, color, x, y, px, py
+PRI display_loop() | framePtr
 '' Background COG display loop - dequeues frames and renders to OLED
 '' Runs in dedicated COG, integrates FIFO management and display rendering
 
+  ' Background COG initializes its own hardware (owns its pins)
+  debug("OLED Single-COG: Initializing hardware in background COG...", 13, 10)
+  init_hardware()
   debug("OLED Single-COG: Display loop started", 13, 10)
 
   repeat
@@ -473,44 +489,9 @@ PRI display_loop() | framePtr, row, col, sensor_idx, value, color, x, y, px, py
       WAITMS(5)
       next
 
-    ' Frame available - render 8x8 sensor grid to 128x128 display
-    ' Each sensor cell = 16x16 pixels
-
-    debug("OLED: Rendering frame, first value=", uhex_long(WORD[framePtr][0]), 13, 10)
-
-    repeat row from 0 to 7
-      repeat col from 0 to 7
-        ' Calculate sensor index in frame buffer
-        sensor_idx := (row * 8) + col
-
-        ' Read sensor value (WORD)
-        value := WORD[framePtr][sensor_idx]
-
-        ' Convert sensor value to color
-        color := value_to_color(value, MIN_FIELD, MAX_FIELD)
-
-        ' Calculate pixel position (top-left of cell)
-        x := col * CELL_WIDTH
-        y := row * CELL_HEIGHT
-
-        ' Debug first cell only
-        if row == 0 and col == 0
-          debug("OLED: Cell[0,0] value=", uhex_long(value), " color=", uhex_long(color), " win=(",udec(x),",",udec(y),")", 13, 10)
-
-        ' Set drawing window for this cell (16x16 pixels)
-        set_window(x, y, x + CELL_WIDTH - 1, y + CELL_HEIGHT - 1)
-
-        ' Fill cell with color (16x16 = 256 pixels)
-        ' Keep CS LOW for entire cell and send all pixels at once
-        PINLOW(pin_cs)
-        PINHIGH(pin_dc)   ' Data mode
-
-        ' Send 256 pixels (each 2 bytes) - unroll to reduce loop overhead
-        repeat 256
-          spi_write(color >> 8)
-          spi_write(color & $FF)
-
-        PINHIGH(pin_cs)   ' Deselect after cell complete
+    ' Display frame using the tested, working display_frame() method
+    debug("OLED: Rendering frame with display_frame()...", 13, 10)
+    display_frame(framePtr)
 
     ' Release frame back to pool
     debug("OLED: Releasing frame ptr=", uhex_long(framePtr), 13, 10)

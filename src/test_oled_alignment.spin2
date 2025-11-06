@@ -1,0 +1,148 @@
+'' =================================================================================================
+''   File....... test_oled_alignment.spin2
+''   Purpose.... Diagnostic test to determine OLED display alignment
+''   Author..... Claude Code
+''   Started.... Nov 2025
+''
+'' =================================================================================================
+''
+'' Display diagnostic patterns to identify display shift:
+''   Pattern 1: Single bright cell at buffer[0] (should be top-left)
+''   Pattern 2: Bright cells at buffer[0,7,56,63] (corners)
+''   Pattern 3: Bright row at buffer[0-7] (top row)
+''   Pattern 4: Bright column at buffer[0,8,16,24,32,40,48,56] (left column)
+''
+'' =================================================================================================
+
+CON
+  _CLKFREQ = 250_000_000  ' 250 MHz system clock
+
+  ' Pin assignments
+  OLED_BASE_PIN = 16      ' OLED on P16-P23
+
+  ' Test pattern values (sensor values that map to specific colors)
+  VALUE_BLUE = 0       ' Min value = BLUE
+  VALUE_GREEN = 2048   ' Mid value = GREEN
+  VALUE_RED = 4095     ' Max value = RED
+
+OBJ
+  oled : "isp_oled_single_cog"
+
+VAR
+  WORD  test_frame[64]  ' Test frame buffer (8x8 sensors)
+
+PUB main() | pattern_num
+
+  debug("=== OLED ALIGNMENT DIAGNOSTIC ===", 13, 10)
+  debug("This test displays specific patterns to identify display shift", 13, 10)
+  debug(" ", 13, 10)
+
+  ' Initialize OLED hardware only (no background COG)
+  debug("Initializing OLED hardware...", 13, 10)
+  if not oled.init(OLED_BASE_PIN)
+    debug("ERROR: OLED hardware init failed!", 13, 10)
+    return
+  debug("OLED hardware initialized", 13, 10)
+  debug(" ", 13, 10)
+
+  debug("Starting pattern sequence (10 seconds each)...", 13, 10)
+  debug(" ", 13, 10)
+
+  ' Cycle through diagnostic patterns
+  pattern_num := 1
+  repeat
+    case pattern_num
+      1:
+        debug("Pattern 1: ALL BLUE (to verify solid fill works)", 13, 10)
+        debug("  ALL 64 cells = BLUE", 13, 10)
+        generate_all_blue()
+
+      2:
+        debug("Pattern 2: ALL RED (to verify solid fill works)", 13, 10)
+        debug("  ALL 64 cells = RED", 13, 10)
+        generate_all_red()
+
+      3:
+        debug("Pattern 3: GRADIENT (buffer[0]=0, [1]=64, [2]=128, etc.)", 13, 10)
+        debug("  Sequential values to see buffer mapping", 13, 10)
+        debug("  BLUE->GREEN->RED gradient", 13, 10)
+        generate_gradient()
+
+      4:
+        debug("Pattern 4: CORNER MARKERS", 13, 10)
+        debug("  buffer[0]=RED (TL), [7]=YELLOW (TR), [56]=GREEN (BL), [63]=BLUE (BR)", 13, 10)
+        generate_corner_markers()
+
+    ' Display the frame
+    debug("  Displaying frame...", 13, 10)
+    oled.display_frame(@test_frame)
+    debug("  Frame displayed", 13, 10)
+    debug(" ", 13, 10)
+
+    ' Wait 10 seconds
+    repeat 10
+      WAITUS(1_000_000)
+
+    ' Move to next pattern
+    pattern_num++
+    if pattern_num > 4
+      pattern_num := 1
+      debug("--- Restarting pattern sequence ---", 13, 10)
+      debug(" ", 13, 10)
+
+PRI generate_all_blue()
+'' Fill entire buffer with BLUE
+
+  WORDFILL(@test_frame, VALUE_BLUE, 64)
+
+PRI generate_all_red()
+'' Fill entire buffer with RED
+
+  WORDFILL(@test_frame, VALUE_RED, 64)
+
+PRI generate_gradient() | i, value
+'' Sequential gradient from BLUE to RED
+'' Shows how buffer indices map to physical positions
+
+  repeat i from 0 to 63
+    ' Map index 0-63 to value 0-4095
+    value := (i * 4095) / 63
+    test_frame[i] := value
+
+PRI generate_corner_markers()
+'' Four corner markers to identify coordinate mapping
+'' TL=RED, TR=YELLOW, BL=GREEN, BR=BLUE (on cyan background)
+'' This reveals how buffer indices map to physical positions
+
+  WORDFILL(@test_frame, 1500, 64)  ' Cyan background (between blue and green)
+  test_frame[0]  := VALUE_RED     ' Top-left corner (row 0, col 0)
+  test_frame[7]  := 3500          ' Top-right corner (row 0, col 7) - YELLOW
+  test_frame[56] := VALUE_GREEN   ' Bottom-left corner (row 7, col 0)
+  test_frame[63] := VALUE_BLUE    ' Bottom-right corner (row 7, col 7)
+
+CON { license }
+{{
+ -------------------------------------------------------------------------------------------------
+  MIT License
+
+  Copyright (c) 2025 Iron Sheep Productions, LLC
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+ =================================================================================================
+}}

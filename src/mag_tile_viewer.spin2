@@ -70,16 +70,12 @@ PUB main() | success
     return
   debug("  HDMI engine ready", 13, 10)
 
-  ' Start OLED single-COG driver (P16-P23)
-  debug("Starting OLED single-COG driver...", 13, 10)
-  if not oled.start(OLED_BASE_PIN)
+  ' Start OLED single-COG driver (P16-P23) with orientation
+  debug("Starting OLED single-COG driver (ribbon LEFT)...", 13, 10)
+  if not oled.start(OLED_BASE_PIN, oled.ORIENTATION_270)
     debug("ERROR: Failed to start OLED driver", 13, 10)
     return
-  debug("  OLED driver ready", 13, 10)
-
-  ' Configure OLED orientation for hardware setup (ribbon to LEFT)
-  oled.set_orientation(oled.ORIENTATION_270)
-  debug("  OLED orientation set to 270 deg (ribbon LEFT)", 13, 10)
+  debug("  OLED driver ready (270 deg orientation)", 13, 10)
 
   ' Initialize decimation state (integrated into main COG)
   debug("Initializing decimation in main COG...", 13, 10)
