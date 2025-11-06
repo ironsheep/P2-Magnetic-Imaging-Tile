@@ -43,22 +43,22 @@ CON
   HEIGHT = 128
 
   ' Display coordinate offsets (adjust if display is shifted)
-  ' NOTE: With ORIENTATION_270, logical columns map to physical rows and vice versa
-  COLUMN_OFFSET = 0    ' Affects physical rows (vertical shift)
-  ROW_OFFSET = -32     ' Affects physical columns (negative = shift left, 2 cells * 16 pixels)
+  ' NOTE: Offsets apply to physical display coordinates after orientation transformation
+  COLUMN_OFFSET = 0    ' No horizontal offset
+  ROW_OFFSET = -32     ' Shift left by 2 cells (2 * 16 pixels) - hardware characteristic
 
   ' Sensor grid configuration
   SENSOR_GRID_SIZE = 8
   CELL_WIDTH  = WIDTH / SENSOR_GRID_SIZE    ' 16 pixels per cell
   CELL_HEIGHT = HEIGHT / SENSOR_GRID_SIZE   ' 16 pixels per cell
 
-  ' Display orientation
-  ORIENTATION_0   = 0  ' Ribbon at BOTTOM (standard/default)
-  ORIENTATION_90  = 1  ' Ribbon at RIGHT (rotated 90° clockwise)
-  ORIENTATION_180 = 2  ' Ribbon at TOP (upside down)
-  ORIENTATION_270 = 3  ' Ribbon at LEFT (rotated 90° counter-clockwise)
+  ' Display orientation (based on ribbon connector position)
+  ORIENTATION_0   = 0  ' Ribbon at BOTTOM (hardware default)
+  ORIENTATION_90  = 1  ' Ribbon at LEFT (display rotated 90° clockwise)
+  ORIENTATION_180 = 2  ' Ribbon at TOP (display rotated 180°)
+  ORIENTATION_270 = 3  ' Ribbon at RIGHT (display rotated 270° clockwise)
 
-  DEFAULT_ORIENTATION = ORIENTATION_270  ' Ribbon LEFT for hardware setup
+  DEFAULT_ORIENTATION = ORIENTATION_90  ' Ribbon LEFT (your hardware configuration)
 
   ' SSD1351 OLED commands (subset needed for operation)
   CMD_SET_COLUMN      = $15  ' Set Column Address
@@ -111,11 +111,13 @@ VAR
   LONG  display_cog_stack[64]
 
 DAT
-  ' Remap register values for each orientation
-  remap_values  BYTE  $65   ' ORIENTATION_0: Ribbon BOTTOM
-                BYTE  $76   ' ORIENTATION_90: Ribbon RIGHT
-                BYTE  $62   ' ORIENTATION_180: Ribbon TOP
-                BYTE  $71   ' ORIENTATION_270: Ribbon LEFT
+  ' Remap register values for each orientation (Corrected mapping - Nov 2025)
+  ' Bit 2=0 (RGB mode) because software already converts to BGR565
+  ' Mapping ensures (0,0) appears at correct corner for each ribbon position
+  remap_values  BYTE  $73   ' ORIENTATION_0: Ribbon BOTTOM, (0,0) at bottom-left
+                BYTE  $72   ' ORIENTATION_90: Ribbon LEFT, (0,0) at top-left
+                BYTE  $70   ' ORIENTATION_180: Ribbon TOP, (0,0) at top-right
+                BYTE  $71   ' ORIENTATION_270: Ribbon RIGHT, (0,0) at bottom-right
 
 PUB null()
 '' This is not a top-level object
@@ -228,10 +230,8 @@ PUB display_frame(framePtr) | row, col, sensor_idx, value, color, x, y, px, py
       ' Convert sensor value to color
       color := value_to_color(value, MIN_FIELD, MAX_FIELD)
 
-      ' Calculate pixel position (top-left of cell)
-      ' Column mirrored: col 0 -> x=112, col 7 -> x=0 (reverse for ORIENTATION_270)
-      x := (7 - col) * CELL_WIDTH
-      y := row * CELL_HEIGHT
+      ' Calculate pixel position with orientation-specific coordinate transformation
+      transform_coordinates(row, col, @x, @y)
 
       ' Set drawing window for this cell (16x16 pixels)
       set_window(x, y, x + CELL_WIDTH - 1, y + CELL_HEIGHT - 1)
@@ -432,6 +432,51 @@ PRI set_window(x1, y1, x2, y2)
   send_data(y2 + ROW_OFFSET)
 
   send_command(CMD_WRITE_RAM)
+
+PRI transform_coordinates(row, col, x_ptr, y_ptr) | x, y, temp_row, temp_col
+'' Transform buffer coordinates (row, col) to display coordinates (x, y) based on orientation
+'' @param row - buffer row (0-7)
+'' @param col - buffer column (0-7)
+'' @param x_ptr - pointer to x coordinate output
+'' @param y_ptr - pointer to y coordinate output
+'' @returns nothing - writes x, y to pointers
+''
+'' Two-stage transformation:
+''   Stage 1: Sensor layout to display layout (rotate 90° right + un-mirror)
+''   Stage 2: Orientation-specific positioning based on ribbon location
+
+  ' STAGE 1: Transform from sensor data layout to display-normal layout
+  ' Sensor data appears rotated 90° left and horizontally mirrored relative to display
+  ' So we rotate 90° right and un-mirror to normalize
+  temp_row := col          ' Rotate 90° right: old col becomes new row (no inversion)
+  temp_col := row          ' Rotate 90° right: old row becomes new col (no inversion)
+
+  ' STAGE 2: Apply orientation-specific transformations
+  ' These position the normalized data correctly based on ribbon location
+  case orientation
+    ORIENTATION_0:
+      ' Ribbon BOTTOM: Away from ribbon, left side
+      x := (7 - temp_col) * CELL_WIDTH
+      y := temp_row * CELL_HEIGHT
+
+    ORIENTATION_90:
+      ' Ribbon LEFT: Next to ribbon, left side
+      x := (7 - temp_col) * CELL_WIDTH
+      y := (7 - temp_row) * CELL_HEIGHT
+
+    ORIENTATION_180:
+      ' Ribbon TOP: Next to ribbon, right side
+      x := (7 - temp_col) * CELL_WIDTH
+      y := (7 - temp_row) * CELL_HEIGHT
+
+    ORIENTATION_270:
+      ' Ribbon RIGHT: Away from ribbon, right side
+      x := (7 - temp_col) * CELL_WIDTH
+      y := temp_row * CELL_HEIGHT
+
+  ' Write results to output pointers
+  LONG[x_ptr] := x
+  LONG[y_ptr] := y
 
 PRI value_to_color(value, min_val, max_val) : color | range, normalized, r, g, b
 '' Convert sensor value to RGB565 color using bipolar color mapping

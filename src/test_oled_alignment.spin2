@@ -45,7 +45,7 @@ PUB main() | pattern_num
   debug("OLED hardware initialized", 13, 10)
   debug(" ", 13, 10)
 
-  debug("Starting pattern sequence (10 seconds each)...", 13, 10)
+  debug("Starting pattern sequence (7 seconds each)...", 13, 10)
   debug(" ", 13, 10)
 
   ' Cycle through diagnostic patterns
@@ -69,8 +69,9 @@ PUB main() | pattern_num
         generate_gradient()
 
       4:
-        debug("Pattern 4: CORNER MARKERS", 13, 10)
+        debug("Pattern 4: CORNER MARKERS with (0,0) INDICATOR", 13, 10)
         debug("  buffer[0]=RED (TL), [7]=YELLOW (TR), [56]=GREEN (BL), [63]=BLUE (BR)", 13, 10)
+        debug("  buffer[9]=RED (diagonal from 0,0 - marks origin)", 13, 10)
         generate_corner_markers()
 
     ' Display the frame
@@ -79,8 +80,8 @@ PUB main() | pattern_num
     debug("  Frame displayed", 13, 10)
     debug(" ", 13, 10)
 
-    ' Wait 10 seconds
-    repeat 10
+    ' Wait 7 seconds
+    repeat 7
       WAITUS(1_000_000)
 
     ' Move to next pattern
@@ -112,10 +113,12 @@ PRI generate_gradient() | i, value
 PRI generate_corner_markers()
 '' Four corner markers to identify coordinate mapping
 '' TL=RED, TR=YELLOW, BL=GREEN, BR=BLUE (on cyan background)
+'' Plus diagonal indicator: (1,1) = RED to point to origin at (0,0)
 '' This reveals how buffer indices map to physical positions
 
   WORDFILL(@test_frame, 1500, 64)  ' Cyan background (between blue and green)
-  test_frame[0]  := VALUE_RED     ' Top-left corner (row 0, col 0)
+  test_frame[0]  := VALUE_RED     ' Top-left corner (row 0, col 0) - ORIGIN
+  test_frame[9]  := VALUE_RED     ' Diagonal indicator (row 1, col 1) - points to origin
   test_frame[7]  := 3500          ' Top-right corner (row 0, col 7) - YELLOW
   test_frame[56] := VALUE_GREEN   ' Bottom-left corner (row 7, col 0)
   test_frame[63] := VALUE_BLUE    ' Bottom-right corner (row 7, col 7)

@@ -72,10 +72,10 @@ PUB main() | success
 
   ' Start OLED single-COG driver (P16-P23) with orientation
   debug("Starting OLED single-COG driver (ribbon LEFT)...", 13, 10)
-  if not oled.start(OLED_BASE_PIN, oled.ORIENTATION_270)
+  if not oled.start(OLED_BASE_PIN, oled.ORIENTATION_90)
     debug("ERROR: Failed to start OLED driver", 13, 10)
     return
-  debug("  OLED driver ready (270 deg orientation)", 13, 10)
+  debug("  OLED driver ready (ORIENTATION_90, ribbon LEFT)", 13, 10)
 
   ' Initialize decimation state (integrated into main COG)
   debug("Initializing decimation in main COG...", 13, 10)
