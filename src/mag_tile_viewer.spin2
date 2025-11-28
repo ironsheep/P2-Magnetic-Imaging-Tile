@@ -11,7 +11,7 @@ CON
   _CLKFREQ = 250_000_000   ' 250 MHz for HDMI timing
 
   ' System modes
-  TEST_MODE = true         ' true = generate test patterns, no decimation
+  TEST_MODE = false         ' true = generate test patterns, no decimation
                            ' false = normal operation with real sensor data
 
   ' Pin group assignments
@@ -43,9 +43,10 @@ VAR
 
 CON { decimation constants }
 
-  ' Default decimation ratios
-  DEFAULT_HDMI_DECIMATION = 9    ' Every 9th frame to HDMI
-  DEFAULT_OLED_DECIMATION = 27   ' Every 27th frame to OLED
+  ' Default decimation ratios @ 250 MHz system clock
+  ' Sensor runs at ~375 fps, HDMI at 60 fps, OLED at ~70 fps
+  DEFAULT_HDMI_DECIMATION = 6    ' Every 6th frame to HDMI (375/6 = 62.5 fps)
+  DEFAULT_OLED_DECIMATION = 5    ' Every 5th frame to OLED (375/5 = 75 fps)
 
   ' Processing modes
   MODE_DECIMATION = 0            ' Simple frame skipping
@@ -150,24 +151,25 @@ PRI decimation_loop() | framePtr, sendHDMI, sendOLED, hdmiPtr, oledPtr
       case processing_mode
         MODE_DECIMATION:
           ' Simple decimation - pass through selected frames
+          ' ALWAYS send first frame to both displays for immediate feedback
           hdmi_counter++
           oled_counter++
-          sendHDMI := (hdmi_counter // hdmi_decimation) == 0
-          sendOLED := (oled_counter // oled_decimation) == 0
+          sendHDMI := (frame_counter == 1) or (hdmi_counter // hdmi_decimation) == 0
+          sendOLED := (frame_counter == 1) or (oled_counter // oled_decimation) == 0
 
         MODE_AVERAGING:
           ' TODO: Implement frame averaging
           hdmi_counter++
           oled_counter++
-          sendHDMI := (hdmi_counter // hdmi_decimation) == 0
-          sendOLED := (oled_counter // oled_decimation) == 0
+          sendHDMI := (frame_counter == 1) or (hdmi_counter // hdmi_decimation) == 0
+          sendOLED := (frame_counter == 1) or (oled_counter // oled_decimation) == 0
 
         MODE_PEAK:
           ' TODO: Implement peak detection
           hdmi_counter++
           oled_counter++
-          sendHDMI := (hdmi_counter // hdmi_decimation) == 0
-          sendOLED := (oled_counter // oled_decimation) == 0
+          sendHDMI := (frame_counter == 1) or (hdmi_counter // hdmi_decimation) == 0
+          sendOLED := (frame_counter == 1) or (oled_counter // oled_decimation) == 0
 
       ' Route to appropriate display FIFOs
       ' Note: Independent checks allow frame to go to BOTH displays
