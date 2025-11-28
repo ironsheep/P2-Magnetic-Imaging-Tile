@@ -216,8 +216,8 @@ PUB releaseFrame(framePtr)
     ' Spin waiting for lock
 
   if freeCount < MAX_FRAMES
-    freeList[freeTail] := framePtr
-    freeTail := (freeTail + 1) // MAX_FRAMES
+    freeTail := (freeTail + 1) // MAX_FRAMES  ' Move tail first
+    freeList[freeTail] := framePtr             ' Then insert
     freeCount++
 
   lockrel(lock)
