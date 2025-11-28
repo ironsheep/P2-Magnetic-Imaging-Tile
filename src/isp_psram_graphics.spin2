@@ -20,36 +20,54 @@ OBJ
   hdmi  : "isp_hdmi_640x480_24bpp"           ' ISP HDMI driver with correct VGA timing
   fonts : "isp_hub75_fonts"                  ' Bitmap font library
 
+DAT
+  ' Shared hardware configuration (all COGs use same hardware)
+  hdmi_pin_group    long    0               ' HDMI base pin (shared)
+  hardware_started  long    0               ' Flag: 0=not started, 1=hardware initialized
+
 VAR
   long cog
   long Command[13] 'mailbox for assembly driver, first long is the command#, which gets set last
-  long psram_ptr
+  long psram_ptr                             ' Per-COG PSRAM mailbox pointer
   long MapBase
   long row[mapx] 'for CLS operations
   long current_font                          ' Current font selection
 
-
-
-PUB start(hdmi_base_pin)
-'' Start PSRAM graphics system with HDMI output
+PUB init(hdmi_base_pin)
+'' Initialize PSRAM graphics hardware (call once from main COG)
 '' @param hdmi_base_pin - base pin for HDMI output (typically 0 for pin group 0: P0-P7)
 
+  if hardware_started
+    return  ' Already initialized
+
+  ' Store pin group in DAT (shared across all COG instances)
+  hdmi_pin_group := hdmi_base_pin
+
+  ' Start PSRAM driver (shared hardware)
   psram.start()
   debug("PSRAM ptr: ", UHEX_LONG(psram.pointer()), 13, 10)
 
-  psram_ptr := psram.pointer() + cogid() * 12
-  debug("Main cog PSRAM cmd ptr: ", UHEX_LONG(psram_ptr), 13, 10)
-
-  ' PRE-FILL PSRAM with solid red BEFORE starting HDMI
-  debug("Pre-filling PSRAM with RED...", 13, 10)
-  clear_screen(0, $FF0000FF)
-  debug("Pre-fill complete, starting HDMI...", 13, 10)
-
+  ' Start HDMI video driver (shared hardware)
   hdmi.start(hdmi_base_pin, psram.pointer(), 0)
   debug("HDMI started: base_pin=", UDEC(hdmi_base_pin), " screen_base=0", 13, 10)
 
+  ' Mark hardware as initialized
+  hardware_started := 1
+
   ' Initialize default font
   current_font := fonts.TEXT_FONT_5x7_DITH_DCNDR  ' 5x7 dithered with descenders
+
+PUB start()
+'' Initialize graphics for calling COG (call from each COG that uses graphics)
+'' Must call init() first from main COG before any COG calls start()
+
+  if not hardware_started
+    debug("ERROR: Graphics hardware not initialized! Call init() first.", 13, 10)
+    return
+
+  ' Calculate this COG's PSRAM mailbox pointer
+  psram_ptr := psram.pointer() + cogid() * 12
+  debug("COG ", udec(cogid()), " PSRAM cmd ptr: ", UHEX_LONG(psram_ptr), 13, 10)
 
   'configure assembly
   array_mid_ptr := @frac_array + frac_array_mid
@@ -61,47 +79,7 @@ PUB start(hdmi_base_pin)
   plot_mapx := mapx
   plot_mapy := mapy
 
-  'Start driver cog
-  Stop()  'stop any already running cog
-  command[0]:=psram.pointer() 'cog needs to know how to call psram
-  cog:=1+coginit(COGEXEC_NEW, @GraphicsEntry, @command)
-
-  clear_screen(0,0)
-
-  ' ISP test pattern - grid and filled rectangles
-  cls($002000FF)  ' Dark green background (RRGGBBAA format)
-
-  ' Draw test grid
-  DrawSensorGrid(100, 50, 40, 5)
-
-  ' Fill some test cells with different colors (RRGGBBAA format)
-  FillSensorCell(0, 0, 100, 50, 40, 5, $FF0000FF)  ' Red
-  FillSensorCell(3, 3, 100, 50, 40, 5, $00FF00FF)  ' Green
-  FillSensorCell(7, 7, 100, 50, 40, 5, $0000FFFF)  ' Blue
-
-  ' DIAGNOSTIC: Read back first pixel from PSRAM to verify data is there
-  waitms(100)  ' Wait for HDMI to process a few frames
-  long[psram_ptr][0] := @row[0]    ' Hub destination
-  long[psram_ptr][1] := 0          ' PSRAM address 0 (first pixel)
-  long[psram_ptr][2] := 4          ' Read 4 longs (first 4 pixels)
-  repeat while long[psram_ptr][2]  ' Wait for completion
-  debug("PSRAM readback [0-3]: ", UHEX_LONG(row[0]), " ", UHEX_LONG(row[1]), " ", UHEX_LONG(row[2]), " ", UHEX_LONG(row[3]), 13, 10)
-
-  return
-
-  repeat
-    show_lines()
-    show_burst()
-    show_detail()
-
-
-
-{
-  repeat
-    show_lines()
-    show_burst()
-    show_detail()
-}
+  ' Note: No driver COG or test code needed - PSRAM and HDMI drivers already started by init()
 
 PUB Stop()  'Stop driver cog
   if cog>0
@@ -147,7 +125,9 @@ PUB FillRect(rx1, ry1, rx2, ry2, rcolor) | ry, rx, psram_addr
     long[psram_ptr][0] := @row[rx1]      ' HUB source
     long[psram_ptr][1] := psram_addr     ' PSRAM destination
     long[psram_ptr][2] := -(rx2-rx1+1)   ' Negative = HUB to PSRAM
+    debug("FillRect: Waiting for PSRAM completion, ptr=", UHEX_LONG(psram_ptr), " cmd[2]=", SDEC_LONG(long[psram_ptr][2]), 13, 10)
     repeat while long[psram_ptr][2]      ' Wait for completion
+    debug("FillRect: PSRAM complete", 13, 10)
 
 PUB DrawHLine(lx1, lx2, ly, lcolor)
 '' Draw a horizontal line - optimized version
@@ -257,7 +237,7 @@ PUB DrawChar(xPos, yPos, ch, clr) | pCharBitmap, charWidth, charHeight, rowOffse
       rowBits := WORD[pCharBitmap][rowOffset]  ' Read WORD for dithered fonts
       repeat colOffset from 0 to charWidth - 1
         bitOffset := colOffset * 2  ' 2 bits per pixel
-        pixVal := ((rowBits << bitOffset) & $C000) >> 14  ' Extract 2-bit value
+        pixVal := (rowBits >> (14 - bitOffset)) & 3  ' Extract 2-bit value from correct position
 
         ' Map pixel value to color:
         '   3 = full color

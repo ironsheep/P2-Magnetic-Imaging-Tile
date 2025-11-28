@@ -70,10 +70,10 @@ PUB start(hdmi_base_pin) : ok
   grid_drawn := 0
   debug("HDMI Engine: Variables set", 13, 10)
 
-  ' Start HDMI graphics system (engine owns graphics subsystem)
-  debug("HDMI Engine: Starting PSRAM graphics on pin ", udec(hdmi_base_pin), "...", 13, 10)
-  gfx.start(hdmi_base_pin)
-  debug("HDMI Engine: Graphics system ready", 13, 10)
+  ' Initialize HDMI graphics hardware (one-time, from main COG)
+  debug("HDMI Engine: Initializing PSRAM graphics on pin ", udec(hdmi_base_pin), "...", 13, 10)
+  gfx.init(hdmi_base_pin)
+  debug("HDMI Engine: Graphics hardware initialized", 13, 10)
 
   ' Stop any existing display COG before starting new one
   stop()
@@ -136,6 +136,11 @@ PRI display_loop() | framePtr, row, col, sensorIdx, sensorVal, cellColor
 
   debug("HDMI Engine Loop: COG started, TEST_MODE=", udec(TEST_MODE), 13, 10)
 
+  ' Initialize graphics for this COG (Cog4) - sets up PSRAM mailbox
+  debug("HDMI Engine Loop: Initializing graphics for this COG...", 13, 10)
+  gfx.start()
+  debug("HDMI Engine Loop: Graphics initialized for COG ", udec(cogid()), 13, 10)
+
   if TEST_MODE
     ' Test pattern mode - just idle for now
     ' (Graphics drawing moved to main)
@@ -157,9 +162,9 @@ PRI display_loop() | framePtr, row, col, sensorIdx, sensorVal, cellColor
 
     ' Add text labels around the display
     debug("HDMI Engine Loop: Drawing text labels...", 13, 10)
-    ' TEMPORARY: Comment out to isolate hang
-    ' DrawStaticLabels()
-    debug("HDMI Engine Loop: Grid ready, waiting for frames...", 13, 10)
+    ' TEMPORARILY DISABLED - Testing if grid and sensor display work without text
+    'DrawStaticLabels()
+    debug("HDMI Engine Loop: Text drawing disabled for testing, grid ready, waiting for frames...", 13, 10)
 
     repeat
       ' Dequeue frame from HDMI FIFO (blocking)
@@ -187,7 +192,11 @@ PRI display_loop() | framePtr, row, col, sensorIdx, sensorVal, cellColor
 
         ' Increment frame counter
         frame_count++
-        debug("HDMI Engine: Frame ", udec(frame_count), " rendered, corner values: TL=", udec(WORD[framePtr][0]), " TR=", udec(WORD[framePtr][7]), 13, 10)
+
+        ' Debug: Log all four corner sensor values
+        debug("HDMI Engine: Frame ", udec(frame_count), " rendered", 13, 10)
+        debug("  Corner values - TL[0,0]=", udec(WORD[framePtr][0]), " TR[0,7]=", udec(WORD[framePtr][7]), 13, 10)
+        debug("                  BL[7,0]=", udec(WORD[framePtr][56]), " BR[7,7]=", udec(WORD[framePtr][63]), 13, 10)
 
         ' Release frame back to pool
         debug("HDMI Engine: Releasing frame ptr=", uhex_long(framePtr), 13, 10)
