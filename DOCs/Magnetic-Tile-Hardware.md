@@ -45,21 +45,22 @@ The SparkFun Magnetic Imaging Tile V3 is an 8×8 array of Hall effect sensors de
 
 ### P2 Pin Assignments
 
-**Pin Group**: 40 (P40-P47)
+**Pin Group**: 8 (P8-P15)
 
 | P2 Pin | Signal | Wire Color | Function |
 |--------|--------|------------|----------|
-| P40 (+0) | CS | Violet | AD7680 Chip Select (active low) |
-| P41 (+1) | CCLK | White | Counter Clock (sensor advance) |
-| P42 (+2) | MISO | Blue | AD7680 Data Output |
-| P43 (+3) | CLRb | Gray | Counter Clear (active low) |
-| P44 (+4) | SCLK | Green | AD7680 Clock (max 2.5 MHz) |
-| P46 (+6) | AOUT | Yellow | Analog Output (sensor signal) |
+| P8 (+0) | CS | Violet | AD7680 Chip Select (active low) |
+| P9 (+1) | CCLK | White | Counter Clock (sensor advance) |
+| P10 (+2) | MISO | Blue | AD7680 Data Output |
+| P11 (+3) | CLRb | Gray | Counter Clear (active low) |
+| P12 (+4) | SCLK | Green | AD7680 Clock (max 2.5 MHz) |
+| P14 (+6) | AOUT | Yellow | Analog Output (sensor signal) |
 | GND | GND | Black | Ground Reference |
 | 3.3V | VCC | Red | Power Supply |
 
 - Pin group allocation allows efficient Smart Pin configuration
-- Separate from OLED display interface (Pin Group 24)
+- Separate from HDMI display interface (Pin Group 0: P0-P7)
+- Separate from OLED display interface (Pin Group 16: P16-P23)
 
 ## Sensor Readout Sequence
 
