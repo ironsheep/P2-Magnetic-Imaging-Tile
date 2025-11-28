@@ -31,7 +31,8 @@
 '' =================================================================================================
 
 CON
-    _clkfreq = 200_000_000                  ' 200 MHz system clock
+    _clkfreq = 250_000_000                  ' 250 MHz system clock
+    DEBUG_BAUD = 2_000_000                  ' 2 Mbps debug output
 
     ' Pin group for magnetic tile (from README.md)
     TILE_PIN_GROUP = 8                      ' Pin Group 8: P8-P15
@@ -41,8 +42,13 @@ CON
     EXPECTED_ZERO_FIELD = 32768             ' Expected mid-scale value (16-bit)
     MIN_UNIQUE_VALUES = 10                  ' Minimum unique values to prove multiplexer working
 
+    ' Performance test parameters
+    EXPECTED_FRAME_TIME_US = 2667           ' Target: ~375 fps (2667 us per frame)
+    PERFORMANCE_TOLERANCE = 10              ' Allow ±10% deviation from target
+
 OBJ
     tile : "isp_tile_sensor"                ' Magnetic tile sensor driver
+    fifo : "isp_frame_fifo_manager"         ' Frame FIFO for pipeline test
 
 VAR
     LONG sensor_values[NUM_SENSORS]         ' All 64 sensor readings
@@ -50,22 +56,24 @@ VAR
 
 PUB main() | i, value, result
 
-    debug("================================================================================")
-    debug("Magnetic Tile ADC Test - Phase 2: All 64 Sensors")
-    debug("================================================================================")
-    debug(" ")
+    debug("*** TEST START ***", 13, 10)
+    debug("================================================================================", 13, 10)
+    debug("Magnetic Tile ADC Test - Phase 2: All 64 Sensors", 13, 10)
+    debug("================================================================================", 13, 10)
+    debug(" ", 13, 10)
 
-    ' Initialize tile sensor (note: we're not starting background cog)
-    ' Pin group is now fixed at TILE_PIN_GROUP constant in driver
-    result := tile.start(0)  ' Pass 0 for fifo_obj (not used in test mode)
+    ' Initialize tile sensor for testing
+    ' NOTE: We do NOT call tile.start() because that launches a background COG
+    '       which requires the FIFO manager. For testing, we directly configure
+    '       the smart pins and use the test methods.
+    debug("Tile sensor test - Pin Group: P8-P15", 13, 10)
+    debug(" ", 13, 10)
 
-    if not result
-        debug("ERROR: Failed to initialize tile sensor")
-        return
-
-    debug("Tile sensor initialized successfully")
-    debug("Pin Group: P8-P15 (fixed in driver)")
-    debug(" ")
+    ' Configure smart pins for test methods
+    debug("Configuring smart pins for SPI interface...", 13, 10)
+    tile.configure_smart_pins()
+    debug("Smart pins configured", 13, 10)
+    debug(" ", 13, 10)
 
     ' Read all 64 sensors
     debug("TEST: Reading All 64 Sensors")
@@ -77,11 +85,11 @@ PUB main() | i, value, result
 
     repeat i from 0 to NUM_SENSORS-1
         tile.advance_counter_test()         ' Advance to next sensor
-        sensor_values[i] := tile.read_single_sensor_bitbang()
+        sensor_values[i] := tile.read_single_sensor()
 
-        ' Show every 8th sensor (one per row)
+        ' After every 8th sensor, dump all 8 values for logic analyzer validation
         if (i+1) // 8 == 0
-            debug("  Sensor ", udec_(i), ": ", udec(sensor_values[i]), " (0x", uhex_word(sensor_values[i]), ")")
+            debug("  Sensors ", udec_(i-7), "-", udec_(i), ": ", uhex_word_(sensor_values[i-7]), " ", uhex_word_(sensor_values[i-6]), " ", uhex_word_(sensor_values[i-5]), " ", uhex_word_(sensor_values[i-4]), " ", uhex_word_(sensor_values[i-3]), " ", uhex_word_(sensor_values[i-2]), " ", uhex_word_(sensor_values[i-1]), " ", uhex_word(sensor_values[i]))
 
     debug(" ")
 
@@ -129,10 +137,152 @@ PUB main() | i, value, result
 
     debug(" ")
     debug("================================================================================")
+    debug("PERFORMANCE TESTS")
+    debug("================================================================================")
+    debug(" ")
+
+    ' Run performance tests
+    run_raw_performance_test()
+    debug(" ")
+    run_pipeline_performance_test()
+
+    debug(" ")
+    debug("================================================================================")
     debug("AUTOMATED TESTS COMPLETE")
     debug("================================================================================")
     debug(" ")
     debug("END_SESSION")  ' Marker for automated test script
+
+PRI run_raw_performance_test() | i, start_ct, end_ct, cycles, frame_time_us, frame_rate, sensor_time_us, deviation, pass_fail
+'' TEST 1: Raw hardware performance measurement
+'' Measures pure ADC/SPI interface speed without FIFO overhead
+
+    debug("TEST 1: Raw Hardware Performance")
+    debug("----------------------------------")
+    debug("Measuring 64-sensor scan using smart pin SPI interface...")
+    debug(" ")
+
+    ' Reset counter
+    tile.reset_counter_test()
+
+    ' Measure complete frame acquisition
+    start_ct := GETCT()
+
+    repeat i from 0 to NUM_SENSORS-1
+        tile.advance_counter_test()
+        sensor_values[i] := tile.read_single_sensor()
+
+    end_ct := GETCT()
+
+    ' Calculate performance metrics @ 250 MHz
+    cycles := end_ct - start_ct
+    frame_time_us := cycles / 250                ' cycles / (250 MHz / 1 MHz)
+    frame_rate := 1_000_000 / frame_time_us      ' fps
+    sensor_time_us := frame_time_us / 64         ' us per sensor
+
+    ' Calculate deviation from target (negative = faster than target)
+    deviation := ((frame_time_us - EXPECTED_FRAME_TIME_US) * 100) / EXPECTED_FRAME_TIME_US
+
+    ' Pass/fail check: PASS if faster than target OR within tolerance
+    ' Faster than target (negative deviation) is always good
+    if deviation < 0
+        pass_fail := TRUE                       ' Faster than target = PASS
+    else
+        pass_fail := (deviation <= PERFORMANCE_TOLERANCE)  ' Slower must be within tolerance
+
+    ' Report results
+    debug("RESULTS:")
+    debug("  Total cycles:      ", udec(cycles))
+    debug("  Frame time:        ", udec(frame_time_us), " us")
+    debug("  Frame rate:        ", udec(frame_rate), " fps")
+    debug("  Time per sensor:   ", udec(sensor_time_us), " us")
+    debug("  Target frame time: ", udec(EXPECTED_FRAME_TIME_US), " us (375 fps)")
+    debug("  Deviation:         ", sdec(deviation), "%")
+
+    if pass_fail
+        if deviation < 0
+            debug("  Status:            PASS (faster than target by ", udec(-deviation), "%)")
+        else
+            debug("  Status:            PASS (within ", udec(PERFORMANCE_TOLERANCE), "% tolerance)")
+    else
+        debug("  Status:            FAIL (exceeds ", udec(PERFORMANCE_TOLERANCE), "% tolerance)")
+        debug("  NOTE: Check SPI timing, settling delays, or hardware")
+
+PRI run_pipeline_performance_test() | i, start_ct, end_ct, cycles, frame_time_us, frame_rate, framePtr, deviation, pass_fail
+'' TEST 2: Production pipeline performance with FIFO
+'' Measures complete production code path including frame pool and FIFO operations
+
+    debug("TEST 2: Production Pipeline Performance")
+    debug("----------------------------------------")
+    debug("Measuring frame acquisition with FIFO commits...")
+    debug(" ")
+
+    ' Initialize FIFO manager
+    if not fifo.start()
+        debug("ERROR: Failed to start FIFO manager")
+        return
+
+    debug("FIFO manager started")
+    debug(" ")
+
+    ' Reset counter
+    tile.reset_counter_test()
+
+    ' Measure complete frame acquisition with FIFO
+    start_ct := GETCT()
+
+    ' Get frame from pool
+    framePtr := fifo.getNextFrame()
+
+    if framePtr
+        ' Fill frame with sensor data
+        repeat i from 0 to NUM_SENSORS-1
+            tile.advance_counter_test()
+            WORD[framePtr][i] := tile.read_single_sensor()
+
+        ' Commit to sensor FIFO
+        fifo.commitFrame(fifo.FIFO_SENSOR, framePtr)
+
+    end_ct := GETCT()
+
+    ' Calculate performance metrics @ 250 MHz
+    cycles := end_ct - start_ct
+    frame_time_us := cycles / 250                ' cycles / (250 MHz / 1 MHz)
+    frame_rate := 1_000_000 / frame_time_us      ' fps
+
+    ' Calculate deviation from target (negative = faster than target)
+    deviation := ((frame_time_us - EXPECTED_FRAME_TIME_US) * 100) / EXPECTED_FRAME_TIME_US
+
+    ' Pass/fail check: PASS if faster than target OR within tolerance
+    if deviation < 0
+        pass_fail := TRUE                       ' Faster than target = PASS
+    else
+        pass_fail := (deviation <= PERFORMANCE_TOLERANCE)  ' Slower must be within tolerance
+
+    ' Report results
+    debug("RESULTS:")
+    debug("  Total cycles:      ", udec(cycles))
+    debug("  Frame time:        ", udec(frame_time_us), " us")
+    debug("  Frame rate:        ", udec(frame_rate), " fps")
+    debug("  Target frame time: ", udec(EXPECTED_FRAME_TIME_US), " us (375 fps)")
+    debug("  Deviation:         ", sdec(deviation), "%")
+    debug("  FIFO overhead:     ", udec(frame_time_us - (cycles / 250)), " us")
+
+    if pass_fail
+        if deviation < 0
+            debug("  Status:            PASS (faster than target by ", udec(-deviation), "%)")
+        else
+            debug("  Status:            PASS (within ", udec(PERFORMANCE_TOLERANCE), "% tolerance)")
+        debug("  NOTE: Production pipeline meets/exceeds target performance")
+    else
+        debug("  Status:            FAIL (exceeds ", udec(PERFORMANCE_TOLERANCE), "% tolerance)")
+        debug("  NOTE: FIFO/memory operations causing bottleneck")
+
+    ' Report FIFO status
+    debug(" ")
+    debug("FIFO STATUS:")
+    debug("  Sensor FIFO depth: ", udec(fifo.getQueueDepth(fifo.FIFO_SENSOR)))
+    debug("  Free frames:       ", udec(fifo.getFreeFrames()))
 
 PRI calculate_stats(data_ptr, count, stats_ptr) | i, j, sum, min_val, max_val, avg, variance, diff, value, unique_count, is_unique
 

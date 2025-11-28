@@ -1,12 +1,15 @@
 '' =================================================================================================
 ''   File....... isp_tile_sensor.spin2
-''   Purpose.... Magnetic Imaging Tile sensor interface with new FIFO architecture
+''   Purpose.... Magnetic Imaging Tile sensor interface - Single COG architecture
 ''   Author..... Stephen M Moraco
 ''               -- Copyright (c) 2025 Iron Sheep Productions, LLC
 ''               -- see below for terms of use
 ''   E-mail..... stephen@ironsheep.biz
 ''   Started.... Jan 2025
-''   Updated.... Jan 2025
+''   Updated.... Nov 2025
+''
+''   Architecture: Single COG with inline PASM for sensor acquisition
+''                Similar to isp_oled_single_cog.spin2 pattern
 ''
 '' =================================================================================================
 
@@ -43,55 +46,37 @@ CON { tile sensor constants }
     ADC_BITS = 16                       ' AD7680 is 16-bit ADC
     ADC_MAX_VALUE = (1 << ADC_BITS) - 1 ' Maximum ADC reading
     SPI_TRANSFER_BITS = 24              ' Total SPI transfer size (4 leading + 16 data + 4 trailing)
-    SPI_DATA_BITS = 20                  ' Minimum transfer (4 leading + 16 data)
 
-    ' Timing constants (in system clocks @ 200 MHz sysclock, 1 clock = 5ns)
-    SPI_CLOCK_DELAY = 40                ' 200ns per SPI clock edge (for 2.5 MHz = 400ns period)
-    COUNTER_SETUP_DELAY = 50            ' 250ns after counter operations (OK)
-    SENSOR_SETTLE_DELAY = 400           ' 2000ns (2µs) for analog settling - CRITICAL!
-    ADC_CONVERSION_CLOCKS = 1600        ' 8000ns (8µs) for 20 SPI clocks @ 2.5 MHz
+    ' Timing constants @ 250 MHz system clock (1 clock = 4ns)
+    SENSOR_SETTLE_DELAY = 500           ' 2000ns (2µs) for analog settling - CRITICAL!
+    COUNTER_SETUP_DELAY = 63            ' 250ns after counter operations
+    FRAME_PERIOD_MS = 3                 ' ~333 fps target frame rate (@ 250 MHz)
 
-    ' Smart Pin SPI configuration (if used - bit-bang is more reliable)
+    ' Smart Pin SPI configuration (P_PULSE mode like jm_ez_spi)
     SPI_CLOCK_FREQ = 2_500_000          ' 2.5 MHz SPI clock (AD7680 maximum)
-
-    ' Note: P_SYNC_RX, P_SYNC_TX and other smart pin constants are built-in
-
-    ' Subtile reading order (based on hardware layout)
-    ' Documentation specifies: subtileOrder[] = {0, 2, 1, 3}
-    ' subtileOffset[] = {0, 4, 32, 36}
+    SPI_PERIOD = 250_000_000 / SPI_CLOCK_FREQ  ' Period in sysclks = 100 @ 250 MHz
+    SPI_LOW_TIME = SPI_PERIOD / 2       ' 50% duty cycle = 50 sysclks
 
 OBJ
     fifo : "isp_frame_fifo_manager"    ' Multi-FIFO frame pool manager
 
 VAR { tile sensor variables }
 
-    LONG    cog_id                      ' PASM acquisition COG ID (-1 = stopped, >=0 = running)
-    LONG    manager_cog_id              ' Spin2 FIFO manager COG ID
+    LONG    cog_id                      ' Sensor COG ID (-1 = stopped, >=0 = running)
     LONG    frame_count                 ' Total frames captured
     LONG    error_count                 ' SPI/sensor error count
     LONG    acquisition_mode            ' Current acquisition mode
-    LONG    frame_rate_target           ' Target frame rate (Hz)
-    LONG    test_frame_counter          ' Test mode: current frame index (0-5)
-
-    ' Performance monitoring
-    LONG    last_frame_time             ' Timestamp of last frame
-    LONG    min_frame_time              ' Minimum time between frames
-    LONG    max_frame_time              ' Maximum time between frames
+    LONG    base_pin                    ' Base pin for sensor interface
 
     ' Baseline calibration
     WORD    baseline[SENSORS_PER_FRAME] ' Zero-field baseline values (64 sensors)
     LONG    baseline_valid              ' TRUE if baseline has been calibrated
-    LONG    base_pin                    ' Base pin for sensor interface
 
     ' Test pattern state
-    LONG    test_pattern_frame_num      ' Current test pattern frame (0-4)
-
-    ' Mailbox for Spin2 <-> PASM communication
-    LONG    mailbox_frame_ptr           ' Frame buffer pointer (Spin2 provides, PASM writes to)
-    LONG    mailbox_go_flag             ' Handshake: 1=PASM capture, 0=PASM done
+    LONG    test_frame_counter          ' Test mode: current frame index (0-5)
 
     ' COG stack (64 longs per P2KB recommendations)
-    LONG    manager_cog_stack[64]       ' Stack for FIFO manager COG
+    LONG    sensor_cog_stack[64]        ' Stack for sensor COG
 
 CON { acquisition modes }
 
@@ -118,17 +103,16 @@ DAT { sensor mapping arrays }
 PUB null()
 '' This is not a top-level object
 '' @returns nothing - placeholder method for non-top-level object
-    cog_id := -1                        ' Initialize to stopped state
+    cog_id := -1
 
 PUB start(sensor_base_pin) : success
-'' Start the tile sensor and begin background acquisition
+'' Start the tile sensor single-COG driver
 '' @param sensor_base_pin - base pin for sensor interface
 '' @returns TRUE if successful, FALSE if failed to start
 
-    ' Initialize COG IDs FIRST (critical - must be set before any checks!)
+    ' Initialize COG ID FIRST (critical - must be set before any checks!)
     if cog_id == 0
         cog_id := -1
-        manager_cog_id := -1
 
     if cog_id >= 0
         return TRUE                     ' Already running
@@ -139,62 +123,33 @@ PUB start(sensor_base_pin) : success
     ' Initialize variables
     frame_count := 0
     error_count := 0
-    acquisition_mode := MODE_TEST_PATTERN  ' Start in test mode so FIFO manager runs
-    frame_rate_target := 375            ' Default 375 Hz (1/4 max speed)
-    min_frame_time := $7FFFFFFF
-    max_frame_time := 0
+    acquisition_mode := MODE_LIVE       ' Start in live mode
     baseline_valid := FALSE             ' No baseline until calibrated
+    test_frame_counter := 0
 
-    ' Initialize mailbox
-    mailbox_frame_ptr := 0
-    mailbox_go_flag := 0
+    ' Launch sensor COG
+    debug("Sensor: Launching single-COG driver...", 13, 10)
+    cog_id := cogspin(NEWCOG, sensor_loop(), @sensor_cog_stack)
 
-    ' Start Spin2 FIFO manager COG (manages FIFO operations)
-    debug("Sensor: Launching FIFO manager COG...", 13, 10)
-    manager_cog_id := cogspin(NEWCOG, fifo_manager_loop(), @manager_cog_stack)
-    if manager_cog_id < 0
-        debug("Sensor: ERROR - FIFO manager COG failed!", 13, 10)
-        return FALSE
-    debug("Sensor: FIFO manager COG ", udec(manager_cog_id), " launched", 13, 10)
-
-    ' Start PASM acquisition COG (reads sensors, writes to buffers)
-    debug("Sensor: Launching PASM acquisition COG...", 13, 10)
-    cog_id := coginit(NEWCOG, @sensor_cog_entry, @frame_count)
     if cog_id < 0
-        debug("Sensor: ERROR - PASM acquisition COG failed!", 13, 10)
-        cogstop(manager_cog_id)
+        debug("Sensor: ERROR - COG launch failed!", 13, 10)
         return FALSE
-    debug("Sensor: PASM acquisition COG ", udec(cog_id), " launched", 13, 10)
 
-    ' Return success based on cog_id validity
-    return (cog_id >= 0)
+    debug("Sensor: COG ", udec(cog_id), " launched successfully", 13, 10)
+    return TRUE
 
 PUB stop()
-'' Stop the tile sensor and terminate background cog operation
-'' @returns nothing - stops all sensor operations
+'' Stop the tile sensor and terminate COG operation
 
     if cog_id >= 0 and cog_id <= 7
         cogstop(cog_id)
-        cog_id := -1
-
-    if manager_cog_id >= 0 and manager_cog_id <= 7
-        cogstop(manager_cog_id)
-        manager_cog_id := -1
+    cog_id := -1
 
 PUB set_acquisition_mode(mode)
-'' Set the sensor acquisition mode for different capture speeds
-'' @param mode - acquisition mode: MODE_STOPPED (0), MODE_LIVE (1), MODE_HIGH_SPEED (2), or MODE_DEBUG (3)
-'' @returns nothing - updates internal acquisition state
+'' Set the sensor acquisition mode
+'' @param mode - acquisition mode: MODE_STOPPED, MODE_LIVE, MODE_TEST_PATTERN, etc.
 
     acquisition_mode := mode
-
-PUB set_frame_rate_target(rate_hz)
-'' Set target frame rate for acquisition timing control
-'' @param rate_hz - target frame rate in Hz (valid range: 1-2000)
-'' @returns nothing - updates frame rate if within valid range
-
-    if rate_hz >= 1 and rate_hz <= 2000
-        frame_rate_target := rate_hz
 
 PUB get_frame_count() : count
 '' Get total number of frames captured since start
@@ -208,295 +163,323 @@ PUB get_error_count() : count
 
     return error_count
 
-PUB get_performance_stats(stats_ptr)
-'' Get comprehensive performance statistics from sensor system
-'' @param stats_ptr - pointer to LONG array[5] to receive stats: [0]=total frames, [1]=errors, [2]=frame rate (Hz), [3]=min frame time, [4]=max frame time
-'' @returns nothing - fills provided array with statistics
-
-    if stats_ptr == 0
-        return
-
-    LONG[stats_ptr][0] := frame_count
-    LONG[stats_ptr][1] := error_count
-
-    ' Calculate current frame rate estimate
-    if min_frame_time > 0
-        LONG[stats_ptr][2] := clkfreq / min_frame_time
-    else
-        LONG[stats_ptr][2] := 0
-
-    LONG[stats_ptr][3] := min_frame_time
-    LONG[stats_ptr][4] := max_frame_time
-
 PUB is_running() : state
 '' Check if sensor background cog is currently running
 '' @returns TRUE if running, FALSE if stopped
 
     return (cog_id >= 0)
 
-PUB calibrate_baseline() : success | i
-'' Capture current sensor readings as zero-field baseline
-'' @returns TRUE if successful, FALSE if failed
-'' NOTE: Should be called with no magnetic field present
-
-    ' Temporarily stop acquisition
-    acquisition_mode := MODE_STOPPED
-    WAITMS(10)                          ' Wait for current frame to complete
-
-    ' Read all sensors to establish baseline
-    reset_counter_test()
-    advance_counter_test()
-
-    repeat i from 0 to 63
-        baseline[i] := read_single_sensor_bitbang()
-        if i < 63
-            advance_counter_test()
-
-    ' Mark baseline as valid
-    baseline_valid := TRUE
-
-    debug("Baseline calibration complete")
-    debug("  Baseline range: ", udec(WORD[@baseline][0]), " to ", udec(WORD[@baseline][63]))
-
-    return TRUE
-
-PUB get_frame_position(subtile, sensor_pos) : frame_pos
-'' Calculate frame buffer position for given subtile and sensor using hardware mapping
-'' @param subtile - subtile number (0-3) representing quadrant
-'' @param sensor_pos - sensor position within subtile (0-15)
-'' @returns frame buffer index (0-63) or -1 if invalid parameters
-
-    if subtile > 3 or sensor_pos > 15
-        return -1
-
-    return BYTE[@pixel_order][sensor_pos] + BYTE[@subtile_offset][subtile]
-
-PUB debug_frame_mapping() | subtile, sensor, frame_pos
-'' Debug helper to print complete sensor-to-frame buffer mapping table
-'' @returns nothing - outputs mapping via debug statements
-
-    debug("Sensor to Frame Buffer Mapping:")
-    debug("===============================")
-
-    repeat subtile from 0 to 3
-        debug("Subtile ", udec(subtile), " (scan order: ", udec(BYTE[@subtile_order][subtile]), "):")
-
-        repeat sensor from 0 to 15
-            frame_pos := get_frame_position(subtile, sensor)
-            debug("  Sensor ", udec(sensor), " -> Frame[", udec(frame_pos), "] (row ", udec(frame_pos / 8), ", col ", udec(frame_pos // 8), ")")
-
-        debug(" ")
-
-PUB read_single_sensor_bitbang() : value | i, bit_val, raw_value
-'' Read single sensor using bit-banged SPI (test mode, main cog)
-'' @returns 16-bit ADC value from current sensor position
-'' NOTE: Call reset_counter_test() and advance_counter_test() to position sensor first
-
-    ' Configure MISO and SCLK as simple digital I/O (disable smart pin modes)
-    PINFLOAT(ABS_PIN_MISO)               ' Float MISO - makes it an input (on P2, float = input)
-    PINFLOAT(ABS_PIN_SCLK)               ' Float SCLK - disable smart pin
-    PINLOW(ABS_PIN_SCLK)                 ' SCLK low as output
-
-    ' Start conversion (CS low - also captures analog value)
-    PINLOW(ABS_PIN_CS)
-    WAITUS(2)          ' Critical: 2µs for analog settling
-
-    ' Bit-bang 20 SPI clock cycles to read 16-bit data (4 leading zeros + 16 data)
-    raw_value := 0
-    repeat i from 0 to 19
-        PINLOW(ABS_PIN_SCLK)             ' Clock low
-        WAITUS(1)                        ' ~200ns low (minimum waitus is 1µs)
-
-        PINHIGH(ABS_PIN_SCLK)            ' Clock high
-        bit_val := PINREAD(ABS_PIN_MISO) ' Read MISO on rising edge
-        raw_value := (raw_value << 1) | bit_val  ' Shift in bit
-        WAITUS(1)                        ' ~200ns high (minimum waitus is 1µs)
-
-    ' End conversion (CS high)
-    PINHIGH(ABS_PIN_CS)
-    WAITUS(1)                            ' 1µs quiet time
-
-    ' AD7680 Datasheet (Page 8): 20-bit transfer format
-    ' Bits 19-16: 4 leading zeros
-    ' Bits 15-0:  16 data bits (MSB first)
-    '
-    ' Validate the 4 leading zeros (bits 19-16 should all be 0)
-    if (raw_value & $F0000) <> 0         ' Check bits 19-16 (4 leading zeros)
-        error_count++
-        debug("ADC FORMAT ERROR: Leading zeros not zero - raw=0x", uhex_long(raw_value))
-
-    ' Shift right by 4 to remove the 4 leading zeros
-    ' This leaves us with the 16-bit data value
-    ' NOTE: Magnetic tile appears to use only 12 bits (0-4095 range)
-    value := raw_value >> 4
-
-    return value
-
 PUB reset_counter_test()
-'' Reset sensor counter to position 0 (test mode, main cog)
-'' @returns nothing - prepares for sensor scanning
+'' TEST METHOD: Reset hardware counter to sensor 0
+'' Pulses CLRb low to reset multiplexer counter
+'' @note For regression testing only - validates counter control
 
-    PINLOW(ABS_PIN_CLRB)                 ' CLRb low
-    WAITUS(1)                            ' 1µs
-    PINHIGH(ABS_PIN_CLRB)                ' CLRb high
-    WAITUS(1)                            ' 1µs
+    debug("TEST: reset_counter_test() called", 13, 10)
+    org
+        drvl    #ABS_PIN_CLRB
+        waitx   #COUNTER_SETUP_DELAY
+        drvh    #ABS_PIN_CLRB
+        waitx   #COUNTER_SETUP_DELAY
+    end
+    debug("TEST: reset_counter_test() completed", 13, 10)
 
 PUB advance_counter_test()
-'' Advance sensor counter to next position (test mode, main cog)
-'' @returns nothing - increments sensor mux
+'' TEST METHOD: Advance hardware counter to next sensor
+'' Pulses CCLK high to increment multiplexer counter
+'' @note For regression testing only - validates counter control
 
-    PINHIGH(ABS_PIN_CCLK)                ' CCLK high
-    WAITUS(1)                            ' 1µs
-    PINLOW(ABS_PIN_CCLK)                 ' CCLK low
-    WAITUS(5)                            ' 5µs - allow multiplexer to settle after switching
+    org
+        drvl    #ABS_PIN_CCLK
+        waitx   #COUNTER_SETUP_DELAY
+        drvh    #ABS_PIN_CCLK
+        waitx   #COUNTER_SETUP_DELAY
+        drvl    #ABS_PIN_CCLK
+        waitx   #COUNTER_SETUP_DELAY
+    end
 
-PUB test_pin_toggle(cycles) | i, pattern, high_mask, low_mask
-'' Test all 5 control pins with binary counting pattern (logic analyzer verification)
-'' @param cycles - number of counting cycles to perform (counts 0 to cycles-1)
-'' @returns nothing - outputs binary patterns for pin identification
-'' NOTE: Each pin toggles at a different frequency based on bit position:
-''       P8 (CS/bit0) = fastest, P12 (SCLK/bit4) = slowest
+PUB read_single_sensor() : sensor_value | raw_value
+'' TEST METHOD: Read current sensor using smart pin SPI interface
+'' Uses P_PULSE clock mode (like jm_ez_spi) for reliable operation
+'' @returns 16-bit sensor value (0-65535)
+'' @note For regression testing only - tests smart pin sync RX/clock generation
+'' @note configure_smart_pins() must be called first!
 
-    PINCLEAR(CONTROL_PINS_FIELD)                ' All PINS explicitly set to mode 0, float to release any driver
+    ' debug("TEST: read_single_sensor() called", 13, 10)  ' Commented out - kills timing (~200us per call)
+    org
+        ' Reset and configure MISO for this transfer (like jm_ez_spi pattern)
+        ' This ensures clean state for each read
+        ' NOTE: dirl resets the smart pin completely, so we must re-apply wrpin!
+        dirl    #ABS_PIN_MISO                        ' Reset MISO smart pin (pinf equivalent)
+        wrpin   ##P_SYNC_RX | P_PLUS2_B | P_INVERT_B, #ABS_PIN_MISO ' Sync RX, clock from pin+2, sample on falling edge
+        wxpin   #%0_10111, #ABS_PIN_MISO             ' Pre-edge sample, 24 bits (bit_count-1 = 23)
+        dirh    #ABS_PIN_MISO                        ' Enable MISO (pinl equivalent)
 
-    ' START SIGNATURE: Visible pattern on logic analyzer
-    PINHIGH(CONTROL_PINS_FIELD)         ' All 5 pins = HIGH
-    WAITMS(200)                         ' Hold HIGH for 200ms
+        ' Start ADC conversion (CS low - captures analog value)
+        drvl    #ABS_PIN_CS
+        waitx   #SENSOR_SETTLE_DELAY
 
-    PINLOW(CONTROL_PINS_FIELD)          ' All 5 pins = LOW
-    WAITMS(200)                         ' Hold LOW for 200ms
+        ' Trigger SPI clock pulses (P_PULSE mode: wypin = number of pulses = bits)
+        wypin   #SPI_TRANSFER_BITS, #ABS_PIN_SCLK    ' Generate 24 clock pulses
+        akpin   #ABS_PIN_SCLK                        ' Clear any stale IN flag from previous transfer
 
-    ' Binary counting pattern: creates unique signature per pin
-    ' Bit 0 (P8/CS)   toggles every cycle
-    ' Bit 1 (P9/CCLK) toggles every 2 cycles
-    ' Bit 2 (P10/MISO) toggles every 4 cycles
-    ' Bit 3 (P11/CLRb) toggles every 8 cycles
-    ' Bit 4 (P12/SCLK) toggles every 16 cycles
+        ' Wait for clock to finish by polling SCLK IN flag (like jm_ez_spi: repeat until pinr(sck))
+        ' P_PULSE sets IN flag when all pulses complete
+.wait_clk
+        testp   #ABS_PIN_SCLK wc                     ' Test SCLK IN flag (C=1 when done)
+  if_nc jmp     #.wait_clk                           ' Loop until all pulses complete
 
-    repeat i from 0 to cycles-1
-        pattern := i & %11111               ' Keep only lowest 5 bits
+        ' Clock finished - read received data from MISO
+        rdpin   raw_value, #ABS_PIN_MISO             ' Read 24-bit value (left-justified, LSB-first)
 
-        ' Write entire 5-bit pattern to all 5 pins at once
-        PINWRITE(CONTROL_PINS_FIELD, pattern)
+        ' End conversion (CS high)
+        drvh    #ABS_PIN_CS
 
-        WAITMS(100)                         ' 100ms per count
+        ' Process data: AD7680 sends MSB-first, but P_SYNC_RX receives LSB-first
+        ' Must reverse bits to correct the order, then extract 16-bit data
+        ' After REV: bits are now MSB-first, left-justified
+        ' AD7680 frame: [4 leading 0s][16 data bits][4 trailing 0s]
+        ' After REV and left-justified: Z[31:28]=trailing 0s, Z[27:12]=data, Z[11:8]=leading 0s
+        ' Wait - REV reverses all 32 bits, so we need to think about this carefully:
+        ' Received (LSB-first, left-justified): bit0 of wire in Z[31], bit23 of wire in Z[8]
+        ' After REV: bit0 of wire in Z[0], bit23 of wire in Z[23]
+        ' So after REV, the 24-bit frame is in Z[23:0] (right-justified!)
+        ' AD7680 frame: Z[23:20]=leading 0s, Z[19:4]=16-bit data, Z[3:0]=trailing 0s
+        rev     raw_value                            ' Reverse all 32 bits (MSB-first now, right-justified)
+        shr     raw_value, #4                        ' Shift out 4 trailing zeros
+        and     raw_value, ##$FFFF                   ' Mask to 16 bits
+        mov     sensor_value, raw_value
+    end
 
-    ' END SIGNATURE: Visible pattern on logic analyzer
-    PINHIGH(CONTROL_PINS_FIELD)         ' All 5 pins = HIGH
-    WAITMS(200)                         ' Hold HIGH for 200ms
+PUB configure_smart_pins() | sclk_x
+'' Configure smart pins for SPI communication with AD7680
+'' Uses P_PULSE mode for clock (like jm_ez_spi) - more reliable than P_TRANSITION
+'' Called ONCE before using test methods or by sensor COG at startup
+'' @note Public to allow test code to configure pins explicitly
 
-    PINLOW(CONTROL_PINS_FIELD)          ' All 5 pins = LOW
-    WAITMS(200)                         ' Hold LOW for 200ms
+    debug("Sensor: Configuring smart pins for SPI (P_PULSE mode)...", 13, 10)
 
-    PINCLEAR(CONTROL_PINS_FIELD)                ' All PINS explicitly set to mode 0, float to release any driver
+    ' Build SCLK X register: X[15:0]=period, X[31:16]=low_time
+    sclk_x := SPI_PERIOD | (SPI_LOW_TIME << 16)
 
-    ' Leave pins in a safe state (CS high, others low)
-    PINHIGH(ABS_PIN_CS)                     ' CS high (inactive) - sets as output
-    PINLOW(ABS_PIN_CCLK)                    ' CCLK low - sets as output
-    PINLOW(ABS_PIN_CLRB ADDPINS 1)          ' CLRb and SCLK low (2 pins) - sets as output
+    org
+        ' Configure SCLK (P12) as pulse output (SPI clock generator)
+        ' P_PULSE mode: wypin sets pulse count, pin generates that many clock cycles
+        dirl    #ABS_PIN_SCLK                        ' Clear/reset smart pin
+        wrpin   ##P_PULSE | P_OE, #ABS_PIN_SCLK      ' Pulse mode for clock generation
+        wxpin   sclk_x, #ABS_PIN_SCLK                ' X[15:0]=period, X[31:16]=low_time
+        dirh    #ABS_PIN_SCLK                        ' Enable smart pin
 
-PUB read_all_sensors_test(buffer_ptr) | i, value
-'' Read all 64 sensors in hardware sequence order (test mode, main cog)
-'' @param buffer_ptr - pointer to WORD array[64] to receive sensor values
-'' @returns nothing - fills buffer with raw sensor values in hardware order
-'' NOTE: No remapping applied, values stored in counter sequence 0-63
+        ' Configure MISO (P10) as sync serial RX (data receiver)
+        ' SCLK is 2 pins away (P12), so use P_PLUS2_B to specify B-input source
+        ' P_INVERT_B: AD7680 outputs data on FALLING edge, so invert clock sense
+        ' Note: MISO will be reset/reconfigured before each transfer (like jm_ez_spi)
+        dirl    #ABS_PIN_MISO                        ' Clear/reset smart pin
+        wrpin   ##P_SYNC_RX | P_PLUS2_B | P_INVERT_B, #ABS_PIN_MISO ' Sync RX, clock from pin+2, sample on falling edge
+        ' Leave MISO disabled - will be configured per-transfer
 
-    if buffer_ptr == 0
-        return
+        ' Configure CS, CCLK, CLRb as normal digital outputs with initial states
+        drvh    #ABS_PIN_CS                          ' CS high (inactive)
+        drvl    #ABS_PIN_CCLK                        ' CCLK low
+        drvh    #ABS_PIN_CLRB                        ' CLRb high (not clearing)
+    end
 
-    ' Reset counter to start
-    reset_counter_test()
+    debug("Sensor: Smart pins configured", 13, 10)
 
-    ' Advance to sensor 1 (first active sensor per documentation)
-    advance_counter_test()
+PRI sensor_loop() | framePtr, patternPtr, subtile_idx, sensor_idx, subtile_num, frame_offset, sensor_in_subtile, pixel_pos, sensor_val
+'' Main sensor loop running in dedicated COG
+'' Handles both test pattern generation and live sensor acquisition
 
-    ' Read all 64 sensors
-    repeat i from 0 to 63
-        value := read_single_sensor_bitbang()
-        WORD[buffer_ptr][i] := value
+    debug("Sensor: COG loop started", 13, 10)
 
-        if i < 63                        ' Don't advance after last sensor
-            advance_counter_test()
-
-PRI fifo_manager_loop() | framePtr, patternPtr
-'' Spin2 FIFO manager loop running in dedicated COG
-'' Manages FIFO operations and coordinates with PASM acquisition COG via mailbox
-'' Test mode: generates patterns directly in Spin2 (no PASM needed)
-
-    debug("Sensor FIFO Manager: Loop started", 13, 10)
-
-    test_frame_counter := 0
+    ' Configure smart pins for SPI (ONCE at startup)
+    configure_smart_pins()
 
     repeat
-        ' Check if acquisition is active
-        debug("Sensor FIFO Manager: acquisition_mode=", udec(acquisition_mode), " (MODE_STOPPED=0, MODE_TEST_PATTERN=4)", 13, 10)
-        if acquisition_mode == MODE_STOPPED
-            debug("Sensor FIFO Manager: Mode is STOPPED, waiting...", 13, 10)
-            waitms(10)
-            next
+        ' Check acquisition mode
+        case acquisition_mode
+            MODE_STOPPED:
+                waitms(10)
+                next
 
-        ' Test mode: 10-second delay between frames (skip for first frame)
-        if acquisition_mode == MODE_TEST_PATTERN and test_frame_counter > 0
-            debug("Sensor FIFO Manager: TEST MODE - waiting 10 seconds before frame ", udec(test_frame_counter), "...", 13, 10)
-            ' Break into 1-second chunks to ensure proper timing
-            repeat 10
-                waitms(1000)
-            debug("Sensor FIFO Manager: TEST MODE - wait complete, generating frame ", udec(test_frame_counter), 13, 10)
+            MODE_TEST_PATTERN:
+                ' Generate test patterns (Spin2)
+                generate_test_frame()
 
-        ' Get frame buffer from FIFO
-        debug("Sensor FIFO Manager: Getting frame from pool...", 13, 10)
-        framePtr := fifo.getNextFrame()
-        debug("Sensor FIFO Manager: Got frame, ptr=", uhex_long(framePtr), 13, 10)
-        if framePtr == 0
-            ' No buffers available, wait and retry
-            debug("Sensor FIFO Manager: No frames available, waiting...", 13, 10)
-            waitms(1)
-            next
+            MODE_LIVE:
+                ' Acquire live sensor data
+                acquire_sensor_frame()
 
-        ' Handle test mode vs real sensor mode
-        if acquisition_mode == MODE_TEST_PATTERN
-            ' TEST MODE: Generate pattern directly in Spin2 (no PASM needed)
-            debug("Sensor FIFO Manager: TEST MODE - generating digit ", udec(test_frame_counter), 13, 10)
+            OTHER:
+                waitms(10)
 
-            ' Select pattern based on counter
-            case test_frame_counter
-                0: patternPtr := @digit_0_pattern
-                1: patternPtr := @digit_1_pattern
-                2: patternPtr := @digit_2_pattern
-                3: patternPtr := @digit_3_pattern
-                4: patternPtr := @digit_4_pattern
-                5: patternPtr := @digit_5_pattern
+PRI generate_test_frame() | framePtr, patternPtr
+'' Generate test pattern frame (digits 0-5)
 
-            ' Copy pattern to frame buffer (64 WORDs = 128 bytes)
-            WORDMOVE(framePtr, patternPtr, 64)
-            debug("Sensor FIFO Manager: Pattern copied to frame buffer", 13, 10)
+    ' Get frame buffer from FIFO
+    framePtr := fifo.getNextFrame()
+    if framePtr == 0
+        waitms(1)
+        return
 
-            ' Increment counter
-            test_frame_counter++
+    ' Select pattern based on counter
+    case test_frame_counter
+        0: patternPtr := @digit_0_pattern
+        1: patternPtr := @digit_1_pattern
+        2: patternPtr := @digit_2_pattern
+        3: patternPtr := @digit_3_pattern
+        4: patternPtr := @digit_4_pattern
+        5: patternPtr := @digit_5_pattern
 
-            ' Stop after 6 frames
-            if test_frame_counter >= 6
-                debug("Sensor FIFO Manager: TEST MODE complete - 6 frames generated", 13, 10)
-                acquisition_mode := MODE_STOPPED
-        else
-            ' REAL SENSOR MODE: Use PASM via mailbox
-            debug("Sensor FIFO Manager: Setting mailbox - ptr=", uhex_long(framePtr), ", go_flag=1", 13, 10)
-            mailbox_frame_ptr := framePtr
-            mailbox_go_flag := 1
+    ' Copy pattern to frame buffer (64 WORDs = 128 bytes)
+    WORDMOVE(framePtr, patternPtr, 64)
 
-            ' Wait for PASM to complete capture
-            debug("Sensor FIFO Manager: Waiting for PASM to complete (go_flag=0)...", 13, 10)
-            repeat until mailbox_go_flag == 0
-            debug("Sensor FIFO Manager: PASM completed", 13, 10)
+    ' Commit frame to sensor FIFO
+    if fifo.commitFrame(fifo.FIFO_SENSOR, framePtr) < 0
+        fifo.releaseFrame(framePtr)
+    else
+        frame_count++
 
-        ' Commit completed frame to sensor FIFO
-        debug("Sensor FIFO Manager: [ENQ] Committing frame to SENSOR FIFO, ptr=", uhex_long(framePtr), 13, 10)
-        if fifo.commitFrame(fifo.FIFO_SENSOR, framePtr) < 0
-            ' FIFO full - release frame back to pool
-            debug("Sensor FIFO Manager: [ENQ] SENSOR FIFO FULL! Releasing frame", 13, 10)
-            fifo.releaseFrame(framePtr)
-        else
-            debug("Sensor FIFO Manager: [ENQ] Frame committed successfully", 13, 10)
+    ' Increment test counter
+    test_frame_counter++
+    if test_frame_counter >= 6
+        test_frame_counter := 0
+        waitms(1000)  ' 1 second between test pattern cycles
+    else
+        waitms(100)   ' 100ms between individual patterns
+
+PRI acquire_sensor_frame() | framePtr, subtile_idx, sensor_in_subtile, subtile_num, frame_offset, pixel_pos, sensor_val, buf_ptr
+'' Acquire live sensor frame using inline PASM for timing-critical operations
+
+    ' Get frame buffer from FIFO
+    framePtr := fifo.getNextFrame()
+    if framePtr == 0
+        waitms(1)
+        return
+
+    ' Use inline PASM to read all 64 sensors
+    ' This preserves the tested sensor reading logic
+    ORG
+        ' framePtr already contains the frame buffer address from Spin2
+
+        ' Reset sensor counter to position 0
+        drvl    ABS_PIN_CLRB
+        waitx   #COUNTER_SETUP_DELAY
+        drvh    ABS_PIN_CLRB
+        waitx   #COUNTER_SETUP_DELAY
+
+        ' Advance to sensor 1 (first active sensor per documentation)
+        drvh    ABS_PIN_CCLK
+        waitx   #COUNTER_SETUP_DELAY
+        drvl    ABS_PIN_CCLK
+        waitx   #COUNTER_SETUP_DELAY
+
+        ' Loop through 4 subtiles in order: 0, 2, 1, 3
+        mov     subtile_idx, #0
+
+.subtile_loop
+        ' Get current subtile number from subtile_order array
+        mov     ptra, ##@subtile_order
+        add     ptra, subtile_idx
+        rdbyte  subtile_num, ptra
+
+        ' Get frame buffer offset for this subtile
+        mov     ptra, ##@subtile_offset
+        add     ptra, subtile_num
+        rdbyte  frame_offset, ptra
+
+        ' Read 16 sensors from current subtile
+        mov     sensor_in_subtile, #0
+
+.sensor_loop
+        ' Read sensor value via AD7680 smart pins
+        call    #read_ad7680_smart
+
+        ' Map sensor position using pixel_order lookup
+        mov     ptra, ##@pixel_order
+        add     ptra, sensor_in_subtile
+        rdbyte  pixel_pos, ptra
+
+        ' Calculate final frame buffer position
+        mov     buf_ptr, pixel_pos
+        add     buf_ptr, frame_offset
+        shl     buf_ptr, #1                    ' Convert to byte offset (* 2 for WORD)
+        add     buf_ptr, framePtr              ' Add frame base address
+
+        ' Store value in frame buffer
+        wrword  sensor_val, buf_ptr
+
+        ' Advance to next sensor in hardware sequence
+        drvh    ABS_PIN_CCLK
+        waitx   #COUNTER_SETUP_DELAY
+        drvl    ABS_PIN_CCLK
+        waitx   #COUNTER_SETUP_DELAY
+
+        ' Next sensor in subtile
+        add     sensor_in_subtile, #1
+        cmp     sensor_in_subtile, #16 wz
+        if_nz   jmp     #.sensor_loop
+
+        ' Next subtile
+        add     subtile_idx, #1
+        cmp     subtile_idx, #4 wz
+        if_nz   jmp     #.subtile_loop
+
+' ============================================
+' read_ad7680_smart: Read sensor via smart pins
+' Uses P_PULSE clock mode (like jm_ez_spi) for reliable operation
+' Resets MISO before each transfer for clean state
+' Returns: sensor_val
+' ============================================
+read_ad7680_smart
+        ' Reset and configure MISO for this transfer (like jm_ez_spi pattern)
+        ' NOTE: dirl resets the smart pin completely, so we must re-apply wrpin!
+        dirl    ABS_PIN_MISO                      ' Reset MISO smart pin
+        wrpin   ##P_SYNC_RX | P_PLUS2_B | P_INVERT_B, ABS_PIN_MISO ' Sync RX, clock from pin+2, sample on falling edge
+        wxpin   #%0_10111, ABS_PIN_MISO           ' Pre-edge sample, 24 bits (bit_count-1 = 23)
+        dirh    ABS_PIN_MISO                      ' Enable MISO
+
+        ' Start ADC conversion (CS low - captures analog value)
+        drvl    ABS_PIN_CS
+        waitx   #SENSOR_SETTLE_DELAY              ' Critical: wait for analog to settle
+
+        ' Trigger SPI clock pulses (P_PULSE mode: wypin = number of pulses = bits)
+        wypin   #SPI_TRANSFER_BITS, ABS_PIN_SCLK  ' Generate 24 clock pulses
+        akpin   ABS_PIN_SCLK                      ' Clear any stale IN flag from previous transfer
+
+        ' Wait for clock to finish by polling SCLK IN flag
+        ' P_PULSE sets IN flag when all pulses complete
+.wait_clk_prod
+        testp   ABS_PIN_SCLK wc                   ' Test SCLK IN flag (C=1 when done)
+  if_nc jmp     #.wait_clk_prod                   ' Loop until all pulses complete
+
+        ' Clock finished - read received data from MISO
+        rdpin   sensor_val, ABS_PIN_MISO          ' Read 24-bit value (left-justified, LSB-first)
+
+        ' End conversion (CS high)
+        drvh    ABS_PIN_CS
+
+        ' Process data: AD7680 sends MSB-first, but P_SYNC_RX receives LSB-first
+        ' After REV, the 24-bit frame is right-justified in Z[23:0]
+        ' AD7680 frame: Z[23:20]=leading 0s, Z[19:4]=16-bit data, Z[3:0]=trailing 0s
+        rev     sensor_val                        ' Reverse all 32 bits (MSB-first now, right-justified)
+        shr     sensor_val, #4                    ' Shift out 4 trailing zeros
+        and     sensor_val, ##$FFFF               ' Mask to 16 bits
+
+read_ad7680_smart_ret
+        ret
+
+    END
+
+    ' Commit completed frame to sensor FIFO
+    if fifo.commitFrame(fifo.FIFO_SENSOR, framePtr) < 0
+        ' FIFO full - release frame back to pool
+        fifo.releaseFrame(framePtr)
+    else
+        ' Frame committed successfully
+        frame_count++
+
+    ' Frame rate control - simple delay for now
+    waitms(FRAME_PERIOD_MS)
 
 DAT { test pattern digit data - 8x8 WORD arrays in HUB memory }
 
@@ -562,242 +545,6 @@ digit_5_pattern         ' Digit "5" - 0x6000
         WORD    $0100, $0100, $0100, $0100, $0100, $6000, $6000, $0100
         WORD    $6000, $6000, $0100, $0100, $0100, $6000, $6000, $0100
         WORD    $0100, $6000, $6000, $6000, $6000, $6000, $0100, $0100
-
-DAT { background cog code }
-
-                        ORG     0
-
-sensor_cog_entry
-                        ' Get parameter pointer (points to frame_count)
-                        mov     param_ptr, ptra
-
-                        ' Load addresses from parameter block
-                        ' Offset structure: frame_count(0), error_count(4), acq_mode(8), frame_rate(12),
-                        '                  last_frame_time(16), min_frame_time(20), max_frame_time(24),
-                        '                  baseline[64 WORDs = 128 bytes], baseline_valid(132), base_pin(136)
-
-                        mov     temp, param_ptr
-                        add     temp, #8
-                        mov     acq_mode_ptr, temp       ' Pointer to acquisition_mode
-
-                        mov     temp, param_ptr
-                        add     temp, #12
-                        mov     frame_rate_ptr, temp     ' Pointer to frame_rate_target
-
-                        mov     temp, param_ptr
-                        add     temp, #28
-                        mov     baseline_ptr, temp       ' Pointer to baseline array
-
-                        mov     temp, param_ptr
-                        add     temp, #156               ' 28 + 128 bytes baseline array
-                        mov     baseline_valid_ptr, temp ' Pointer to baseline_valid flag
-
-                        ' Calculate mailbox addresses
-                        mov     temp, param_ptr
-                        add     temp, #176               ' Offset to mailbox_frame_ptr (44 longs * 4 bytes)
-                        mov     mailbox_ptr_addr, temp
-                        add     temp, #4                 ' Offset to mailbox_go_flag
-                        mov     mailbox_go_addr, temp
-
-                        ' Fixed pin assignments (TILE_PIN_GROUP = 8)
-                        mov     cs_pin, #8
-                        mov     cclk_pin, #9
-                        mov     miso_pin, #10
-                        mov     clrb_pin, #11
-                        mov     sclk_pin, #12
-
-                        ' Calculate frame period for 375 fps timing
-                        mov     frame_period, ##200_000_000  ' System clock frequency
-                        mov     temp, #375
-                        qdiv    frame_period, temp
-                        getqx   frame_period             ' frame_period = clkfreq / 375
-
-acquisition_loop
-                        ' Wait for Spin2 FIFO manager to provide buffer (mailbox_go_flag == 1)
-                        rdlong  temp, mailbox_go_addr
-                        tjz     temp, #acquisition_loop
-
-                        ' Get frame buffer pointer from mailbox
-                        rdlong  frame_ptr, mailbox_ptr_addr
-
-                        ' Record frame start time
-                        getct   frame_start_time
-
-                        ' Capture sensor frame with remapping and baseline subtraction
-                        call    #capture_frame
-
-                        ' Update frame count
-                        mov     temp2, param_ptr         ' frame_count at offset 0
-                        rdlong  temp, temp2
-                        add     temp, #1
-                        wrlong  temp, temp2
-
-                        ' Signal completion by clearing go flag (tells Spin2 we're done)
-                        wrlong  #0, mailbox_go_addr
-
-                        ' Frame rate control - wait for frame period
-                        call    #frame_rate_control
-
-                        jmp     #acquisition_loop
-
-acquisition_exit
-                        cogstop #0
-
-capture_frame
-                        ' Real sensor acquisition mode (test patterns handled by Spin2)
-                        ' PASM only used for real hardware timing-critical operations
-                        ' Reset sensor counter to position 0
-                        call    #reset_sensor_counter
-
-                        ' Advance to sensor 1 (first active sensor per documentation)
-                        call    #advance_sensor_counter
-
-                        ' Check if baseline subtraction is enabled
-                        rdlong  baseline_enabled, baseline_valid_ptr
-
-                        ' Read all 64 sensors in correct subtile order: 0, 2, 1, 3
-                        mov     subtile_idx, #0
-                        mov     linear_index, #0         ' Track linear position 0-63
-
-capture_subtile_loop
-                        ' Get current subtile number from subtile_order array
-                        mov     temp, ##@subtile_order
-                        add     temp, subtile_idx
-                        rdbyte  current_subtile, temp
-
-                        ' Get frame buffer offset for this subtile
-                        mov     temp, ##@subtile_offset
-                        add     temp, current_subtile
-                        rdbyte  frame_offset, temp
-
-                        ' Read 16 sensors from current subtile
-                        mov     sensor_in_subtile, #0
-
-capture_sensor_loop
-                        ' Read sensor value via AD7680
-                        call    #read_ad7680
-
-                        ' Apply baseline subtraction if enabled
-                        tjz     baseline_enabled, #skip_baseline
-
-                        ' Read baseline value for this sensor
-                        mov     temp, baseline_ptr
-                        mov     temp2, linear_index
-                        shl     temp2, #1                ' WORD offset (* 2)
-                        add     temp, temp2
-                        rdword  baseline_value, temp
-
-                        ' Subtract baseline (signed operation)
-                        subs    sensor_value, baseline_value
-
-skip_baseline
-                        ' Map sensor position using pixel_order lookup
-                        mov     temp, ##@pixel_order
-                        add     temp, sensor_in_subtile
-                        rdbyte  pixel_pos, temp
-
-                        ' Calculate final frame buffer position
-                        ' frame_position = pixel_pos + frame_offset
-                        mov     temp, pixel_pos
-                        add     temp, frame_offset
-
-                        ' Store value in frame buffer (word aligned)
-                        mov     store_addr, frame_ptr
-                        add     store_addr, temp
-                        add     store_addr, temp            ' Word offset (*2)
-                        wrword  sensor_value, store_addr
-
-                        ' Advance to next sensor in hardware sequence
-                        call    #advance_sensor_counter
-
-                        ' Next sensor in subtile
-                        add     sensor_in_subtile, #1
-                        add     linear_index, #1         ' Track linear position
-                        cmp     sensor_in_subtile, #16 wz
-                if_nz   jmp     #capture_sensor_loop
-
-                        ' Next subtile
-                        add     subtile_idx, #1
-                        cmp     subtile_idx, #4 wz
-                if_nz   jmp     #capture_subtile_loop
-
-capture_frame_ret       ret
-
-reset_sensor_counter
-                        ' Pulse CLRb low to reset counter
-                        drvl    clrb_pin
-                        waitx   #COUNTER_SETUP_DELAY
-                        drvh    clrb_pin
-                        waitx   #COUNTER_SETUP_DELAY
-reset_sensor_counter_ret ret
-
-advance_sensor_counter
-                        ' Pulse CCLK to advance to next sensor
-                        drvh    cclk_pin
-                        waitx   #COUNTER_SETUP_DELAY
-                        drvl    cclk_pin
-                        waitx   #COUNTER_SETUP_DELAY
-advance_sensor_counter_ret ret
-
-read_ad7680
-                        ' Smart pin SPI read
-                        ' Start conversion (CS low)
-                        drvl    cs_pin
-                        waitx   #SENSOR_SETTLE_DELAY
-
-                        ' Start smart pin SPI transfer
-                        dirl    miso_pin                ' Reset smart pin
-                        dirh    miso_pin                ' Enable smart pin
-                        wypin   #0, sclk_pin            ' Start clock generation
-
-                        ' Wait for 24 bits to be received
-                        waitx   #48                     ' Wait for 24 clock cycles at configured rate
-
-                        ' Read received data (24 bits: 4 leading zeros + 16 data bits + 4 trailing)
-                        rdpin   sensor_value, miso_pin
-                        shr     sensor_value, #4       ' Shift right to remove 4 trailing zeros
-                        and     sensor_value, ##$FFFF   ' Mask to get 16-bit value
-
-                        ' End conversion (CS high)
-                        drvh    cs_pin
-
-read_ad7680_ret         ret
-
-frame_rate_control
-                        ' Wait until frame period has elapsed
-                        ' frame_period was calculated at startup
-                        addct1  frame_start_time, frame_period
-                        waitct1                          ' Wait for next frame time
-frame_rate_control_ret  ret
-
-' Variables
-param_ptr               LONG    0
-acq_mode_ptr            LONG    0
-frame_rate_ptr          LONG    0
-baseline_ptr            LONG    0
-baseline_valid_ptr      LONG    0
-mailbox_ptr_addr        LONG    0
-mailbox_go_addr         LONG    0
-cs_pin                  LONG    0
-cclk_pin                LONG    0
-miso_pin                LONG    0
-clrb_pin                LONG    0
-sclk_pin                LONG    0
-frame_ptr               LONG    0
-frame_period            LONG    0
-frame_start_time        LONG    0
-subtile_idx             LONG    0
-current_subtile         LONG    0
-frame_offset            LONG    0
-sensor_in_subtile       LONG    0
-linear_index            LONG    0
-pixel_pos               LONG    0
-store_addr              LONG    0
-sensor_value            LONG    0
-baseline_value          LONG    0
-baseline_enabled        LONG    0
-temp                    LONG    0
-temp2                   LONG    0
 
 CON { license }
 {{
