@@ -9,8 +9,9 @@
 
 CON
   ' Decimation ratios (configurable)
+  ' Note: These defaults assume ~375 fps sensor rate at 250 MHz
   DEFAULT_HDMI_DECIMATION = 9    ' Every 9th frame to HDMI
-  DEFAULT_OLED_DECIMATION = 27   ' Every 27th frame to OLED
+  DEFAULT_OLED_DECIMATION = 7    ' Every 7th frame to OLED (OLED max ~55 fps measured)
 
   ' Processing modes
   MODE_DECIMATION = 0            ' Simple frame skipping
