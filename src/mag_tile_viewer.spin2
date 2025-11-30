@@ -129,9 +129,8 @@ PRI decimation_loop() | framePtr, sendHDMI, sendOLED, hdmiPtr, oledPtr
 
   repeat
     ' Wait for frame from sensor FIFO
-    debug("Main COG: [DEQ] Waiting for frame from SENSOR FIFO...", 13, 10)
+    ' Note: Debug removed for high-speed operation (~1300+ fps)
     framePtr := fifo.dequeue(fifo.FIFO_SENSOR)
-    debug("Main COG: [DEQ] Got frame from SENSOR FIFO, ptr=", uhex_long(framePtr), 13, 10)
 
     if framePtr
       ' Update frame counter
@@ -179,25 +178,17 @@ PRI decimation_loop() | framePtr, sendHDMI, sendOLED, hdmiPtr, oledPtr
         hdmiPtr := fifo.getNextFrame()
         if hdmiPtr
           WORDMOVE(hdmiPtr, framePtr, 64)  ' Copy 64 words (128 bytes)
-          debug("Main COG: [ENQ] Committing to HDMI FIFO, ptr=", uhex_long(hdmiPtr), 13, 10)
           if fifo.commitFrame(fifo.FIFO_HDMI, hdmiPtr) < 0
             ' HDMI FIFO full, release the copy
-            debug("Main COG: [ENQ] HDMI FIFO FULL! Releasing", 13, 10)
             fifo.releaseFrame(hdmiPtr)
-          else
-            debug("Main COG: [ENQ] HDMI committed (frame ", udec(frame_counter), ")", 13, 10)
 
       if sendOLED
         oledPtr := fifo.getNextFrame()
         if oledPtr
           WORDMOVE(oledPtr, framePtr, 64)  ' Copy 64 words (128 bytes)
-          debug("Main COG: [ENQ] Committing to OLED FIFO, ptr=", uhex_long(oledPtr), 13, 10)
           if fifo.commitFrame(fifo.FIFO_OLED, oledPtr) < 0
             ' OLED FIFO full, release the copy
-            debug("Main COG: [ENQ] OLED FIFO FULL! Releasing", 13, 10)
             fifo.releaseFrame(oledPtr)
-          else
-            debug("Main COG: [ENQ] OLED committed (frame ", udec(frame_counter), ")", 13, 10)
 
       ' Always release the original sensor frame
       fifo.releaseFrame(framePtr)

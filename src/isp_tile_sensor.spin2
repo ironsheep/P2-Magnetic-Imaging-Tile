@@ -48,8 +48,9 @@ CON { tile sensor constants }
     SPI_TRANSFER_BITS = 24              ' Total SPI transfer size (4 leading + 16 data + 4 trailing)
 
     ' Timing constants @ 250 MHz system clock (1 clock = 4ns)
-    SENSOR_SETTLE_DELAY = 500           ' 2000ns (2µs) for analog settling - CRITICAL!
+    SENSOR_SETTLE_DELAY = 500           ' 2000ns (2µs) for analog settling - used for first sensor only
     COUNTER_SETUP_DELAY = 63            ' 250ns after counter operations
+    RESIDUAL_SETTLE_DELAY = 200         ' 800ns additional settle after SPI completes (pipelined mode)
     FRAME_PERIOD_MS = 3                 ' ~333 fps target frame rate (@ 250 MHz)
 
     ' Smart Pin SPI configuration (P_PULSE mode like jm_ez_spi)
@@ -345,8 +346,17 @@ PRI generate_test_frame() | framePtr, patternPtr
     else
         waitms(100)   ' 100ms between individual patterns
 
-PRI acquire_sensor_frame() | framePtr, subtile_idx, sensor_in_subtile, subtile_num, frame_offset, pixel_pos, sensor_val, buf_ptr
+PRI acquire_sensor_frame() | framePtr, subtile_idx, sensor_in_subtile, subtile_num, frame_offset, pixel_pos, sensor_val, buf_ptr, total_sensor_count
 '' Acquire live sensor frame using inline PASM for timing-critical operations
+'' OPTIMIZED (Nov 2025): Pipelined counter advance during SPI transfer
+''
+'' Pipeline strategy:
+''   - First sensor: Full settle wait, then start SPI
+''   - During SPI: Advance counter to NEXT sensor (overlaps with SPI time)
+''   - After SPI: Small residual settle, read data, store
+''   - Subsequent sensors: Already settled from previous iteration
+''
+'' This hides ~2.75µs of counter/settle time inside the 9.6µs SPI transfer
 
     ' Get frame buffer from FIFO
     framePtr := fifo.getNextFrame()
@@ -354,27 +364,19 @@ PRI acquire_sensor_frame() | framePtr, subtile_idx, sensor_in_subtile, subtile_n
         waitms(1)
         return
 
-    ' Use inline PASM to read all 64 sensors
-    ' This preserves the tested sensor reading logic
+    ' Use inline PASM to read all 64 sensors with pipelined counter advance
     ORG
-        ' framePtr already contains the frame buffer address from Spin2
+        ' Jump to main code (subroutines placed first for backward reference only)
+        jmp     #.main_start
 
-        ' Reset sensor counter to position 0
-        drvl    ABS_PIN_CLRB
-        waitx   #COUNTER_SETUP_DELAY
-        drvh    ABS_PIN_CLRB
-        waitx   #COUNTER_SETUP_DELAY
+' ============================================
+' Subroutines (placed first so all calls are backward references)
+' ============================================
 
-        ' Advance to sensor 1 (first active sensor per documentation)
-        drvh    ABS_PIN_CCLK
-        waitx   #COUNTER_SETUP_DELAY
-        drvl    ABS_PIN_CCLK
-        waitx   #COUNTER_SETUP_DELAY
-
-        ' Loop through 4 subtiles in order: 0, 2, 1, 3
-        mov     subtile_idx, #0
-
-.subtile_loop
+' store_sensor_value: Map and store sensor reading
+' Uses: subtile_idx, sensor_in_subtile, sensor_val, framePtr
+' Modifies: ptra, pixel_pos, frame_offset, buf_ptr, subtile_num
+.store_sensor_value
         ' Get current subtile number from subtile_order array
         mov     ptra, ##@subtile_order
         add     ptra, subtile_idx
@@ -384,13 +386,6 @@ PRI acquire_sensor_frame() | framePtr, subtile_idx, sensor_in_subtile, subtile_n
         mov     ptra, ##@subtile_offset
         add     ptra, subtile_num
         rdbyte  frame_offset, ptra
-
-        ' Read 16 sensors from current subtile
-        mov     sensor_in_subtile, #0
-
-.sensor_loop
-        ' Read sensor value via AD7680 smart pins
-        call    #read_ad7680_smart
 
         ' Map sensor position using pixel_order lookup
         mov     ptra, ##@pixel_order
@@ -405,55 +400,131 @@ PRI acquire_sensor_frame() | framePtr, subtile_idx, sensor_in_subtile, subtile_n
 
         ' Store value in frame buffer
         wrword  sensor_val, buf_ptr
+        ret
 
-        ' Advance to next sensor in hardware sequence
-        drvh    ABS_PIN_CCLK
+' advance_subtile: Move to next subtile
+' Modifies: subtile_idx, sensor_in_subtile
+.advance_subtile
+        add     subtile_idx, #1
+        mov     sensor_in_subtile, #0
+        ret
+
+' ============================================
+' Main acquisition code
+' ============================================
+.main_start
+        ' framePtr already contains the frame buffer address from Spin2
+
+        ' Reset sensor counter to position 0
+        drvl    #ABS_PIN_CLRB
         waitx   #COUNTER_SETUP_DELAY
-        drvl    ABS_PIN_CCLK
+        drvh    #ABS_PIN_CLRB
         waitx   #COUNTER_SETUP_DELAY
 
-        ' Next sensor in subtile
+        ' Advance to sensor 1 (first active sensor per documentation)
+        drvh    #ABS_PIN_CCLK
+        waitx   #COUNTER_SETUP_DELAY
+        drvl    #ABS_PIN_CCLK
+        waitx   #COUNTER_SETUP_DELAY
+
+        ' Initialize total sensor counter (0-63)
+        mov     total_sensor_count, #0
+
+        ' ========== FIRST SENSOR: Full settle required ==========
+        ' CS low to capture analog value
+        drvl    #ABS_PIN_CS
+        waitx   #SENSOR_SETTLE_DELAY              ' Full settle for first sensor
+
+        ' Start SPI transfer for sensor 0
+        wypin   #SPI_TRANSFER_BITS, #ABS_PIN_SCLK
+        akpin   #ABS_PIN_SCLK
+
+        ' WHILE SPI RUNS: Advance counter to sensor 1
+        ' (sensor 1 starts settling now, will be ready by next read)
+        drvh    #ABS_PIN_CCLK
+        waitx   #COUNTER_SETUP_DELAY
+        drvl    #ABS_PIN_CCLK
+        ' Mux now switching to sensor 1, settling begins
+
+        ' Wait for SPI to complete
+        waitse1
+
+        ' Read and process sensor 0 data
+        rdpin   sensor_val, #ABS_PIN_MISO
+        drvh    #ABS_PIN_CS
+        rev     sensor_val
+        shr     sensor_val, #4
+        and     sensor_val, ##$FFFF
+
+        ' Store sensor 0 using mapping lookup
+        mov     subtile_idx, #0
+        mov     sensor_in_subtile, #0
+        call    #.store_sensor_value
+
+        ' Increment counters
+        add     sensor_in_subtile, #1
+        add     total_sensor_count, #1
+
+        ' ========== SENSORS 1-62: Pipelined (already settling) ==========
+.pipelined_loop
+        ' Residual settle time (sensor was advancing during previous SPI)
+        waitx   #RESIDUAL_SETTLE_DELAY
+
+        ' CS low - analog value already stable
+        drvl    #ABS_PIN_CS
+
+        ' Start SPI transfer for current sensor
+        wypin   #SPI_TRANSFER_BITS, #ABS_PIN_SCLK
+        akpin   #ABS_PIN_SCLK
+
+        ' Check if this is the last sensor (>= 63, defensive)
+        cmp     total_sensor_count, #63 wcz
+  if_ae jmp     #.last_sensor
+
+        ' WHILE SPI RUNS: Advance counter to NEXT sensor
+        drvh    #ABS_PIN_CCLK
+        waitx   #COUNTER_SETUP_DELAY
+        drvl    #ABS_PIN_CCLK
+        ' Next sensor now settling...
+
+        ' Wait for SPI to complete
+        waitse1
+
+        ' Read and process current sensor data
+        rdpin   sensor_val, #ABS_PIN_MISO
+        drvh    #ABS_PIN_CS
+        rev     sensor_val
+        shr     sensor_val, #4
+        and     sensor_val, ##$FFFF
+
+        ' Store using mapping lookup
+        call    #.store_sensor_value
+
+        ' Update subtile tracking
         add     sensor_in_subtile, #1
         cmp     sensor_in_subtile, #16 wz
-        if_nz   jmp     #.sensor_loop
+  if_z  call    #.advance_subtile
 
-        ' Next subtile
-        add     subtile_idx, #1
-        cmp     subtile_idx, #4 wz
-        if_nz   jmp     #.subtile_loop
+        ' Loop for next sensor
+        add     total_sensor_count, #1
+        jmp     #.pipelined_loop
 
-' ============================================
-' read_ad7680_smart: Read sensor via smart pins
-' Uses P_PULSE clock mode for reliable operation
-' OPTIMIZED (Nov 2025): No per-transfer reset, uses waitse1 instead of polling
-' Requires: configure_smart_pins() called once at startup
-' Returns: sensor_val (16-bit sensor reading)
-' ============================================
-read_ad7680_smart
-        ' Start ADC conversion (CS low - captures analog value)
-        drvl    ABS_PIN_CS
-        waitx   #SENSOR_SETTLE_DELAY              ' Critical: wait for analog to settle
+        ' ========== LAST SENSOR (63): No counter advance needed ==========
+.last_sensor
+        ' Wait for SPI to complete (no counter advance - we're done)
+        waitse1
 
-        ' Trigger SPI clock pulses (P_PULSE mode: wypin = number of pulses = bits)
-        wypin   #SPI_TRANSFER_BITS, ABS_PIN_SCLK  ' Generate 24 clock pulses
-        akpin   ABS_PIN_SCLK                      ' Clear any stale IN flag
-        waitse1                                   ' Wait efficiently for completion (event-based)
+        ' Read and process final sensor data
+        rdpin   sensor_val, #ABS_PIN_MISO
+        drvh    #ABS_PIN_CS
+        rev     sensor_val
+        shr     sensor_val, #4
+        and     sensor_val, ##$FFFF
 
-        ' Clock finished - read received data from MISO
-        rdpin   sensor_val, ABS_PIN_MISO          ' Read 24-bit value (left-justified, LSB-first)
+        ' Store final sensor
+        call    #.store_sensor_value
 
-        ' End conversion (CS high)
-        drvh    ABS_PIN_CS
-
-        ' Process data: AD7680 sends MSB-first, but P_SYNC_RX receives LSB-first
-        ' After REV, the 24-bit frame is right-justified in Z[23:0]
-        ' AD7680 frame: Z[23:20]=leading 0s, Z[19:4]=16-bit data, Z[3:0]=trailing 0s
-        rev     sensor_val                        ' Reverse all 32 bits (MSB-first now, right-justified)
-        shr     sensor_val, #4                    ' Shift out 4 trailing zeros
-        and     sensor_val, ##$FFFF               ' Mask to 16 bits
-
-read_ad7680_smart_ret
-        ret
+        ' Frame acquisition complete
 
     END
 
@@ -465,8 +536,8 @@ read_ad7680_smart_ret
         ' Frame committed successfully
         frame_count++
 
-    ' Frame rate control - simple delay for now
-    waitms(FRAME_PERIOD_MS)
+    ' Minimal delay - decimator debug removed so it can keep up
+    waitus(10)                          ' 10 us gap - ~1,370 fps max
 
 DAT { test pattern digit data - 8x8 WORD arrays in HUB memory }
 
