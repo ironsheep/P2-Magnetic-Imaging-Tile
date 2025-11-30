@@ -1,0 +1,285 @@
+'' =================================================================================================
+''   File....... test_oled_performance.spin2
+''   Purpose.... Performance measurement for OLED driver
+''   Author..... Stephen M Moraco
+''               -- Copyright (c) 2025 Iron Sheep Productions, LLC
+''               -- see below for terms of use
+''   E-mail..... stephen@ironsheep.biz
+''   Started.... Nov 2025
+''   Updated.... Nov 2025
+''
+'' =================================================================================================
+''
+'' Performance test for OLED driver:
+''   - Runs multiple frames as fast as possible
+''   - Measures per-frame timing in cycles and microseconds
+''   - Reports min/max/avg frame times and FPS
+''   - Tests with different patterns to identify any pattern-dependent timing
+''
+'' =================================================================================================
+
+CON
+  _CLKFREQ = 250_000_000  ' 250 MHz system clock
+
+  ' Pin assignments
+  OLED_BASE_PIN = 16      ' OLED on P16-P23
+
+  ' Test configuration
+  WARMUP_FRAMES = 10      ' Frames to run before timing (cache warmup)
+  TIMED_FRAMES = 100      ' Frames to time for statistics
+
+  ' Test pattern values (12-bit sensor range)
+  MIN_VAL = 0
+  MAX_VAL = 4095
+  MID_VAL = 2048
+
+OBJ
+  oled : "isp_oled_single_cog"
+
+VAR
+  WORD  test_frame[64]    ' Test frame buffer (8x8 sensors)
+
+  ' Timing statistics
+  LONG  frame_times[TIMED_FRAMES]  ' Individual frame times in cycles
+  LONG  min_cycles
+  LONG  max_cycles
+  LONG  total_cycles
+
+PUB main()
+
+  debug("=== OLED PERFORMANCE TEST ===", 13, 10)
+  debug("System clock: ", udec(_CLKFREQ / 1_000_000), " MHz", 13, 10)
+  debug("Warmup frames: ", udec(WARMUP_FRAMES), 13, 10)
+  debug("Timed frames: ", udec(TIMED_FRAMES), 13, 10)
+  debug(" ", 13, 10)
+
+  ' Initialize OLED hardware
+  debug("Initializing OLED hardware...", 13, 10)
+  if not oled.init(OLED_BASE_PIN)
+    debug("ERROR: OLED hardware init failed!", 13, 10)
+    return
+  debug("OLED hardware initialized", 13, 10)
+  debug(" ", 13, 10)
+
+  ' ==========================================
+  ' SLOW METHOD: display_frame() - Original (abbreviated)
+  ' ==========================================
+  debug("============================================", 13, 10)
+  debug("SLOW METHOD: display_frame() - 10 frames only", 13, 10)
+  debug("============================================", 13, 10)
+
+  debug(" ", 13, 10)
+  generate_solid_pattern(MID_VAL)
+  run_performance_test_slow_brief()
+
+  ' ==========================================
+  ' FAST METHOD: display_frame_fast() - PASM
+  ' ==========================================
+  debug(" ", 13, 10)
+  debug("============================================", 13, 10)
+  debug("FAST METHOD: display_frame_fast() - PASM SPI", 13, 10)
+  debug("============================================", 13, 10)
+
+  ' Reset timing stats for fast method
+  reset_timing_stats()
+
+  debug(" ", 13, 10)
+  debug("=== TEST 4: Solid Color (uniform data) ===", 13, 10)
+  generate_solid_pattern(MID_VAL)
+  run_performance_test_fast()
+
+  debug(" ", 13, 10)
+  debug("=== TEST 5: Checkerboard (alternating data) ===", 13, 10)
+  generate_checkerboard()
+  run_performance_test_fast()
+
+  debug(" ", 13, 10)
+  debug("=== TEST 6: Gradient (varying data) ===", 13, 10)
+  generate_horizontal_gradient()
+  run_performance_test_fast()
+
+  debug(" ", 13, 10)
+  debug("=== ALL TESTS COMPLETE ===", 13, 10)
+
+  ' Keep running to allow observation
+  repeat
+
+PRI reset_timing_stats()
+'' Reset timing statistics between test methods
+  min_cycles := $7FFF_FFFF
+  max_cycles := 0
+  total_cycles := 0
+
+PRI run_performance_test_slow_brief() | i, start_ct, end_ct, elapsed, avg_cycles, avg_us, fps
+'' Brief test of slow method - just 10 frames to establish baseline
+
+  min_cycles := $7FFF_FFFF
+  max_cycles := 0
+  total_cycles := 0
+
+  debug("  Running 10 frames...", 13, 10)
+  repeat i from 0 to 9
+    start_ct := GETCT()
+    oled.display_frame(@test_frame)
+    end_ct := GETCT()
+
+    elapsed := end_ct - start_ct
+    if elapsed < min_cycles
+      min_cycles := elapsed
+    if elapsed > max_cycles
+      max_cycles := elapsed
+    total_cycles += elapsed
+
+  avg_cycles := total_cycles / 10
+  avg_us := avg_cycles / 250
+  fps := 250_000_000 / avg_cycles
+
+  debug("  SLOW: ", udec(avg_us), " us = ", udec(fps), " fps", 13, 10)
+
+PRI run_performance_test_slow() | i, start_ct, end_ct, elapsed, avg_cycles, avg_us, fps
+'' Run timed frames using slow display_frame() method
+
+  ' Reset statistics
+  min_cycles := $7FFF_FFFF
+  max_cycles := 0
+  total_cycles := 0
+
+  ' Warmup phase (no timing)
+  debug("  Running ", udec(WARMUP_FRAMES), " warmup frames...", 13, 10)
+  repeat WARMUP_FRAMES
+    oled.display_frame(@test_frame)
+
+  ' Timed phase
+  debug("  Running ", udec(TIMED_FRAMES), " timed frames...", 13, 10)
+  repeat i from 0 to TIMED_FRAMES - 1
+    start_ct := GETCT()
+    oled.display_frame(@test_frame)
+    end_ct := GETCT()
+
+    elapsed := end_ct - start_ct
+    frame_times[i] := elapsed
+
+    ' Update statistics
+    if elapsed < min_cycles
+      min_cycles := elapsed
+    if elapsed > max_cycles
+      max_cycles := elapsed
+    total_cycles += elapsed
+
+  ' Calculate and report results
+  avg_cycles := total_cycles / TIMED_FRAMES
+  avg_us := avg_cycles / 250  ' At 250 MHz, 250 cycles = 1 us
+  fps := 250_000_000 / avg_cycles
+
+  debug(" ", 13, 10)
+  debug("  TIMING RESULTS:", 13, 10)
+  debug("    Min: ", udec(min_cycles), " cycles = ", udec(min_cycles / 250), " us = ", udec(250_000_000 / min_cycles), " fps", 13, 10)
+  debug("    Max: ", udec(max_cycles), " cycles = ", udec(max_cycles / 250), " us = ", udec(250_000_000 / max_cycles), " fps", 13, 10)
+  debug("    Avg: ", udec(avg_cycles), " cycles = ", udec(avg_us), " us = ", udec(fps), " fps", 13, 10)
+
+  ' Report first few individual frame times for analysis
+  debug(" ", 13, 10)
+  debug("  First 5 frame times (cycles):", 13, 10)
+  repeat i from 0 to 4
+    debug("    Frame ", udec(i), ": ", udec(frame_times[i]), " cycles = ", udec(frame_times[i] / 250), " us", 13, 10)
+
+PRI run_performance_test_fast() | i, start_ct, end_ct, elapsed, avg_cycles, avg_us, fps
+'' Run timed frames using fast display_frame_fast() method with PASM SPI
+
+  ' Reset statistics
+  min_cycles := $7FFF_FFFF
+  max_cycles := 0
+  total_cycles := 0
+
+  ' Warmup phase (no timing)
+  debug("  Running ", udec(WARMUP_FRAMES), " warmup frames...", 13, 10)
+  repeat WARMUP_FRAMES
+    oled.display_frame_fast(@test_frame)
+
+  ' Timed phase
+  debug("  Running ", udec(TIMED_FRAMES), " timed frames...", 13, 10)
+  repeat i from 0 to TIMED_FRAMES - 1
+    start_ct := GETCT()
+    oled.display_frame_fast(@test_frame)
+    end_ct := GETCT()
+
+    elapsed := end_ct - start_ct
+    frame_times[i] := elapsed
+
+    ' Update statistics
+    if elapsed < min_cycles
+      min_cycles := elapsed
+    if elapsed > max_cycles
+      max_cycles := elapsed
+    total_cycles += elapsed
+
+  ' Calculate and report results
+  avg_cycles := total_cycles / TIMED_FRAMES
+  avg_us := avg_cycles / 250  ' At 250 MHz, 250 cycles = 1 us
+  fps := 250_000_000 / avg_cycles
+
+  debug(" ", 13, 10)
+  debug("  TIMING RESULTS:", 13, 10)
+  debug("    Min: ", udec(min_cycles), " cycles = ", udec(min_cycles / 250), " us = ", udec(250_000_000 / min_cycles), " fps", 13, 10)
+  debug("    Max: ", udec(max_cycles), " cycles = ", udec(max_cycles / 250), " us = ", udec(250_000_000 / max_cycles), " fps", 13, 10)
+  debug("    Avg: ", udec(avg_cycles), " cycles = ", udec(avg_us), " us = ", udec(fps), " fps", 13, 10)
+
+  ' Report first few individual frame times for analysis
+  debug(" ", 13, 10)
+  debug("  First 5 frame times (cycles):", 13, 10)
+  repeat i from 0 to 4
+    debug("    Frame ", udec(i), ": ", udec(frame_times[i]), " cycles = ", udec(frame_times[i] / 250), " us", 13, 10)
+
+PRI generate_solid_pattern(value) | i
+'' Generate solid color pattern
+
+  repeat i from 0 to 63
+    test_frame[i] := value
+
+PRI generate_checkerboard() | col, row, idx
+'' Generate checkerboard pattern
+
+  repeat row from 0 to 7
+    repeat col from 0 to 7
+      idx := (row * 8) + col
+      if ((row + col) & 1) == 0
+        test_frame[idx] := MIN_VAL
+      else
+        test_frame[idx] := MAX_VAL
+
+PRI generate_horizontal_gradient() | col, row, idx, value
+'' Generate horizontal gradient
+
+  repeat row from 0 to 7
+    repeat col from 0 to 7
+      idx := (row * 8) + col
+      value := MIN_VAL + ((col * (MAX_VAL - MIN_VAL)) / 7)
+      test_frame[idx] := value
+
+CON { license }
+{{
+
+ -------------------------------------------------------------------------------------------------
+  MIT License
+
+  Copyright (c) 2025 Iron Sheep Productions, LLC
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+ =================================================================================================
+}}

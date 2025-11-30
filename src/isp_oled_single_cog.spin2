@@ -112,6 +112,13 @@ VAR
   LONG  pin_dc
   LONG  pin_rst
 
+  ' Pre-rendered pixel buffer for fast display (128x128 RGB565 = 32KB)
+  WORD  pixel_buffer[16384]
+
+  ' Color lookup table for sensor values (4096 entries = 8KB)
+  ' Maps 12-bit sensor values directly to RGB565 colors
+  WORD  color_lut[4096]
+
   ' COG stack (64 longs per P2KB recommendations)
   LONG  display_cog_stack[64]
 
@@ -149,6 +156,7 @@ PUB init(oled_base_pin) : success
 
   debug("OLED: Initializing hardware on pin group ", udec(base_pin), "...", 13, 10)
   init_hardware()
+  init_color_lut()
   debug("OLED: Hardware ready", 13, 10)
 
   return TRUE
@@ -301,6 +309,174 @@ PUB display_frame(framePtr) | row, col, sensor_idx, value, color, x, y, px, py, 
     debug("  Min: ", udec(min_frame_cycles / 250), " us = ", udec(250_000_000 / min_frame_cycles), " fps", 13, 10)
     debug("  Max: ", udec(max_frame_cycles / 250), " us = ", udec(250_000_000 / max_frame_cycles), " fps", 13, 10)
 
+PUB display_frame_fast(framePtr) | start_cycles, end_cycles, elapsed_cycles
+'' Display a frame using optimized two-phase approach:
+''   Phase 1: Pre-render sensor data to 128x128 pixel buffer (Spin2)
+''   Phase 2: Stream entire buffer to display via PASM with events
+'' @param framePtr - pointer to 64-WORD sensor frame buffer
+'' @returns nothing - renders frame and returns immediately
+
+  ' Start timing measurement
+  start_cycles := GETCT()
+
+  ' Phase 1: Pre-render sensor data to pixel buffer
+  ' All color conversion and coordinate transformation happens here
+  render_to_pixel_buffer(framePtr)
+
+  ' Phase 2: Set full-screen window and stream all pixels via PASM
+  set_window(0, 0, WIDTH - 1, HEIGHT - 1)
+  stream_pixel_buffer()
+
+  ' End timing measurement and update statistics
+  end_cycles := GETCT()
+  elapsed_cycles := end_cycles - start_cycles
+  last_frame_cycles := elapsed_cycles
+
+  ' Update min/max statistics
+  if total_frames_timed == 0
+    min_frame_cycles := elapsed_cycles
+    max_frame_cycles := elapsed_cycles
+  else
+    if elapsed_cycles < min_frame_cycles
+      min_frame_cycles := elapsed_cycles
+    if elapsed_cycles > max_frame_cycles
+      max_frame_cycles := elapsed_cycles
+
+  total_frames_timed++
+
+PRI render_to_pixel_buffer(framePtr) | row, col, sensor_idx, value, color, px, py, cell_row, row_ptr, lut_ptr
+'' Pre-render sensor frame to 128x128 pixel buffer with all transformations
+'' @param framePtr - pointer to 64-WORD sensor frame buffer
+'' @returns nothing - fills pixel_buffer with RGB565 data ready for streaming
+''
+'' Optimized: Uses color LUT lookup and WORDFILL for fast rendering
+
+  lut_ptr := @color_lut
+
+  ' Process each sensor cell (8x8 = 64 cells)
+  repeat row from 0 to 7
+    repeat col from 0 to 7
+      ' Read sensor value and clamp to 12-bit range
+      sensor_idx := (row * 8) + col
+      value := WORD[framePtr][sensor_idx]
+      value := 0 #> value <# 4095
+
+      ' Lookup color directly from LUT (no math!)
+      color := WORD[lut_ptr][value]
+
+      ' Calculate pixel buffer position based on orientation
+      ' Each sensor cell is 16x16 pixels
+      get_cell_origin(row, col, @px, @py)
+
+      ' Fill 16x16 pixel block using WORDFILL for each row (16 pixels at a time)
+      repeat cell_row from 0 to 15
+        row_ptr := @pixel_buffer[((py + cell_row) * WIDTH) + px]
+        WORDFILL(row_ptr, color, 16)
+
+PRI get_cell_origin(row, col, px_ptr, py_ptr) | temp_row, temp_col, px, py
+'' Calculate pixel buffer origin for a sensor cell based on orientation
+'' @param row - sensor row (0-7)
+'' @param col - sensor column (0-7)
+'' @param px_ptr - pointer to receive x pixel coordinate
+'' @param py_ptr - pointer to receive y pixel coordinate
+'' @returns nothing - writes coordinates to pointers
+
+  ' Stage 1: Transform from sensor layout to display-normal layout
+  ' Sensor data appears rotated 90 left and horizontally mirrored
+  temp_row := col
+  temp_col := row
+
+  ' Stage 2: Apply orientation-specific transformations
+  case orientation
+    ORIENTATION_0:
+      ' Ribbon BOTTOM
+      px := (7 - temp_col) * CELL_WIDTH
+      py := temp_row * CELL_HEIGHT
+
+    ORIENTATION_90:
+      ' Ribbon LEFT (default)
+      px := (7 - temp_col) * CELL_WIDTH
+      py := (7 - temp_row) * CELL_HEIGHT
+
+    ORIENTATION_180:
+      ' Ribbon TOP
+      px := (7 - temp_col) * CELL_WIDTH
+      py := (7 - temp_row) * CELL_HEIGHT
+
+    ORIENTATION_270:
+      ' Ribbon RIGHT
+      px := (7 - temp_col) * CELL_WIDTH
+      py := temp_row * CELL_HEIGHT
+
+  LONG[px_ptr] := px
+  LONG[py_ptr] := py
+
+PRI stream_pixel_buffer() | buf_ptr, pixel_count, mosi_pin, sclk_pin, cs_pin, dc_pin, pixel_val, byte_val
+'' Stream entire pixel buffer to OLED via inline PASM with events
+'' Uses waitse1 for efficient waiting instead of polling
+'' @returns nothing - transmits all 32,768 bytes to display
+
+  ' Copy pin numbers to local variables for PASM access
+  buf_ptr := @pixel_buffer
+  pixel_count := 16384
+  mosi_pin := pin_mosi
+  sclk_pin := pin_sclk
+  cs_pin := pin_cs
+  dc_pin := pin_dc
+
+  ' Stream all pixels using inline PASM
+  ORG
+        ' Configure event for SCLK IN flag (signals transfer complete)
+        ' Event encoding: %01 = IN rise, pin number in lower 6 bits
+        mov     pa, sclk_pin
+        or      pa, #%01_000000
+        setse1  pa
+
+        ' Assert CS and DC for data mode
+        drvl    cs_pin                  ' CS low - select display
+        drvh    dc_pin                  ' DC high - data mode
+
+        ' Set up pixel counter and buffer pointer
+        mov     ptra, buf_ptr
+        mov     pb, pixel_count
+
+.pixel_loop
+        ' Read next RGB565 pixel from buffer
+        rdword  pixel_val, ptra++
+
+        ' === Send high byte ===
+        mov     byte_val, pixel_val
+        shr     byte_val, #8
+        and     byte_val, #$FF
+        ' Bit-reverse for MSB-first transmission
+        shl     byte_val, #24           ' Move byte to bits 31:24
+        rev     byte_val                ' Reverse all 32 bits
+        ' Load data and trigger clock
+        wypin   byte_val, mosi_pin      ' Load reversed byte
+        wypin   #8, sclk_pin            ' Generate 8 clock pulses
+        ' Wait for transfer complete using event (COG halts efficiently)
+        waitse1
+
+        ' === Send low byte ===
+        mov     byte_val, pixel_val
+        and     byte_val, #$FF
+        ' Bit-reverse for MSB-first transmission
+        shl     byte_val, #24           ' Move byte to bits 31:24
+        rev     byte_val                ' Reverse all 32 bits
+        ' Load data and trigger clock
+        wypin   byte_val, mosi_pin      ' Load reversed byte
+        wypin   #8, sclk_pin            ' Generate 8 clock pulses
+        ' Wait for transfer complete using event (COG halts efficiently)
+        waitse1
+
+        ' Loop until all pixels sent
+        djnz    pb, #.pixel_loop
+
+        ' Deassert CS
+        drvh    cs_pin                  ' CS high - deselect display
+
+  END
+
 PRI init_hardware() | clk_period, temp, i
 '' Initialize OLED hardware (GPIO pins, Smart Pins, display controller)
 '' @returns nothing - performs hardware setup
@@ -336,6 +512,36 @@ PRI init_hardware() | clk_period, temp, i
   init_display()
 
   debug("  Hardware initialization complete", 13, 10)
+
+PRI init_color_lut() | i, normalized, r, g, b, color
+'' Build color lookup table mapping 12-bit sensor values to RGB565 colors
+'' Full resolution: each of 4096 sensor values gets unique color
+'' Color gradient: Blue (cold) -> Green (neutral) -> Red (hot)
+
+  debug("  Building color LUT (4096 entries)...", 13, 10)
+
+  repeat i from 0 to 4095
+    ' Normalize to 0-511 range (full 12-bit resolution, scaled for color calc)
+    ' Use 512 steps to get smooth gradient across full range
+    normalized := (i * 511) / 4095
+
+    ' Bipolar color mapping with full resolution
+    if normalized < 256
+      ' Blue to Green (cold to neutral): 0-255
+      r := 0
+      g := normalized                     ' 0 -> 255
+      b := 255 - normalized               ' 255 -> 0
+    else
+      ' Green to Red (neutral to hot): 256-511
+      r := normalized - 256               ' 0 -> 255
+      g := 511 - normalized               ' 255 -> 0
+      b := 0
+
+    ' Convert 8-bit RGB to 5-6-5 BGR565 format (SSD1351 expects BGR)
+    color := ((b >> 3) << 11) | ((g >> 2) << 5) | (r >> 3)
+    color_lut[i] := color
+
+  debug("  Color LUT ready", 13, 10)
 
 PRI init_display()
 '' Initialize SSD1351 OLED controller with optimized settings
