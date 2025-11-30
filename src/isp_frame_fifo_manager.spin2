@@ -58,17 +58,25 @@ DAT
 PUB null()
   '' Not a top-level object
 
-PUB start() : ok
+PUB start() : ok | i
   '' Initialize the frame pool and all FIFOs
 
   debug("FIFO: Acquiring lock...", 13, 10)
   lock := locknew()
   debug("FIFO: Lock acquired: ", sdec(lock), 13, 10)
 
+  ' CRITICAL: Explicitly zero ALL FIFO arrays to prevent garbage pointer issues
+  ' DAT section initialization may not reliably zero arrays
+  debug("FIFO: Zeroing FIFO arrays...", 13, 10)
+  longfill(@sensorFIFO, 0, FIFO_DEPTH)
+  longfill(@hdmiFIFO, 0, FIFO_DEPTH)
+  longfill(@oledFIFO, 0, FIFO_DEPTH)
+  longfill(@freeList, 0, MAX_FRAMES)
+
   ' Initialize free list with all frames
   debug("FIFO: Initializing ", udec(MAX_FRAMES), " frames...", 13, 10)
-  repeat freeHead from 0 to MAX_FRAMES-1
-    freeList[freeHead] := @framePool + (freeHead * FRAME_SIZE)
+  repeat i from 0 to MAX_FRAMES-1
+    freeList[i] := @framePool + (i * FRAME_SIZE)
 
   freeHead := 0
   freeTail := MAX_FRAMES - 1  ' CORRECT: Knuth's algorithm with count (full queue, next enqueue wraps to 0)
@@ -159,10 +167,14 @@ PUB commitFrame(fifoID, framePtr) : result
   lockrel(lock)
   return result
 
-PUB dequeue(fifoID) : framePtr | timeout
+PUB dequeue(fifoID) : framePtr | timeout, poolStart, poolEnd
   '' Dequeue frame from specified FIFO
   '' Blocks until frame available
-  '' Returns pointer to frame
+  '' Returns pointer to frame (or 0 on timeout/error)
+
+  ' Calculate valid frame pool address range for validation
+  poolStart := @framePool
+  poolEnd := @framePool + (MAX_FRAMES * FRAME_SIZE)
 
   timeout := 0
   repeat
@@ -173,6 +185,13 @@ PUB dequeue(fifoID) : framePtr | timeout
       FIFO_SENSOR:
         if sensorCount > 0
           framePtr := sensorFIFO[sensorHead]
+          ' CRITICAL: Validate pointer before returning
+          if framePtr < poolStart or framePtr >= poolEnd
+            debug("FIFO ERROR: Sensor dequeue invalid ptr=", uhex_long(framePtr), " head=", udec(sensorHead), " count=", udec(sensorCount), 13, 10)
+            sensorHead := (sensorHead + 1) // FIFO_DEPTH
+            sensorCount--
+            lockrel(lock)
+            return 0  ' Return 0 instead of garbage
           sensorHead := (sensorHead + 1) // FIFO_DEPTH
           sensorCount--
           lockrel(lock)
@@ -181,6 +200,13 @@ PUB dequeue(fifoID) : framePtr | timeout
       FIFO_HDMI:
         if hdmiCount > 0
           framePtr := hdmiFIFO[hdmiHead]
+          ' CRITICAL: Validate pointer before returning
+          if framePtr < poolStart or framePtr >= poolEnd
+            debug("FIFO ERROR: HDMI dequeue invalid ptr=", uhex_long(framePtr), " head=", udec(hdmiHead), " count=", udec(hdmiCount), 13, 10)
+            hdmiHead := (hdmiHead + 1) // FIFO_DEPTH
+            hdmiCount--
+            lockrel(lock)
+            return 0  ' Return 0 instead of garbage
           hdmiHead := (hdmiHead + 1) // FIFO_DEPTH
           hdmiCount--
           lockrel(lock)
@@ -189,6 +215,13 @@ PUB dequeue(fifoID) : framePtr | timeout
       FIFO_OLED:
         if oledCount > 0
           framePtr := oledFIFO[oledHead]
+          ' CRITICAL: Validate pointer before returning
+          if framePtr < poolStart or framePtr >= poolEnd
+            debug("FIFO ERROR: OLED dequeue invalid ptr=", uhex_long(framePtr), " head=", udec(oledHead), " count=", udec(oledCount), 13, 10)
+            oledHead := (oledHead + 1) // FIFO_DEPTH
+            oledCount--
+            lockrel(lock)
+            return 0  ' Return 0 instead of garbage
           oledHead := (oledHead + 1) // FIFO_DEPTH
           oledCount--
           lockrel(lock)

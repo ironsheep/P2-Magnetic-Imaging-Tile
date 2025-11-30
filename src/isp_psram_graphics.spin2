@@ -102,6 +102,11 @@ PUB FillRect(rx1, ry1, rx2, ry2, rcolor) | ry, rx, psram_addr
 '' Fill a rectangle with solid color
 '' Much faster than individual pixels for sensor grid display
 
+  ' CRITICAL: Validate psram_ptr before use (guard against corruption)
+  if psram_ptr == 0
+    debug("FillRect ERROR: psram_ptr is NULL! Call start() first.", 13, 10)
+    return
+
   ' Ensure coordinates are in order
   if rx1 > rx2
     rx1, rx2 := rx2, rx1
@@ -132,6 +137,10 @@ PUB FillRect(rx1, ry1, rx2, ry2, rcolor) | ry, rx, psram_addr
 PUB DrawHLine(lx1, lx2, ly, lcolor)
 '' Draw a horizontal line - optimized version
 
+  ' Guard against corrupted psram_ptr
+  if psram_ptr == 0
+    return
+
   if lx1 > lx2
     lx1, lx2 := lx2, lx1
 
@@ -147,6 +156,10 @@ PUB DrawHLine(lx1, lx2, ly, lcolor)
 
 PUB DrawVLine(vx, vy1, vy2, vcolor) | vy
 '' Draw a vertical line
+
+  ' Guard against corrupted psram_ptr
+  if psram_ptr == 0
+    return
 
   if vy1 > vy2
     vy1, vy2 := vy2, vy1
@@ -411,6 +424,11 @@ PUB cls(clr)
 
 
 PRI clear_screen(ptr,clr) | i
+
+  ' Guard against corrupted psram_ptr
+  if psram_ptr == 0
+    debug("clear_screen ERROR: psram_ptr is NULL!", 13, 10)
+    return
 
   debug("Clear: psram_base=", UDEC(ptr), " color=", UHEX_LONG(clr), 13, 10)
   longfill(@row[0],clr,mapx)         '(Destination, Value, Count)
