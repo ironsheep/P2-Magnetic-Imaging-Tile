@@ -197,22 +197,20 @@ PUB advance_counter_test()
         waitx   #COUNTER_SETUP_DELAY
     end
 
-PUB read_single_sensor() : sensor_value | raw_value
+PUB read_single_sensor() : sensor_value | raw_value, event_config
 '' TEST METHOD: Read current sensor using smart pin SPI interface
-'' Uses P_PULSE clock mode (like jm_ez_spi) for reliable operation
+'' Uses P_PULSE clock mode for reliable operation
+'' OPTIMIZED (Nov 2025): No per-transfer reset, uses waitse1 instead of polling
 '' @returns 16-bit sensor value (0-65535)
 '' @note For regression testing only - tests smart pin sync RX/clock generation
 '' @note configure_smart_pins() must be called first!
 
-    ' debug("TEST: read_single_sensor() called", 13, 10)  ' Commented out - kills timing (~200us per call)
+    ' Build event configuration (needed for inline PASM in Spin2 context)
+    event_config := %01_000000 | ABS_PIN_SCLK
+
     org
-        ' Reset and configure MISO for this transfer (like jm_ez_spi pattern)
-        ' This ensures clean state for each read
-        ' NOTE: dirl resets the smart pin completely, so we must re-apply wrpin!
-        dirl    #ABS_PIN_MISO                        ' Reset MISO smart pin (pinf equivalent)
-        wrpin   ##P_SYNC_RX | P_PLUS2_B | P_INVERT_B, #ABS_PIN_MISO ' Sync RX, clock from pin+2, sample on falling edge
-        wxpin   #%0_10111, #ABS_PIN_MISO             ' Pre-edge sample, 24 bits (bit_count-1 = 23)
-        dirh    #ABS_PIN_MISO                        ' Enable MISO (pinl equivalent)
+        ' Configure event for this read (Spin2 inline PASM doesn't share COG's setse1)
+        setse1  event_config
 
         ' Start ADC conversion (CS low - captures analog value)
         drvl    #ABS_PIN_CS
@@ -220,13 +218,8 @@ PUB read_single_sensor() : sensor_value | raw_value
 
         ' Trigger SPI clock pulses (P_PULSE mode: wypin = number of pulses = bits)
         wypin   #SPI_TRANSFER_BITS, #ABS_PIN_SCLK    ' Generate 24 clock pulses
-        akpin   #ABS_PIN_SCLK                        ' Clear any stale IN flag from previous transfer
-
-        ' Wait for clock to finish by polling SCLK IN flag (like jm_ez_spi: repeat until pinr(sck))
-        ' P_PULSE sets IN flag when all pulses complete
-.wait_clk
-        testp   #ABS_PIN_SCLK wc                     ' Test SCLK IN flag (C=1 when done)
-  if_nc jmp     #.wait_clk                           ' Loop until all pulses complete
+        akpin   #ABS_PIN_SCLK                        ' Clear any stale IN flag
+        waitse1                                      ' Wait efficiently for completion
 
         ' Clock finished - read received data from MISO
         rdpin   raw_value, #ABS_PIN_MISO             ' Read 24-bit value (left-justified, LSB-first)
@@ -235,14 +228,7 @@ PUB read_single_sensor() : sensor_value | raw_value
         drvh    #ABS_PIN_CS
 
         ' Process data: AD7680 sends MSB-first, but P_SYNC_RX receives LSB-first
-        ' Must reverse bits to correct the order, then extract 16-bit data
-        ' After REV: bits are now MSB-first, left-justified
-        ' AD7680 frame: [4 leading 0s][16 data bits][4 trailing 0s]
-        ' After REV and left-justified: Z[31:28]=trailing 0s, Z[27:12]=data, Z[11:8]=leading 0s
-        ' Wait - REV reverses all 32 bits, so we need to think about this carefully:
-        ' Received (LSB-first, left-justified): bit0 of wire in Z[31], bit23 of wire in Z[8]
-        ' After REV: bit0 of wire in Z[0], bit23 of wire in Z[23]
-        ' So after REV, the 24-bit frame is in Z[23:0] (right-justified!)
+        ' After REV, the 24-bit frame is in Z[23:0] (right-justified)
         ' AD7680 frame: Z[23:20]=leading 0s, Z[19:4]=16-bit data, Z[3:0]=trailing 0s
         rev     raw_value                            ' Reverse all 32 bits (MSB-first now, right-justified)
         shr     raw_value, #4                        ' Shift out 4 trailing zeros
@@ -250,16 +236,23 @@ PUB read_single_sensor() : sensor_value | raw_value
         mov     sensor_value, raw_value
     end
 
-PUB configure_smart_pins() | sclk_x
+PUB configure_smart_pins() | sclk_x, event_config
 '' Configure smart pins for SPI communication with AD7680
 '' Uses P_PULSE mode for clock (like jm_ez_spi) - more reliable than P_TRANSITION
 '' Called ONCE before using test methods or by sensor COG at startup
 '' @note Public to allow test code to configure pins explicitly
+''
+'' OPTIMIZATION (Nov 2025): Smart pins are configured ONCE here and maintain
+'' their settings across transfers. No need to reset/reconfigure per-transfer.
+'' Also configures event SE1 for efficient waitse1-based waiting.
 
-    debug("Sensor: Configuring smart pins for SPI (P_PULSE mode)...", 13, 10)
+    debug("Sensor: Configuring smart pins for SPI (P_PULSE mode + events)...", 13, 10)
 
     ' Build SCLK X register: X[15:0]=period, X[31:16]=low_time
     sclk_x := SPI_PERIOD | (SPI_LOW_TIME << 16)
+
+    ' Build event configuration: %01 = positive edge, pin number in lower 6 bits
+    event_config := %01_000000 | ABS_PIN_SCLK
 
     org
         ' Configure SCLK (P12) as pulse output (SPI clock generator)
@@ -272,10 +265,15 @@ PUB configure_smart_pins() | sclk_x
         ' Configure MISO (P10) as sync serial RX (data receiver)
         ' SCLK is 2 pins away (P12), so use P_PLUS2_B to specify B-input source
         ' P_INVERT_B: AD7680 outputs data on FALLING edge, so invert clock sense
-        ' Note: MISO will be reset/reconfigured before each transfer (like jm_ez_spi)
+        ' OPTIMIZATION: Configure ONCE and leave enabled - no per-transfer reset needed
         dirl    #ABS_PIN_MISO                        ' Clear/reset smart pin
         wrpin   ##P_SYNC_RX | P_PLUS2_B | P_INVERT_B, #ABS_PIN_MISO ' Sync RX, clock from pin+2, sample on falling edge
-        ' Leave MISO disabled - will be configured per-transfer
+        wxpin   #%0_10111, #ABS_PIN_MISO             ' Pre-edge sample, 24 bits (bit_count-1 = 23)
+        dirh    #ABS_PIN_MISO                        ' Enable MISO - stays enabled!
+
+        ' Configure event SE1 for SCLK completion (positive edge on IN flag)
+        ' This enables efficient waitse1 instead of polling loop
+        setse1  event_config
 
         ' Configure CS, CCLK, CLRb as normal digital outputs with initial states
         drvh    #ABS_PIN_CS                          ' CS high (inactive)
@@ -283,7 +281,7 @@ PUB configure_smart_pins() | sclk_x
         drvh    #ABS_PIN_CLRB                        ' CLRb high (not clearing)
     end
 
-    debug("Sensor: Smart pins configured", 13, 10)
+    debug("Sensor: Smart pins configured (MISO stays enabled, SE1 event ready)", 13, 10)
 
 PRI sensor_loop() | framePtr, patternPtr, subtile_idx, sensor_idx, subtile_num, frame_offset, sensor_in_subtile, pixel_pos, sensor_val
 '' Main sensor loop running in dedicated COG
@@ -426,31 +424,20 @@ PRI acquire_sensor_frame() | framePtr, subtile_idx, sensor_in_subtile, subtile_n
 
 ' ============================================
 ' read_ad7680_smart: Read sensor via smart pins
-' Uses P_PULSE clock mode (like jm_ez_spi) for reliable operation
-' Resets MISO before each transfer for clean state
-' Returns: sensor_val
+' Uses P_PULSE clock mode for reliable operation
+' OPTIMIZED (Nov 2025): No per-transfer reset, uses waitse1 instead of polling
+' Requires: configure_smart_pins() called once at startup
+' Returns: sensor_val (16-bit sensor reading)
 ' ============================================
 read_ad7680_smart
-        ' Reset and configure MISO for this transfer (like jm_ez_spi pattern)
-        ' NOTE: dirl resets the smart pin completely, so we must re-apply wrpin!
-        dirl    ABS_PIN_MISO                      ' Reset MISO smart pin
-        wrpin   ##P_SYNC_RX | P_PLUS2_B | P_INVERT_B, ABS_PIN_MISO ' Sync RX, clock from pin+2, sample on falling edge
-        wxpin   #%0_10111, ABS_PIN_MISO           ' Pre-edge sample, 24 bits (bit_count-1 = 23)
-        dirh    ABS_PIN_MISO                      ' Enable MISO
-
         ' Start ADC conversion (CS low - captures analog value)
         drvl    ABS_PIN_CS
         waitx   #SENSOR_SETTLE_DELAY              ' Critical: wait for analog to settle
 
         ' Trigger SPI clock pulses (P_PULSE mode: wypin = number of pulses = bits)
         wypin   #SPI_TRANSFER_BITS, ABS_PIN_SCLK  ' Generate 24 clock pulses
-        akpin   ABS_PIN_SCLK                      ' Clear any stale IN flag from previous transfer
-
-        ' Wait for clock to finish by polling SCLK IN flag
-        ' P_PULSE sets IN flag when all pulses complete
-.wait_clk_prod
-        testp   ABS_PIN_SCLK wc                   ' Test SCLK IN flag (C=1 when done)
-  if_nc jmp     #.wait_clk_prod                   ' Loop until all pulses complete
+        akpin   ABS_PIN_SCLK                      ' Clear any stale IN flag
+        waitse1                                   ' Wait efficiently for completion (event-based)
 
         ' Clock finished - read received data from MISO
         rdpin   sensor_val, ABS_PIN_MISO          ' Read 24-bit value (left-justified, LSB-first)
