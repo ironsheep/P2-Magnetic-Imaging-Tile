@@ -69,7 +69,7 @@ PUB main()
   debug("============================================", 13, 10)
 
   debug(" ", 13, 10)
-  generate_solid_pattern(MID_VAL)
+  generate_solid_pattern(MAX_VAL)    ' Use RED (max value) for slow test
   run_performance_test_slow_brief()
 
   ' ==========================================
@@ -85,7 +85,7 @@ PUB main()
 
   debug(" ", 13, 10)
   debug("=== TEST 4: Solid Color (uniform data) ===", 13, 10)
-  generate_solid_pattern(MID_VAL)
+  generate_solid_pattern(MIN_VAL)    ' Use BLUE (min value) for fast test
   run_performance_test_fast()
 
   debug(" ", 13, 10)
@@ -100,6 +100,14 @@ PUB main()
 
   debug(" ", 13, 10)
   debug("=== ALL TESTS COMPLETE ===", 13, 10)
+
+  ' Final verification: Use SLOW method to paint BLUE
+  ' If screen turns BLUE, we know fast method was the problem
+  debug(" ", 13, 10)
+  debug("=== VERIFICATION: Painting BLUE with SLOW method ===", 13, 10)
+  generate_solid_pattern(MIN_VAL)
+  oled.display_frame(@test_frame)
+  debug("  Done - screen should now be BLUE", 13, 10)
 
   ' Keep running to allow observation
   repeat

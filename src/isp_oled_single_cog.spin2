@@ -323,8 +323,20 @@ PUB display_frame_fast(framePtr) | start_cycles, end_cycles, elapsed_cycles
   ' All color conversion and coordinate transformation happens here
   render_to_pixel_buffer(framePtr)
 
+  ' DEBUG: Check pixel buffer contents after rendering
+  if total_frames_timed == 0
+    debug("FAST DEBUG: First pixel buffer check", 13, 10)
+    debug("  Input sensor[0] = ", uhex(WORD[framePtr][0]), 13, 10)
+    debug("  Color LUT[0] = ", uhex(WORD[@color_lut][0]), 13, 10)
+    debug("  Color LUT[2048] = ", uhex(WORD[@color_lut][2048]), 13, 10)
+    debug("  Color LUT[4095] = ", uhex(WORD[@color_lut][4095]), 13, 10)
+    debug("  pixel_buffer[0] = ", uhex(WORD[@pixel_buffer][0]), 13, 10)
+    debug("  pixel_buffer[1] = ", uhex(WORD[@pixel_buffer][1]), 13, 10)
+    debug("  pixel_buffer[128] = ", uhex(WORD[@pixel_buffer][128]), 13, 10)
+
   ' Phase 2: Set full-screen window and stream all pixels via PASM
-  set_window(0, 0, WIDTH - 1, HEIGHT - 1)
+  ' Use raw window without ROW_OFFSET (pixel buffer is already in display order)
+  set_window_raw(0, 0, WIDTH - 1, HEIGHT - 1)
   stream_pixel_buffer()
 
   ' End timing measurement and update statistics
@@ -414,6 +426,7 @@ PRI get_cell_origin(row, col, px_ptr, py_ptr) | temp_row, temp_col, px, py
 PRI stream_pixel_buffer() | buf_ptr, pixel_count, mosi_pin, sclk_pin, cs_pin, dc_pin, pixel_val, byte_val
 '' Stream entire pixel buffer to OLED via inline PASM with events
 '' Uses waitse1 for efficient waiting instead of polling
+'' Minimizes gap: akpin+wypin immediately after waitse1
 '' @returns nothing - transmits all 32,768 bytes to display
 
   ' Copy pin numbers to local variables for PASM access
@@ -426,8 +439,8 @@ PRI stream_pixel_buffer() | buf_ptr, pixel_count, mosi_pin, sclk_pin, cs_pin, dc
 
   ' Stream all pixels using inline PASM
   ORG
-        ' Configure event for SCLK IN flag (signals transfer complete)
-        ' Event encoding: %01 = IN rise, pin number in lower 6 bits
+        ' Configure event for SCLK IN flag rise (P_PULSE clocks complete)
+        ' Event encoding: %01 = positive edge, pin number in lower 6 bits
         mov     pa, sclk_pin
         or      pa, #%01_000000
         setse1  pa
@@ -444,29 +457,25 @@ PRI stream_pixel_buffer() | buf_ptr, pixel_count, mosi_pin, sclk_pin, cs_pin, dc
         ' Read next RGB565 pixel from buffer
         rdword  pixel_val, ptra++
 
-        ' === Send high byte ===
+        ' === Prepare and send high byte ===
         mov     byte_val, pixel_val
         shr     byte_val, #8
-        and     byte_val, #$FF
-        ' Bit-reverse for MSB-first transmission
-        shl     byte_val, #24           ' Move byte to bits 31:24
-        rev     byte_val                ' Reverse all 32 bits
-        ' Load data and trigger clock
-        wypin   byte_val, mosi_pin      ' Load reversed byte
-        wypin   #8, sclk_pin            ' Generate 8 clock pulses
-        ' Wait for transfer complete using event (COG halts efficiently)
+        shl     byte_val, #24
+        rev     byte_val
+        wypin   byte_val, mosi_pin
+        akpin   sclk_pin
+        wypin   #8, sclk_pin
         waitse1
 
-        ' === Send low byte ===
+        ' === Prepare and send low byte ===
+        ' Minimize gap: start next transfer IMMEDIATELY after waitse1
         mov     byte_val, pixel_val
         and     byte_val, #$FF
-        ' Bit-reverse for MSB-first transmission
-        shl     byte_val, #24           ' Move byte to bits 31:24
-        rev     byte_val                ' Reverse all 32 bits
-        ' Load data and trigger clock
-        wypin   byte_val, mosi_pin      ' Load reversed byte
-        wypin   #8, sclk_pin            ' Generate 8 clock pulses
-        ' Wait for transfer complete using event (COG halts efficiently)
+        shl     byte_val, #24
+        rev     byte_val
+        wypin   byte_val, mosi_pin
+        akpin   sclk_pin
+        wypin   #8, sclk_pin
         waitse1
 
         ' Loop until all pixels sent
@@ -702,6 +711,24 @@ PRI set_window(x1, y1, x2, y2)
   send_command(CMD_SET_ROW)
   send_data(y1 + ROW_OFFSET)
   send_data(y2 + ROW_OFFSET)
+
+  send_command(CMD_WRITE_RAM)
+
+PRI set_window_raw(x1, y1, x2, y2)
+'' Set active drawing window without applying offsets
+'' Used for full-screen streaming where pixel buffer is pre-rendered in display order
+'' @param x1 - starting column (0-127)
+'' @param y1 - starting row (0-127)
+'' @param x2 - ending column (0-127)
+'' @param y2 - ending row (0-127)
+
+  send_command(CMD_SET_COLUMN)
+  send_data(x1)
+  send_data(x2)
+
+  send_command(CMD_SET_ROW)
+  send_data(y1)
+  send_data(y2)
 
   send_command(CMD_WRITE_RAM)
 
