@@ -119,6 +119,11 @@ VAR
   ' Maps 12-bit sensor values directly to RGB565 colors
   WORD  color_lut[4096]
 
+  ' Cell origin lookup table for fast rendering (64 entries for 8x8)
+  ' Each entry is pixel buffer offset (WORD index) for cell's top-left corner
+  ' Pre-computed at init based on orientation
+  WORD  cell_origin_lut[64]
+
   ' COG stack (64 longs per P2KB recommendations)
   LONG  display_cog_stack[64]
 
@@ -157,6 +162,7 @@ PUB init(oled_base_pin) : success
   debug("OLED: Initializing hardware on pin group ", udec(base_pin), "...", 13, 10)
   init_hardware()
   init_color_lut()
+  init_cell_origin_lut()
   debug("OLED: Hardware ready", 13, 10)
 
   return TRUE
@@ -356,34 +362,105 @@ PUB display_frame_fast(framePtr) | start_cycles, end_cycles, elapsed_cycles
 
   total_frames_timed++
 
-PRI render_to_pixel_buffer(framePtr) | row, col, sensor_idx, value, color, px, py, cell_row, row_ptr, lut_ptr
+PRI render_to_pixel_buffer(framePtr) | frame_ptr, lut_ptr, origin_lut_ptr, buf_ptr, cell_count, row_stride, sensor_val, color_val, cell_origin, row_count, row_ptr
 '' Pre-render sensor frame to 128x128 pixel buffer with all transformations
 '' @param framePtr - pointer to 64-WORD sensor frame buffer
 '' @returns nothing - fills pixel_buffer with RGB565 data ready for streaming
 ''
-'' Optimized: Uses color LUT lookup and WORDFILL for fast rendering
+'' PASM optimized: Uses pre-computed cell origin LUT and color LUT
+'' Parameterized for future 32x32 support (change CELL_WIDTH/HEIGHT and LUT size)
 
+  frame_ptr := framePtr
   lut_ptr := @color_lut
+  origin_lut_ptr := @cell_origin_lut
+  buf_ptr := @pixel_buffer
+  cell_count := 64                    ' 8x8 grid = 64 cells
+  row_stride := WIDTH * 2             ' Bytes per pixel buffer row (128 * 2)
 
-  ' Process each sensor cell (8x8 = 64 cells)
-  repeat row from 0 to 7
-    repeat col from 0 to 7
-      ' Read sensor value and clamp to 12-bit range
-      sensor_idx := (row * 8) + col
-      value := WORD[framePtr][sensor_idx]
-      value := 0 #> value <# 4095
+  ORG
+        ' Register usage:
+        ' ptra = sensor frame pointer (advances through 64 sensor values)
+        ' ptrb = pixel buffer base (constant)
+        ' pa = cell origin LUT pointer (advances through 64 entries)
+        ' pb = cell counter (64 down to 0)
 
-      ' Lookup color directly from LUT (no math!)
-      color := WORD[lut_ptr][value]
+        mov     ptra, frame_ptr       ' Sensor frame base
+        mov     ptrb, buf_ptr         ' Pixel buffer base
+        mov     pa, origin_lut_ptr    ' Cell origin LUT base
+        mov     pb, cell_count        ' 64 cells to process
 
-      ' Calculate pixel buffer position based on orientation
-      ' Each sensor cell is 16x16 pixels
-      get_cell_origin(row, col, @px, @py)
+.cell_loop
+        ' Read sensor value (WORD) and clamp to 12-bit
+        rdword  sensor_val, ptra++
+        fle     sensor_val, ##4095    ' Clamp max to 4095
+        fges    sensor_val, #0        ' Clamp min to 0
 
-      ' Fill 16x16 pixel block using WORDFILL for each row (16 pixels at a time)
-      repeat cell_row from 0 to 15
-        row_ptr := @pixel_buffer[((py + cell_row) * WIDTH) + px]
-        WORDFILL(row_ptr, color, 16)
+        ' Lookup color from LUT: color = lut_ptr[sensor_val]
+        ' LUT is WORD array, so offset = sensor_val * 2
+        shl     sensor_val, #1        ' sensor_val * 2 (byte offset)
+        add     sensor_val, lut_ptr   ' Address of color entry
+        rdword  color_val, sensor_val ' Read RGB565 color
+
+        ' Read cell origin from pre-computed LUT (WORD offset into pixel buffer)
+        rdword  cell_origin, pa
+        add     pa, #2                ' Advance to next LUT entry
+
+        ' Convert WORD offset to byte offset and add to buffer base
+        shl     cell_origin, #1       ' WORD offset to byte offset
+        add     cell_origin, ptrb     ' Absolute address of cell top-left
+
+        ' Fill 16x16 pixel block (16 rows of 16 pixels each)
+        ' Each pixel is 2 bytes (RGB565)
+        mov     row_count, #16        ' 16 rows per cell
+
+.row_loop
+        ' Fill 16 pixels in this row with color_val
+        ' Use SETQ + WRWORD for block write (8 WORDs at a time)
+        mov     row_ptr, cell_origin
+
+        ' Write 16 WORDs (pixels) - unrolled as 16 individual writes
+        ' Could optimize further with REP but this is simpler
+        wrword  color_val, row_ptr
+        add     row_ptr, #2
+        wrword  color_val, row_ptr
+        add     row_ptr, #2
+        wrword  color_val, row_ptr
+        add     row_ptr, #2
+        wrword  color_val, row_ptr
+        add     row_ptr, #2
+        wrword  color_val, row_ptr
+        add     row_ptr, #2
+        wrword  color_val, row_ptr
+        add     row_ptr, #2
+        wrword  color_val, row_ptr
+        add     row_ptr, #2
+        wrword  color_val, row_ptr
+        add     row_ptr, #2
+        wrword  color_val, row_ptr
+        add     row_ptr, #2
+        wrword  color_val, row_ptr
+        add     row_ptr, #2
+        wrword  color_val, row_ptr
+        add     row_ptr, #2
+        wrword  color_val, row_ptr
+        add     row_ptr, #2
+        wrword  color_val, row_ptr
+        add     row_ptr, #2
+        wrword  color_val, row_ptr
+        add     row_ptr, #2
+        wrword  color_val, row_ptr
+        add     row_ptr, #2
+        wrword  color_val, row_ptr
+
+        ' Move to next row (add row stride to cell_origin)
+        add     cell_origin, row_stride
+
+        djnz    row_count, #.row_loop
+
+        ' Next cell
+        djnz    pb, #.cell_loop
+
+  END
 
 PRI get_cell_origin(row, col, px_ptr, py_ptr) | temp_row, temp_col, px, py
 '' Calculate pixel buffer origin for a sensor cell based on orientation
@@ -551,6 +628,26 @@ PRI init_color_lut() | i, normalized, r, g, b, color
     color_lut[i] := color
 
   debug("  Color LUT ready", 13, 10)
+
+PRI init_cell_origin_lut() | row, col, sensor_idx, px, py, pixel_offset
+'' Build cell origin lookup table for fast PASM rendering
+'' Pre-computes pixel buffer offset for each sensor cell's top-left corner
+'' This allows PASM render to skip orientation math per-frame
+
+  debug("  Building cell origin LUT (64 entries)...", 13, 10)
+
+  repeat row from 0 to 7
+    repeat col from 0 to 7
+      sensor_idx := (row * 8) + col
+
+      ' Calculate pixel coordinates using existing orientation logic
+      get_cell_origin(row, col, @px, @py)
+
+      ' Convert to pixel buffer WORD offset
+      pixel_offset := (py * WIDTH) + px
+      cell_origin_lut[sensor_idx] := pixel_offset
+
+  debug("  Cell origin LUT ready", 13, 10)
 
 PRI init_display()
 '' Initialize SSD1351 OLED controller with optimized settings
