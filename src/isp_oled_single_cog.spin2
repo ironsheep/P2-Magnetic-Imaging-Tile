@@ -98,7 +98,6 @@ VAR
   LONG  frame_count       ' Total frames displayed
   LONG  orientation       ' Current display orientation (0-3)
   LONG  base_pin          ' Base pin for OLED interface
-  LONG  bitrev_lut[256]   ' Bit-reverse lookup table for SPI
 
   ' Frame timing measurements (in system clock cycles)
   LONG  last_frame_cycles ' Cycles taken for last frame display
@@ -308,13 +307,6 @@ PRI init_hardware() | clk_period, temp, i
 
   debug("OLED Single-COG: Initializing hardware...", 13, 10)
 
-  ' Build bit-reverse lookup table (copied from working driver)
-  debug("  Building bit-reverse LUT...", 13, 10)
-  repeat i from 0 to 255
-    temp := i << 24
-    temp REV= 31
-    bitrev_lut[i] := temp
-
   ' Configure GPIO pins (CS, DC, RST)
   PINHIGH(pin_cs)    ' CS high (deselected)
   PINLOW(pin_dc)     ' DC low (default to command mode)
@@ -452,12 +444,16 @@ PRI send_data(data)
   spi_write(data)
   PINHIGH(pin_cs)  ' Deselect after data
 
-PRI spi_write(value)
-'' Send byte via Smart Pin SPI (COPIED EXACTLY FROM WORKING DRIVER)
+PRI spi_write(value) | reversed
+'' Send byte via Smart Pin SPI using inline REV instruction
 '' @param value - byte to send
 
-  ' Load pre-computed bit-reversed value
-  WYPIN(pin_mosi, bitrev_lut[value & $FF])
+  ' Bit-reverse the value inline (replaces LUT lookup)
+  reversed := (value & $FF) << 24
+  reversed REV= 31
+
+  ' Load bit-reversed value
+  WYPIN(pin_mosi, reversed)
 
   ' Trigger 8 clock pulses
   WYPIN(pin_sclk, 8)
@@ -465,7 +461,7 @@ PRI spi_write(value)
   ' Wait for transmission complete
   repeat until PINR(pin_sclk)
 
-PRI spi_write_fast(value)
+PRI spi_write_fast(value) | reversed
 '' Send byte via Smart Pin SPI - OPTIMIZED (no wait between consecutive bytes)
 '' @param value - byte to send
 '' NOTE: Caller must wait for final transmission to complete
@@ -473,8 +469,12 @@ PRI spi_write_fast(value)
   ' Wait for previous transmission to complete before loading new data
   repeat until PINR(pin_sclk)
 
-  ' Load pre-computed bit-reversed value
-  WYPIN(pin_mosi, bitrev_lut[value & $FF])
+  ' Bit-reverse the value inline (replaces LUT lookup)
+  reversed := (value & $FF) << 24
+  reversed REV= 31
+
+  ' Load bit-reversed value
+  WYPIN(pin_mosi, reversed)
 
   ' Trigger 8 clock pulses
   WYPIN(pin_sclk, 8)
