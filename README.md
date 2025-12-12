@@ -4,7 +4,9 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A Propeller 2 (P2) implementation for interfacing with the SparkFun Magnetic Imaging Tile V3, providing real-time magnetic field visualization and high-speed data acquisition.  I'm using the project as my playground, having CLAUDE implement all of the code itself. I'm using this project as a means to dial in the types of information available for download from our P2 Knowledge Base.
+A Propeller 2 (P2) implementation for interfacing with the SparkFun Magnetic Imaging Tile V3, providing real-time magnetic field visualization and high-speed data acquisition.  I'm using the project as my playground, having CLAUDE implement all of the code itself. 
+
+**NOTE**: *I'm using this project as a means to dial in the types of information available for download from our P2 Knowledge Base.*
 
 ## Overview
 
