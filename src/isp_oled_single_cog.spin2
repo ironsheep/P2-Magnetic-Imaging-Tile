@@ -92,6 +92,10 @@ CON
 
 OBJ
   fifo : "isp_frame_fifo_manager"
+  stack_check : "isp_stack_check"  ' Stack overflow detection utility
+
+CON { stack configuration }
+  OLED_STACK_SIZE_LONGS = 128      ' Stack size for OLED display COG (increased from 64 - deep call chains)
 
 VAR
   LONG  cog_id            ' COG ID (-1 = not running)
@@ -124,8 +128,10 @@ VAR
   ' Pre-computed at init based on orientation
   WORD  cell_origin_lut[64]
 
-  ' COG stack (64 longs per P2KB recommendations)
-  LONG  display_cog_stack[64]
+DAT { OLED display COG stack with overflow detection }
+  ' Stack for OLED COG - placed in DAT with sentinel mark for overflow detection
+  display_cog_stack   LONG    0[OLED_STACK_SIZE_LONGS]
+  display_stack_mark  LONG    stack_check.DO_NOT_WRITE_MARK   ' Sentinel - overflow if overwritten
 
 DAT
   ' Remap register values for each orientation (Corrected mapping - Nov 2025)
@@ -160,6 +166,10 @@ PUB init(oled_base_pin) : success
   pin_rst  := base_pin + OFFSET_RST
 
   debug("OLED: Initializing hardware on pin group ", udec(base_pin), "...", 13, 10)
+  debug("OLED VAR addresses:", 13, 10)
+  debug("  pixel_buffer: ", uhex_long(@pixel_buffer), " to ", uhex_long(@pixel_buffer + 32767), 13, 10)
+  debug("  color_lut:    ", uhex_long(@color_lut), " to ", uhex_long(@color_lut + 8191), 13, 10)
+  debug("  cell_origin:  ", uhex_long(@cell_origin_lut), " to ", uhex_long(@cell_origin_lut + 127), 13, 10)
   init_hardware()
   init_color_lut()
   init_cell_origin_lut()
@@ -193,6 +203,9 @@ PUB start(oled_base_pin, oled_orientation) : success
   pin_rst  := base_pin + OFFSET_RST
 
   debug("OLED Single-COG: Starting on pin group ", udec(base_pin), "...", 13, 10)
+
+  ' Prepare stack for overflow detection
+  stack_check.prepStackForCheck(@display_cog_stack, OLED_STACK_SIZE_LONGS)
 
   ' Start background COG - it will initialize its own hardware
   debug("OLED Single-COG: Launching display COG...", 13, 10)
@@ -341,8 +354,8 @@ PUB display_frame_fast(framePtr) | start_cycles, end_cycles, elapsed_cycles
     debug("  pixel_buffer[128] = ", uhex(WORD[@pixel_buffer][128]), 13, 10)
 
   ' Phase 2: Set full-screen window and stream all pixels via PASM
-  ' Use raw window without ROW_OFFSET (pixel buffer is already in display order)
-  set_window_raw(0, 0, WIDTH - 1, HEIGHT - 1)
+  ' Apply hardware offset (ROW_OFFSET compensates for SSD1351 RAM-to-pixel mapping)
+  set_window(0, 0, WIDTH - 1, HEIGHT - 1)
   stream_pixel_buffer()
 
   ' End timing measurement and update statistics
@@ -376,6 +389,14 @@ PRI render_to_pixel_buffer(framePtr) | frame_ptr, lut_ptr, origin_lut_ptr, buf_p
   buf_ptr := @pixel_buffer
   cell_count := 64                    ' 8x8 grid = 64 cells
   row_stride := WIDTH * 2             ' Bytes per pixel buffer row (128 * 2)
+
+  ' DIAGNOSTIC: Log buffer addresses on first frame to detect corruption
+  if total_frames_timed == 0
+    debug("OLED PASM addresses:", 13, 10)
+    debug("  pixel_buffer: ", uhex_long(buf_ptr), " to ", uhex_long(buf_ptr + 32767), 13, 10)
+    debug("  color_lut:    ", uhex_long(lut_ptr), " to ", uhex_long(lut_ptr + 8191), 13, 10)
+    debug("  cell_origin:  ", uhex_long(origin_lut_ptr), " to ", uhex_long(origin_lut_ptr + 127), 13, 10)
+    debug("  frame_ptr:    ", uhex_long(frame_ptr), 13, 10)
 
   ORG
         ' Register usage:
@@ -915,32 +936,38 @@ PRI display_loop() | framePtr
 
   ' Background COG initializes its own hardware (owns its pins)
   debug("OLED Single-COG: Initializing hardware in background COG...", 13, 10)
+
+  ' Show VAR buffer addresses to verify memory layout
+  debug("OLED VAR addresses:", 13, 10)
+  debug("  pixel_buffer: ", uhex_long(@pixel_buffer), " to ", uhex_long(@pixel_buffer + 32767), 13, 10)
+  debug("  color_lut:    ", uhex_long(@color_lut), " to ", uhex_long(@color_lut + 8191), 13, 10)
+  debug("  cell_origin:  ", uhex_long(@cell_origin_lut), " to ", uhex_long(@cell_origin_lut + 127), 13, 10)
+
   init_hardware()
+  init_color_lut()
+  init_cell_origin_lut()
   debug("OLED Single-COG: Display loop started", 13, 10)
 
   repeat
-    ' Dequeue frame from OLED FIFO
-    debug("OLED: [DEQ] Calling dequeue(FIFO_OLED)...", 13, 10)
+    ' Check for stack overflow (halts with debug message if detected)
+    stack_check.checkStack(@display_cog_stack, OLED_STACK_SIZE_LONGS)
+
+    ' Dequeue frame from OLED FIFO (blocking)
     framePtr := fifo.dequeue(fifo.FIFO_OLED)
-    debug("OLED: [DEQ] Returned from dequeue, ptr=", uhex_long(framePtr), 13, 10)
 
     if framePtr == 0
       ' No frame available, wait and retry
-      debug("OLED: No frame (timeout), waiting 5ms...", 13, 10)
       WAITMS(5)
       next
 
-    ' Display frame using the tested, working display_frame() method
-    debug("OLED: Rendering frame with display_frame()...", 13, 10)
+    ' Display frame using cell-by-cell method (display_frame_fast has offset issues)
     display_frame(framePtr)
 
     ' Release frame back to pool
-    debug("OLED: Releasing frame ptr=", uhex_long(framePtr), 13, 10)
     fifo.releaseFrame(framePtr)
 
     ' Increment frame count
     frame_count++
-    debug("OLED: Frame ", udec(frame_count), " rendered", 13, 10)
 
 PRI send_pixel_data(color)
 '' Send RGB565 pixel data (2 bytes) to OLED via SPI (USES WORKING SPI CODE)

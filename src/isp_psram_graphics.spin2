@@ -98,7 +98,7 @@ PUB SmoothLine(x1_, y1_, x2_, y2_, diameter_, color_)
 '' ISP Custom Drawing Methods
 '' =====================================
 
-PUB FillRect(rx1, ry1, rx2, ry2, rcolor) | ry, rx, psram_addr
+PUB FillRect(rx1, ry1, rx2, ry2, rcolor) | ry, rx, psram_addr, row_start, row_end
 '' Fill a rectangle with solid color
 '' Much faster than individual pixels for sensor grid display
 
@@ -119,8 +119,6 @@ PUB FillRect(rx1, ry1, rx2, ry2, rcolor) | ry, rx, psram_addr
   ry1 := 0 #> ry1 <# (mapy-1)
   ry2 := 0 #> ry2 <# (mapy-1)
 
-  debug("FillRect: (", UDEC(rx1), ",", UDEC(ry1), ")-(", UDEC(rx2), ",", UDEC(ry2), ") clr=", UHEX_LONG(rcolor), 13, 10)
-
   ' Fill the row buffer with the color
   longfill(@row[rx1], rcolor, rx2-rx1+1)
 
@@ -130,9 +128,7 @@ PUB FillRect(rx1, ry1, rx2, ry2, rcolor) | ry, rx, psram_addr
     long[psram_ptr][0] := @row[rx1]      ' HUB source
     long[psram_ptr][1] := psram_addr     ' PSRAM destination
     long[psram_ptr][2] := -(rx2-rx1+1)   ' Negative = HUB to PSRAM
-    debug("FillRect: Waiting for PSRAM completion, ptr=", UHEX_LONG(psram_ptr), " cmd[2]=", SDEC_LONG(long[psram_ptr][2]), 13, 10)
     repeat while long[psram_ptr][2]      ' Wait for completion
-    debug("FillRect: PSRAM complete", 13, 10)
 
 PUB DrawHLine(lx1, lx2, ly, lcolor)
 '' Draw a horizontal line - optimized version
