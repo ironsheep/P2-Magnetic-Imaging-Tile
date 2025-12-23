@@ -17,6 +17,10 @@ CON
                            ' false = normal high-speed operation
   SLOW_SCAN_MS = 10_000    ' Delay between scans in slow mode (10 seconds)
 
+  ADC_VERIFY_MODE = true   ' true = run ADC verification (2 scans, log values, then stop)
+                           ' false = normal operation
+                           ' NOTE: When true, overrides TEST_MODE and SLOW_SCAN_MODE
+
   ' Pin group assignments
   HDMI_BASE_PIN   = 0
   SENSOR_BASE_PIN = 8
@@ -110,8 +114,12 @@ PUB main() | success
   else
     debug("  Sensor interface ready", 13, 10)
 
-    ' Set acquisition mode based on TEST_MODE
-    if TEST_MODE
+    ' Set acquisition mode based on mode flags
+    ' ADC_VERIFY_MODE takes priority over other modes
+    if ADC_VERIFY_MODE
+      sensor.set_acquisition_mode(sensor.MODE_ADC_VERIFY)
+      debug("  Sensor set to ADC VERIFY mode (2 scans then stop)", 13, 10)
+    elseif TEST_MODE
       sensor.set_acquisition_mode(sensor.MODE_TEST_PATTERN)
       debug("  Sensor set to TEST PATTERN mode", 13, 10)
     else

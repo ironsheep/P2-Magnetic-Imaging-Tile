@@ -42,11 +42,11 @@ CON { tile sensor constants }
     SUBTILES = 4                        ' 4 quadrants
     SENSORS_PER_SUBTILE = 16            ' 4x4 per subtile
 
-    ' ADC configuration - AD7940 (14-bit ADC, 16-bit SPI frame)
-    ' Frame format: 2 leading zeros + 14-bit data = 16 bits total
-    ADC_BITS = 14                       ' AD7940 is 14-bit ADC
-    ADC_MAX_VALUE = (1 << ADC_BITS) - 1 ' Maximum ADC reading (16383)
-    SPI_TRANSFER_BITS = 16              ' Total SPI transfer size (2 leading + 14 data)
+    ' ADC configuration - AD7680 (16-bit ADC, 24-bit SPI frame)
+    ' Frame format: 4 leading zeros + 16-bit data + 4 trailing zeros = 24 bits total
+    ADC_BITS = 16                       ' AD7680 is 16-bit ADC
+    ADC_MAX_VALUE = (1 << ADC_BITS) - 1 ' Maximum ADC reading (65535)
+    SPI_TRANSFER_BITS = 24              ' Total SPI transfer size (4 leading + 16 data + 4 trailing)
 
     ' Timing constants @ 250 MHz system clock (1 clock = 4ns)
     SENSOR_SETTLE_DELAY = 500           ' 2000ns (2µs) for analog settling - used for first sensor only
@@ -90,6 +90,7 @@ CON { acquisition modes }
     MODE_HIGH_SPEED                 ' = 2
     MODE_DEBUG                      ' = 3
     MODE_TEST_PATTERN               ' = 4
+    MODE_ADC_VERIFY                 ' = 5 - Two scans with full logging for logic analyzer comparison
 
 DAT { sensor COG stack with overflow detection }
 
@@ -329,6 +330,11 @@ PRI sensor_loop() | framePtr, patternPtr, subtile_idx, sensor_idx, subtile_num, 
                 ' Acquire live sensor data
                 acquire_sensor_frame()
 
+            MODE_ADC_VERIFY:
+                ' ADC verification mode: 2 scans with full logging, then stop
+                adc_verify_scan()
+                acquisition_mode := MODE_STOPPED  ' Auto-stop after verification
+
             OTHER:
                 waitms(10)
 
@@ -480,12 +486,12 @@ PRI acquire_sensor_frame() | framePtr, subtile_idx, sensor_in_subtile, subtile_n
         ' Wait for SPI to complete
         waitse1
 
-        ' Read and process sensor 0 data (AD7940: 1 leading + 14 data + 1 trailing)
+        ' Read and process sensor 0 data (AD7680: 4 leading + 16 data + 4 trailing)
         rdpin   sensor_val, #ABS_PIN_MISO
         drvh    #ABS_PIN_CS
         rev     sensor_val
-        shr     sensor_val, #1              ' Shift out 1 trailing zero
-        and     sensor_val, ##$3FFF         ' Mask to 14 bits
+        shr     sensor_val, #4              ' Shift out 4 trailing zeros
+        and     sensor_val, ##$FFFF         ' Mask to 16 bits
 
         ' Store sensor 0 using mapping lookup
         mov     subtile_idx, #0
@@ -521,12 +527,12 @@ PRI acquire_sensor_frame() | framePtr, subtile_idx, sensor_in_subtile, subtile_n
         ' Wait for SPI to complete
         waitse1
 
-        ' Read and process current sensor data (AD7940: 1 leading + 14 data + 1 trailing)
+        ' Read and process current sensor data (AD7680: 4 leading + 16 data + 4 trailing)
         rdpin   sensor_val, #ABS_PIN_MISO
         drvh    #ABS_PIN_CS
         rev     sensor_val
-        shr     sensor_val, #1              ' Shift out 1 trailing zero
-        and     sensor_val, ##$3FFF         ' Mask to 14 bits
+        shr     sensor_val, #4              ' Shift out 4 trailing zeros
+        and     sensor_val, ##$FFFF         ' Mask to 16 bits
 
         ' Store using mapping lookup
         call    #.store_sensor_value
@@ -545,12 +551,12 @@ PRI acquire_sensor_frame() | framePtr, subtile_idx, sensor_in_subtile, subtile_n
         ' Wait for SPI to complete (no counter advance - we're done)
         waitse1
 
-        ' Read and process final sensor data (AD7940: 1 leading + 14 data + 1 trailing)
+        ' Read and process final sensor data (AD7680: 4 leading + 16 data + 4 trailing)
         rdpin   sensor_val, #ABS_PIN_MISO
         drvh    #ABS_PIN_CS
         rev     sensor_val
-        shr     sensor_val, #1              ' Shift out 1 trailing zero
-        and     sensor_val, ##$3FFF         ' Mask to 14 bits
+        shr     sensor_val, #4              ' Shift out 4 trailing zeros
+        and     sensor_val, ##$FFFF         ' Mask to 16 bits
 
         ' Store final sensor
         call    #.store_sensor_value
@@ -573,6 +579,101 @@ PRI acquire_sensor_frame() | framePtr, subtile_idx, sensor_in_subtile, subtile_n
 
     ' Minimal delay - decimator debug removed so it can keep up
     waitus(10)                          ' 10 us gap - ~1,370 fps max
+
+PRI adc_verify_scan() | scan_num, sensor_num, raw_value, processed_value, event_config
+'' ADC Verification Mode: Perform exactly 2 full scans with detailed logging
+'' Reads all 64 sensors twice, logging raw and processed values for each
+'' Used to compare against logic analyzer captures for bit extraction validation
+''
+'' Output format per sensor:
+''   "VERIFY: Scan N Sensor NN: raw=XXXX proc=DDDD"
+'' Where:
+''   N = scan number (1 or 2)
+''   NN = sensor number (0-63, in hardware read order)
+''   XXXX = raw 16-bit value from SPI (before processing)
+''   DDDD = processed 14-bit value (after REV, shift, mask)
+
+  debug("=== ADC VERIFY MODE START ===", 13, 10)
+  debug("Performing 2 scans of 64 sensors each", 13, 10)
+  debug("Compare these values with logic analyzer capture", 13, 10)
+  debug(" ", 13, 10)
+
+  ' Build event configuration for waitse1
+  event_config := %01_000000 | ABS_PIN_SCLK
+
+  repeat scan_num from 1 to 2
+    debug("--- SCAN ", udec(scan_num), " ---", 13, 10)
+
+    ' Reset counter to sensor 0
+    org
+      drvl    #ABS_PIN_CLRB
+      waitx   #COUNTER_SETUP_DELAY
+      drvh    #ABS_PIN_CLRB
+      waitx   #COUNTER_SETUP_DELAY
+    end
+
+    ' Advance to sensor 1 (first active sensor)
+    org
+      drvh    #ABS_PIN_CCLK
+      waitx   #COUNTER_SETUP_DELAY
+      drvl    #ABS_PIN_CCLK
+      waitx   #COUNTER_SETUP_DELAY
+    end
+
+    ' Read all 64 sensors
+    repeat sensor_num from 0 to 63
+      ' Configure event for this read
+      org
+        setse1  event_config
+      end
+
+      ' Start ADC conversion (CS low)
+      org
+        drvl    #ABS_PIN_CS
+        waitx   #SENSOR_SETTLE_DELAY
+      end
+
+      ' Trigger SPI clock pulses and wait for completion
+      org
+        wypin   #SPI_TRANSFER_BITS, #ABS_PIN_SCLK
+        akpin   #ABS_PIN_SCLK
+        waitse1
+      end
+
+      ' Read raw value from MISO
+      org
+        rdpin   raw_value, #ABS_PIN_MISO
+        drvh    #ABS_PIN_CS
+      end
+
+      ' Process the raw value (same logic as acquire_sensor_frame)
+      ' AD7680: MSB-first, but P_SYNC_RX receives LSB-first
+      ' After rdpin, data is left-justified in 32-bit register
+      ' REV reverses all 32 bits, then we extract the 16-bit value
+      ' Frame: 4 leading zeros + 16 data bits + 4 trailing zeros
+      processed_value := raw_value
+      org
+        rev     processed_value
+        shr     processed_value, #4          ' Shift out 4 trailing zeros
+        and     processed_value, ##$FFFF     ' Mask to 16 bits
+      end
+
+      ' Log both raw and processed values
+      debug("VERIFY: S", udec(scan_num), " Sensor ", udec_(sensor_num), ": raw=", uhex_(raw_value), " proc=", udec_(processed_value), 13, 10)
+
+      ' Advance counter to next sensor (except after last sensor)
+      if sensor_num < 63
+        org
+          drvh    #ABS_PIN_CCLK
+          waitx   #COUNTER_SETUP_DELAY
+          drvl    #ABS_PIN_CCLK
+          waitx   #COUNTER_SETUP_DELAY
+        end
+
+    debug(" ", 13, 10)
+
+  debug("=== ADC VERIFY MODE COMPLETE ===", 13, 10)
+  debug("Sensor driver now STOPPED", 13, 10)
 
 DAT { test pattern digit data - 8x8 WORD arrays in HUB memory }
 

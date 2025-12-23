@@ -87,8 +87,8 @@ CON
 
   ' Color mapping ranges
   MIN_FIELD   = 0         ' Minimum field value
-  MAX_FIELD   = 16383     ' Maximum field value (14-bit AD7940 ADC)
-  MID_FIELD   = 8192      ' Neutral field value (14-bit midpoint)
+  MAX_FIELD   = 65535     ' Maximum field value (16-bit AD7680 ADC)
+  MID_FIELD   = 32768     ' Neutral field value (16-bit midpoint)
 
 OBJ
   fifo : "isp_frame_fifo_manager"
