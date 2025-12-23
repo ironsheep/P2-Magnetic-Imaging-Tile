@@ -1,10 +1,53 @@
 # Magnetic Tile Sensor Mapping Test Protocol
 
+**Document Version:** 1.1
+**Last Updated:** 2025-12-23
+**Status:** Updated with orientation terminology and test results
+
 ## Purpose
 Verify that the hardware sensor positions match our documented mapping by using controlled magnetic field testing with visual feedback.
 
 ## Test Principle
 By holding the counter at specific values, we can continuously read a single sensor while physically moving a magnet across the tile. The OLED display will show which pixel responds, allowing us to verify the sensor's physical location matches our mapping documentation.
+
+## Physical Orientation Reference
+
+**CRITICAL: All position references use this orientation:**
+
+```
+                    TOP (away from connector)
+              ┌─────┬─────┬─────┬─────┬─────┬─────┬─────┬─────┐
+              │ TL  │     │     │     │     │     │     │ TR  │  row 0
+              ├─────┼─────┼─────┼─────┼─────┼─────┼─────┼─────┤
+              │     │     │     │     │     │     │     │     │  row 1
+              │     │                 ...                │     │  ...
+              │     │     │     │     │     │     │     │     │  row 6
+              ├─────┼─────┼─────┼─────┼─────┼─────┼─────┼─────┤
+              │ BL  │     │     │     │     │     │     │ BR  │  row 7
+              └─────┴─────┴─────┴─────┴─────┴─────┴─────┴─────┘
+                col 0                                   col 7
+                    BOTTOM (connector edge)
+```
+
+**Terminology:**
+- **Connector Edge** = BOTTOM of the tile (where the ribbon cable attaches)
+- **Top-Left (TL)** = Upper-left corner when viewing with connector at bottom
+- **Top-Right (TR)** = Upper-right corner when viewing with connector at bottom
+- **Bottom-Left (BL)** = Lower-left corner (near connector, left side)
+- **Bottom-Right (BR)** = Lower-right corner (near connector, right side)
+
+**Quadrant Layout (Physical):**
+```
+┌────────────┬────────────┐
+│  Upper-Left│ Upper-Right│   ← TOP (rows 0-3)
+│   (UL)     │    (UR)    │
+├────────────┼────────────┤
+│ Lower-Left │Lower-Right │   ← BOTTOM (rows 4-7)
+│   (LL)     │    (LR)    │
+└────────────┴────────────┘
+   cols 0-3     cols 4-7
+        CONNECTOR EDGE
+```
 
 ## Test Setup
 
@@ -44,24 +87,35 @@ PUB test_single_sensor(sensor_num) | value
 ### Phase 1: Quadrant Verification
 Verify which physical quadrant each EN signal controls:
 
+**Hardware Reading Order (from counter bit decoding):**
+```
+Counter Bits [5:4] → EN Signal → Physical Quadrant
+     00 (0-15)    →    EN1    → Upper-Left  (UL)
+     01 (16-31)   →    EN2    → Upper-Right (UR)
+     10 (32-47)   →    EN3    → Lower-Left  (LL)
+     11 (48-63)   →    EN4    → Lower-Right (LR)
+```
+
+**Note:** Software subtile_order array remaps this to: UL → UR → LL → LR for anti-crosstalk
+
 1. **Set counter to 0** (EN1, Channel 0)
    - Move magnet across entire tile
-   - Verify response only in upper-left quadrant
+   - Verify response only in **Upper-Left** quadrant (physical rows 0-3, cols 0-3)
    - Document which physical sensor responds
 
-2. **Set counter to 16** (EN2, Channel 0)
+2. **Set counter to 16** (EN3, Channel 0)
    - Move magnet across entire tile
-   - Verify response only in upper-right quadrant
+   - Verify response only in **Lower-Left** quadrant (physical rows 4-7, cols 0-3)
    - Document which physical sensor responds
 
-3. **Set counter to 32** (EN3, Channel 0)
+3. **Set counter to 32** (EN2, Channel 0)
    - Move magnet across entire tile
-   - Verify response only in lower-left quadrant
+   - Verify response only in **Upper-Right** quadrant (physical rows 0-3, cols 4-7)
    - Document which physical sensor responds
 
 4. **Set counter to 48** (EN4, Channel 0)
    - Move magnet across entire tile
-   - Verify response only in lower-right quadrant
+   - Verify response only in **Lower-Right** quadrant (physical rows 4-7, cols 4-7)
    - Document which physical sensor responds
 
 ### Phase 2: Detailed Mapping Verification
@@ -195,6 +249,56 @@ If completely unknown mapping:
 2. Systematically probe each physical position with magnet
 3. Record which counter value responds at each position
 4. Build complete mapping table from scratch
+
+## Test Results Log
+
+### Test Session: 2025-12-23
+
+**Configuration:**
+- P2 @ 250 MHz
+- AD7940 14-bit ADC (external)
+- SLOW_SCAN_MODE enabled (2 second intervals)
+- 90° CCW rotation correction applied
+
+#### Full Tile Corner Test (Post-Rotation)
+
+| Physical Corner | Expected Buffer Position | Actual Buffer Position | Status |
+|----------------|-------------------------|----------------------|--------|
+| Top-Left       | Row 0, Cols 0-1         | Row 0, Cols 0-1      | PASS   |
+| Top-Right      | Row 0, Cols 6-7         | Row 0, Cols 6-7      | PASS   |
+| Bottom-Right   | Row 7, Cols 6-7         | Row 7, Cols 6-7      | PASS   |
+| Bottom-Left    | Row 7, Cols 0-1         | Row 7, Cols 0-1      | PASS   |
+
+**Result:** Full tile rotation correction working correctly.
+
+#### Upper-Left Quadrant Corner Test
+
+| Quadrant Corner | Expected Position | Actual Position | Status |
+|----------------|-------------------|-----------------|--------|
+| Top-Left       | Row 0, Cols 0-1   | Row 0, Cols 0-1 | PASS   |
+| Top-Right      | Row 0, Cols 2-3   | Row 0, Cols 2-3 | PASS   |
+| Bottom-Right   | Row 3, Cols 2-3   | Row 5, Cols 2-3 | FAIL   |
+| Bottom-Left    | Row 3, Cols 0-1   | Row 5, Cols 0-1 | FAIL   |
+
+**Finding:** Within-quadrant mapping has vertical offset error. Bottom half of quadrant appears ~2 rows lower than expected.
+
+**Root Cause Analysis:**
+The `pixel_order[]` lookup table doesn't match the actual hardware channel-to-position mapping from the schematic. The schematic shows:
+```
+Counter  Channel  Physical Position (Row,Col within quadrant)
+0        0        (2,3)
+1        1        (3,3)
+2        2        (2,2)
+...
+8        8        (1,0)
+9        9        (0,0)
+...
+```
+
+Current `pixel_order[]`: `26, 27, 18, 19, 10, 11, 2, 3, 1, 0, 9, 8, 17, 16, 25, 24`
+Required mapping (from schematic): Different pattern
+
+**Next Step:** Derive unified 64-entry mapping table from hardware schematic that combines subtile ordering, channel mapping, and rotation correction into a single lookup.
 
 ## Notes
 
