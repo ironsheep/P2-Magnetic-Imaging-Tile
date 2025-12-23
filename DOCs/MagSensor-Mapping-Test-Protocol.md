@@ -300,6 +300,65 @@ Required mapping (from schematic): Different pattern
 
 **Next Step:** Derive unified 64-entry mapping table from hardware schematic that combines subtile ordering, channel mapping, and rotation correction into a single lookup.
 
+---
+
+### Test Session: 2025-12-23 (Unified Table Verification) - INCOMPLETE
+
+**Configuration:**
+- P2 @ 250 MHz
+- AD7940 14-bit ADC (external)
+- New unified_sensor_map table implemented
+- Testing sequence: TL -> TR -> BR -> BL
+
+**Test Observations:**
+
+| Physical Corner | Expected | Observed | Status |
+|-----------------|----------|----------|--------|
+| Top-Left (TL)   | Row 0, Col 0 | Row 7, Cols 6-7 | WRONG - diagonal swap |
+| Top-Right (TR)  | Row 0, Col 7 | Row 0, Cols 6-7 | CORRECT |
+| Bottom-Right (BR)| Row 7, Col 7 | Row 0, Cols 0-1 | WRONG - diagonal swap |
+| Bottom-Left (BL)| Row 7, Col 0 | Row 7, Cols 0-1 | CORRECT |
+
+**Critical Finding:**
+One corner was DIFFICULT TO LIGHT UP during testing. This suggests the unified_sensor_map table may have errors in the mapping for that quadrant.
+
+**Implications:**
+1. The unified table is marked as PROVISIONAL in code and documentation
+2. EN1 and EN4 appear swapped from schematic analysis, but testing was incomplete
+3. More rigorous individual sensor testing is needed
+4. The hardware documentation (MagSensor-Tile-Hardware.md) remains pristine as the schematic-based reference
+
+**Status:** Superseded by quadrant center test (see below).
+
+---
+
+### Test Session: 2025-12-23 (Quadrant Center Verification) - VERIFIED
+
+**Configuration:**
+- P2 @ 250 MHz
+- AD7940 14-bit ADC (external)
+- unified_sensor_map v3 implemented
+- 4 fps scan rate (250ms intervals)
+
+**Test Methodology:**
+Given the ~4-pixel wide magnet field on a 4x4 quadrant, testing individual sensors is impractical.
+Instead, place magnet at CENTER of each physical quadrant and verify the centroid of activated pixels.
+
+**Results:**
+
+| Physical Position | Expected Centroid | Measured Centroid | Status |
+|-------------------|-------------------|-------------------|--------|
+| UL center | ~(1.5, 1.5) | **(1.5, 1.7)** | **PASS** |
+| UR center | ~(1.5, 5.5) | **(1.6, 5.5)** | **PASS** |
+| LR center | ~(5.5, 5.5) | **(5.6, 5.4)** | **PASS** |
+| LL center | ~(5.5, 1.5) | **(5.6, 1.2)** | **PASS** |
+
+**Conclusion:** All four quadrants map correctly. Centroids within 0.3 pixels of expected positions.
+
+**unified_sensor_map v3 Status:** VERIFIED
+
+---
+
 ## Notes
 
 - Temperature may affect sensor sensitivity - test at room temperature

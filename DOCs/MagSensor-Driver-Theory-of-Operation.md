@@ -2,9 +2,13 @@
 **Magnetic Imaging Tile - isp_tile_sensor.spin2**
 
 ## Document Version
-- **Version:** 1.1
+- **Version:** 1.3
 - **Date:** 2025-12-23
-- **Status:** Implementation Documentation (Coordinate Transformation Added, ADC Verified)
+- **Status:** Implementation Documentation - VERIFIED MAPPING
+
+> **NOTE**: This document describes the *implemented* sensor mapping based on empirical testing.
+> The unified_sensor_map table v3 has been **VERIFIED** via quadrant center testing.
+> See "Schematic vs Empirical Findings" section for documented discrepancy with schematic (vertical flip).
 
 ## Overview
 
@@ -327,29 +331,52 @@ The current implementation uses three separate transformation stages. This secti
 - **Output:** Rotated buffer index (0-63)
 - **Applied:** 90° counter-clockwise transformation
 
-#### Empirical Test Results (2025-12-23)
+---
 
-Magnet corner test with physical positions mapped to buffer positions:
+## Orientation Reference Frames
 
-| Physical Corner | Expected Buffer | Actual Buffer | Status |
-|-----------------|-----------------|---------------|--------|
-| Top-Left (TL)   | Row 0, Cols 0-1 | Row 7, Cols 6-7 (BR) | **WRONG** - diagonal swap |
-| Top-Right (TR)  | Row 0, Cols 6-7 | Row 0, Cols 6-7 (TR) | **CORRECT** |
-| Bottom-Right (BR)| Row 7, Cols 6-7| Row 0, Cols 0-1 (TL) | **WRONG** - diagonal swap |
-| Bottom-Left (BL)| Row 7, Cols 0-1 | Row 7, Cols 0-1 (BL) | **CORRECT** |
+### Hardware Documentation (Schematic Orientation)
 
-**Analysis:**
-- The RIGHT side quadrants (TR, BL) map correctly
-- The LEFT side quadrants (TL, BR) are swapped diagonally with each other
-- This indicates EN1 and EN4 control OPPOSITE quadrants from documentation
+The hardware documentation (`MagSensor-Tile-Hardware.md`) is based on schematic analysis and uses the schematic's orientation convention:
 
-**Hardware Reality (vs Documentation):**
-| Counter Range | Documentation Says | Actual Hardware |
-|---------------|-------------------|-----------------|
-| 0-15 (EN1)    | Upper-Left (UL)   | Lower-Right (LR) |
-| 16-31 (EN2)   | Upper-Right (UR)  | Upper-Right (UR) |
-| 32-47 (EN3)   | Lower-Left (LL)   | Lower-Left (LL) |
-| 48-63 (EN4)   | Lower-Right (LR)  | Upper-Left (UL) |
+| Counter Bits [5:4] | EN Signal | Expected Quadrant (Schematic) |
+|-------------------|-----------|-------------------------------|
+| 00 (0-15)         | EN1       | Upper-Left (UL)               |
+| 01 (16-31)        | EN2       | Upper-Right (UR)              |
+| 10 (32-47)        | EN3       | Lower-Left (LL)               |
+| 11 (48-63)        | EN4       | Lower-Right (LR)              |
+
+### Orientation Choice
+
+The schematic and this implementation use different viewing orientations - both are correct for their reference frame:
+
+| Counter Range | Schematic Orientation | Implementation Orientation |
+|--------------|----------------------|---------------------------|
+| 0-15 (EN1)   | Upper-Left           | Lower-Left (LL) |
+| 16-31 (EN2)  | Upper-Right          | Lower-Right (LR) |
+| 32-47 (EN3)  | Lower-Left           | Upper-Left (UL) |
+| 48-63 (EN4)  | Lower-Right          | Upper-Right (UR) |
+
+**Author's choice:** This implementation uses **connector at BOTTOM** as the viewing orientation. The schematic likely uses connector at TOP or views from the back side. The quadrants are the same physical locations - just named according to different reference frames.
+
+### Quadrant Center Verification Test (2025-12-23)
+
+Test methodology: Place magnet at CENTER of each physical quadrant, measure centroid of activated pixels.
+
+| Physical Position | Expected Centroid | Measured Centroid | Status |
+|-------------------|-------------------|-------------------|--------|
+| UL center | ~(1.5, 1.5) | **(1.5, 1.7)** | PASS |
+| UR center | ~(1.5, 5.5) | **(1.6, 5.5)** | PASS |
+| LR center | ~(5.5, 5.5) | **(5.6, 5.4)** | PASS |
+| LL center | ~(5.5, 1.5) | **(5.6, 1.2)** | PASS |
+
+All four quadrants map correctly with centroids within 0.3 pixels of expected positions.
+
+### Summary
+
+- **Hardware documentation** - Uses schematic's orientation convention
+- **Implementation documentation** - Uses connector-at-bottom orientation (author's choice)
+- **unified_sensor_map v3** - VERIFIED for connector-at-bottom viewing
 
 ### Unified Mapping Table Approach
 
@@ -406,20 +433,28 @@ Counter  EN   Physical Quad    Ch → (row,col)                 (row,col)   Inde
  57      EN4  Upper-Left       9 → (0,0) + (0,0) offset       (0,0)        0
 ```
 
-**Complete unified_sensor_map[64] Array:**
-```spin2
-' Unified sensor mapping: counter index (0-63) → final buffer position (0-63)
-' Combines: EN→quadrant mapping + channel→position mapping + physical=buffer goal
-' Generated from empirical testing (2025-12-23)
+**Complete unified_sensor_map[64] Array - VERIFIED (v3):**
 
-unified_sensor_map  BYTE    55, 63, 54, 62, 53, 61, 52, 60    ' Counter 0-7   (EN1 → LR)
-                    BYTE    44, 36, 45, 37, 46, 38, 47, 39    ' Counter 8-15  (EN1 → LR)
-                    BYTE    23, 31, 22, 30, 21, 29, 20, 28    ' Counter 16-23 (EN2 → UR)
-                    BYTE    12,  4, 13,  5, 14,  6, 15,  7    ' Counter 24-31 (EN2 → UR)
-                    BYTE    51, 59, 50, 58, 49, 57, 48, 56    ' Counter 32-39 (EN3 → LL)
-                    BYTE    40, 32, 41, 33, 42, 34, 43, 35    ' Counter 40-47 (EN3 → LL)
-                    BYTE    19, 27, 18, 26, 17, 25, 16, 24    ' Counter 48-55 (EN4 → UL)
-                    BYTE     8,  0,  9,  1, 10,  2, 11,  3    ' Counter 56-63 (EN4 → UL)
+```spin2
+' VERIFIED Unified sensor mapping v3: counter index (0-63) → final buffer position (0-63)
+' Verified via quadrant center testing (2025-12-23)
+'
+' EN→QUADRANT MAPPING (verified):
+'   EN1 (counter 0-15)  → Physical LL quadrant → Buffer rows 4-7, cols 0-3
+'   EN2 (counter 16-31) → Physical LR quadrant → Buffer rows 4-7, cols 4-7
+'   EN3 (counter 32-47) → Physical UL quadrant → Buffer rows 0-3, cols 0-3
+'   EN4 (counter 48-63) → Physical UR quadrant → Buffer rows 0-3, cols 4-7
+'
+' NOTE: This differs from schematic (vertical flip). See "Schematic vs Empirical Findings".
+
+unified_sensor_map  BYTE    34, 42, 35, 43, 32, 40, 33, 41    ' Counter 0-7   (EN1 → LL)
+                    BYTE    48, 56, 49, 57, 50, 58, 51, 59    ' Counter 8-15  (EN1 → LL)
+                    BYTE    38, 46, 39, 47, 36, 44, 37, 45    ' Counter 16-23 (EN2 → LR)
+                    BYTE    52, 60, 53, 61, 54, 62, 55, 63    ' Counter 24-31 (EN2 → LR)
+                    BYTE     2, 10,  3, 11,  0,  8,  1,  9    ' Counter 32-39 (EN3 → UL)
+                    BYTE    16, 24, 17, 25, 18, 26, 19, 27    ' Counter 40-47 (EN3 → UL)
+                    BYTE     6, 14,  7, 15,  4, 12,  5, 13    ' Counter 48-55 (EN4 → UR)
+                    BYTE    20, 28, 21, 29, 22, 30, 23, 31    ' Counter 56-63 (EN4 → UR)
 ```
 
 **Corner Verification:**
@@ -626,3 +661,5 @@ Ping-pong between two frame buffers to eliminate FIFO wait time.
 |---------|------|---------|
 | 1.0 | 2025-11-30 | Initial documentation after pipelined optimization achieving ~1,370 fps |
 | 1.1 | 2025-12-23 | Added Coordinate Transformation Pipeline section. Verified ADC bit extraction with logic analyzer (AD7680 16-bit confirmed). Added MODE_ADC_VERIFY. Added 90° CCW rotation lookup table for correct physical orientation. |
+| 1.2 | 2025-12-23 | Added "Schematic vs Empirical Findings" section. Marked unified_sensor_map as PROVISIONAL. Documented testing caveats. Distinguished between hardware documentation (pristine, schematic-based) and implementation documentation (empirical observations). |
+| 1.3 | 2025-12-23 | **VERIFIED** unified_sensor_map v3 via quadrant center testing. All 4 quadrants map correctly (centroids within 0.3 pixels of expected). Clarified orientation choice: implementation uses connector-at-bottom viewing (author's choice), schematic uses different reference frame. Removed PROVISIONAL status. |

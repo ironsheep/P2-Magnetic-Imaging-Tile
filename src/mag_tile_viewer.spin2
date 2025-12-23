@@ -13,11 +13,11 @@ CON
   ' System modes
   TEST_MODE = false         ' true = generate test patterns, no decimation
                            ' false = normal operation with real sensor data
-  SLOW_SCAN_MODE = true    ' true = one scan every 10 seconds (for sensor testing)
+  SLOW_SCAN_MODE = true    ' true = one scan every SLOW_SCAN_MS (for sensor testing)
                            ' false = normal high-speed operation
-  SLOW_SCAN_MS = 10_000    ' Delay between scans in slow mode (10 seconds)
+  SLOW_SCAN_MS = 250       ' Delay between scans in slow mode (250ms = 4 fps for testing)
 
-  ADC_VERIFY_MODE = true   ' true = run ADC verification (2 scans, log values, then stop)
+  ADC_VERIFY_MODE = false  ' true = run ADC verification (2 scans, log values, then stop)
                            ' false = normal operation
                            ' NOTE: When true, overrides TEST_MODE and SLOW_SCAN_MODE
 

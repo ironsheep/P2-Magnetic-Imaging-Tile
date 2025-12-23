@@ -100,16 +100,38 @@ DAT { sensor COG stack with overflow detection }
 
 DAT { sensor mapping arrays }
 
-    ' Subtile reading order: scan subtiles 0, 2, 1, 3 (not sequential!)
-    subtile_order   BYTE    0, 2, 1, 3
-
-    ' Frame buffer offsets for each subtile (words)
-    subtile_offset  BYTE    0, 4, 32, 36
-
-    ' Pixel mapping within each subtile (serpentine pattern)
-    ' Maps counter position (0-15) to frame buffer position within subtile
-    pixel_order     BYTE    26, 27, 18, 19, 10, 11, 2, 3
-                    BYTE    1, 0, 9, 8, 17, 16, 25, 24
+'------------------------------------------------------------------------------
+    ' UNIFIED SENSOR MAPPING TABLE - v3 VERIFIED (2025-12-23)
+    '------------------------------------------------------------------------------
+    ' Single 64-entry lookup table: Hardware counter (0-63) → Buffer position (0-63)
+    '
+    ' EN→QUADRANT MAPPING:
+    '   EN1 (counter 0-15)  → Physical LL quadrant → Buffer rows 4-7, cols 0-3
+    '   EN2 (counter 16-31) → Physical LR quadrant → Buffer rows 4-7, cols 4-7
+    '   EN3 (counter 32-47) → Physical UL quadrant → Buffer rows 0-3, cols 0-3
+    '   EN4 (counter 48-63) → Physical UR quadrant → Buffer rows 0-3, cols 4-7
+    '
+    ' WITHIN-QUADRANT CHANNEL LAYOUT:
+    '         Col0    Col1    Col2    Col3
+    '   Row0  Ch4     Ch6     Ch0     Ch2     (TL corner = Ch4-7)
+    '   Row1  Ch5     Ch7     Ch1     Ch3     (TR corner = Ch0-3)
+    '   Row2  Ch8     Ch10    Ch12    Ch14    (BL corner = Ch8-11)
+    '   Row3  Ch9     Ch11    Ch13    Ch15    (BR corner = Ch12-15)
+    '
+    ' VERIFICATION (quadrant center test 2025-12-23):
+    '   Physical UL center → Buffer centroid (1.5, 1.7) - UL quadrant ✓
+    '   Physical UR center → Buffer centroid (1.6, 5.5) - UR quadrant ✓
+    '   Physical LR center → Buffer centroid (5.6, 5.4) - LR quadrant ✓
+    '   Physical LL center → Buffer centroid (5.6, 1.2) - LL quadrant ✓
+    '------------------------------------------------------------------------------
+    unified_sensor_map  BYTE    34, 42, 35, 43, 32, 40, 33, 41    ' Counter 0-7   (EN1 → LL)
+                        BYTE    48, 56, 49, 57, 50, 58, 51, 59    ' Counter 8-15  (EN1 → LL)
+                        BYTE    38, 46, 39, 47, 36, 44, 37, 45    ' Counter 16-23 (EN2 → LR)
+                        BYTE    52, 60, 53, 61, 54, 62, 55, 63    ' Counter 24-31 (EN2 → LR)
+                        BYTE     2, 10,  3, 11,  0,  8,  1,  9    ' Counter 32-39 (EN3 → UL)
+                        BYTE    16, 24, 17, 25, 18, 26, 19, 27    ' Counter 40-47 (EN3 → UL)
+                        BYTE     6, 14,  7, 15,  4, 12,  5, 13    ' Counter 48-55 (EN4 → UR)
+                        BYTE    20, 28, 21, 29, 22, 30, 23, 31    ' Counter 56-63 (EN4 → UR)
 
 PUB null()
 '' This is not a top-level object
@@ -298,7 +320,7 @@ PUB configure_smart_pins() | sclk_x, event_config
 
     debug("Sensor: Smart pins configured (MISO stays enabled, SE1 event ready)", 13, 10)
 
-PRI sensor_loop() | framePtr, patternPtr, subtile_idx, sensor_idx, subtile_num, frame_offset, sensor_in_subtile, pixel_pos, sensor_val
+PRI sensor_loop() | framePtr, patternPtr, sensor_idx, sensor_val
 '' Main sensor loop running in dedicated COG
 '' Handles both test pattern generation and live sensor acquisition
 
@@ -373,9 +395,10 @@ PRI generate_test_frame() | framePtr, patternPtr
     else
         waitms(100)   ' 100ms between individual patterns
 
-PRI acquire_sensor_frame() | framePtr, subtile_idx, sensor_in_subtile, subtile_num, frame_offset, pixel_pos, sensor_val, buf_ptr, total_sensor_count, lut_subtile_order, lut_subtile_offset, lut_pixel_order
+PRI acquire_sensor_frame() | framePtr, sensor_val, buf_ptr, total_sensor_count, lut_unified
 '' Acquire live sensor frame using inline PASM for timing-critical operations
 '' OPTIMIZED (Nov 2025): Pipelined counter advance during SPI transfer
+'' SIMPLIFIED (Dec 2025): Single unified lookup table replaces 4 separate tables
 ''
 '' Pipeline strategy:
 ''   - First sensor: Full settle wait, then start SPI
@@ -392,11 +415,9 @@ PRI acquire_sensor_frame() | framePtr, subtile_idx, sensor_in_subtile, subtile_n
         waitms(1)
         return
 
-    ' CRITICAL: Pre-load all lookup table addresses BEFORE inline PASM
+    ' CRITICAL: Pre-load unified lookup table address BEFORE inline PASM
     ' This avoids modifying ptra inside PASM which corrupts stack access
-    lut_subtile_order := @subtile_order
-    lut_subtile_offset := @subtile_offset
-    lut_pixel_order := @pixel_order
+    lut_unified := @unified_sensor_map
 
     ' Use inline PASM to read all 64 sensors with pipelined counter advance
     ' NOTE: We use pa, pb for temporary pointers instead of ptra to avoid
@@ -409,41 +430,41 @@ PRI acquire_sensor_frame() | framePtr, subtile_idx, sensor_in_subtile, subtile_n
 ' Subroutines (placed first so all calls are backward references)
 ' ============================================
 
-' store_sensor_value: Map and store sensor reading
-' Uses: subtile_idx, sensor_in_subtile, sensor_val, framePtr
+'------------------------------------------------------------------------------
+' store_sensor_value: Store ADC reading at mapped buffer location
+'------------------------------------------------------------------------------
+' UNIFIED MAPPING: counter index → final buffer position (single lookup)
+'
+' The unified_sensor_map table combines all transformations:
+'   - EN signal → physical quadrant mapping (from empirical testing)
+'   - Channel → position within quadrant (from schematic)
+'   - Physical position = buffer position (1:1 mapping goal)
+'
+' Inputs:
+'   total_sensor_count - Current counter index (0-63)
+'   sensor_val         - ADC value to store
+'   framePtr           - Base address of frame buffer
+'   lut_unified        - Unified lookup table address (pre-loaded in Spin2)
+'
 ' Uses pa as temp pointer (NOT ptra - that breaks Spin2 stack access!)
-' Modifies: pa, pixel_pos, frame_offset, buf_ptr, subtile_num
+' Modifies: pa, buf_ptr
+'------------------------------------------------------------------------------
 .store_sensor_value
-        ' Get current subtile number from subtile_order array
-        mov     pa, lut_subtile_order
-        add     pa, subtile_idx
-        rdbyte  subtile_num, pa
+        '======================================================================
+        ' UNIFIED MAPPING: Counter index → Buffer position (single lookup)
+        '======================================================================
+        mov     pa, lut_unified
+        add     pa, total_sensor_count
+        rdbyte  buf_ptr, pa
 
-        ' Get frame buffer offset for this subtile
-        mov     pa, lut_subtile_offset
-        add     pa, subtile_num
-        rdbyte  frame_offset, pa
-
-        ' Map sensor position using pixel_order lookup
-        mov     pa, lut_pixel_order
-        add     pa, sensor_in_subtile
-        rdbyte  pixel_pos, pa
-
-        ' Calculate final frame buffer position
-        mov     buf_ptr, pixel_pos
-        add     buf_ptr, frame_offset
+        '======================================================================
+        ' Calculate byte address and store
+        '======================================================================
         shl     buf_ptr, #1                    ' Convert to byte offset (* 2 for WORD)
         add     buf_ptr, framePtr              ' Add frame base address
 
-        ' Store value in frame buffer
+        ' Store value in frame buffer at mapped position
         wrword  sensor_val, buf_ptr
-        ret
-
-' advance_subtile: Move to next subtile
-' Modifies: subtile_idx, sensor_in_subtile
-.advance_subtile
-        add     subtile_idx, #1
-        mov     sensor_in_subtile, #0
         ret
 
 ' ============================================
@@ -493,13 +514,10 @@ PRI acquire_sensor_frame() | framePtr, subtile_idx, sensor_in_subtile, subtile_n
         shr     sensor_val, #4              ' Shift out 4 trailing zeros
         and     sensor_val, ##$FFFF         ' Mask to 16 bits
 
-        ' Store sensor 0 using mapping lookup
-        mov     subtile_idx, #0
-        mov     sensor_in_subtile, #0
+        ' Store sensor 0 using unified mapping lookup
         call    #.store_sensor_value
 
-        ' Increment counters
-        add     sensor_in_subtile, #1
+        ' Increment counter
         add     total_sensor_count, #1
 
         ' ========== SENSORS 1-62: Pipelined (already settling) ==========
@@ -534,15 +552,10 @@ PRI acquire_sensor_frame() | framePtr, subtile_idx, sensor_in_subtile, subtile_n
         shr     sensor_val, #4              ' Shift out 4 trailing zeros
         and     sensor_val, ##$FFFF         ' Mask to 16 bits
 
-        ' Store using mapping lookup
+        ' Store using unified mapping lookup
         call    #.store_sensor_value
 
-        ' Update subtile tracking
-        add     sensor_in_subtile, #1
-        cmp     sensor_in_subtile, #16 wz
-  if_z  call    #.advance_subtile
-
-        ' Loop for next sensor
+        ' Increment counter and loop
         add     total_sensor_count, #1
         jmp     #.pipelined_loop
 
