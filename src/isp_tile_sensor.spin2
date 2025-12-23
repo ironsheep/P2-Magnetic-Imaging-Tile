@@ -42,10 +42,11 @@ CON { tile sensor constants }
     SUBTILES = 4                        ' 4 quadrants
     SENSORS_PER_SUBTILE = 16            ' 4x4 per subtile
 
-    ' ADC configuration
-    ADC_BITS = 16                       ' AD7680 is 16-bit ADC
-    ADC_MAX_VALUE = (1 << ADC_BITS) - 1 ' Maximum ADC reading
-    SPI_TRANSFER_BITS = 24              ' Total SPI transfer size (4 leading + 16 data + 4 trailing)
+    ' ADC configuration - AD7940 (14-bit ADC, 16-bit SPI frame)
+    ' Frame format: 2 leading zeros + 14-bit data = 16 bits total
+    ADC_BITS = 14                       ' AD7940 is 14-bit ADC
+    ADC_MAX_VALUE = (1 << ADC_BITS) - 1 ' Maximum ADC reading (16383)
+    SPI_TRANSFER_BITS = 16              ' Total SPI transfer size (2 leading + 14 data)
 
     ' Timing constants @ 250 MHz system clock (1 clock = 4ns)
     SENSOR_SETTLE_DELAY = 500           ' 2000ns (2µs) for analog settling - used for first sensor only
@@ -59,7 +60,12 @@ CON { tile sensor constants }
     SPI_LOW_TIME = SPI_PERIOD / 2       ' 50% duty cycle = 50 sysclks
 
 OBJ
-    fifo : "isp_frame_fifo_manager"    ' Multi-FIFO frame pool manager
+    fifo : "isp_frame_fifo_manager"    ' Multi-FIFO frame pool manager (shared singleton)
+    stack_check : "isp_stack_check"    ' Stack overflow detection utility
+
+CON { stack configuration }
+
+    SENSOR_STACK_SIZE_LONGS = 128       ' Stack size for sensor COG (increased from 64 - was causing overflow)
 
 VAR { tile sensor variables }
 
@@ -76,9 +82,6 @@ VAR { tile sensor variables }
     ' Test pattern state
     LONG    test_frame_counter          ' Test mode: current frame index (0-5)
 
-    ' COG stack (64 longs per P2KB recommendations)
-    LONG    sensor_cog_stack[64]        ' Stack for sensor COG
-
 CON { acquisition modes }
 
     #0                              ' Start enumeration at 0
@@ -87,6 +90,12 @@ CON { acquisition modes }
     MODE_HIGH_SPEED                 ' = 2
     MODE_DEBUG                      ' = 3
     MODE_TEST_PATTERN               ' = 4
+
+DAT { sensor COG stack with overflow detection }
+
+    ' Stack for sensor COG - placed in DAT with sentinel mark for overflow detection
+    sensor_cog_stack    LONG    0[SENSOR_STACK_SIZE_LONGS]
+    sensor_stack_mark   LONG    stack_check.DO_NOT_WRITE_MARK   ' Sentinel - overflow if overwritten
 
 DAT { sensor mapping arrays }
 
@@ -127,6 +136,9 @@ PUB start(sensor_base_pin) : success
     acquisition_mode := MODE_LIVE       ' Start in live mode
     baseline_valid := FALSE             ' No baseline until calibrated
     test_frame_counter := 0
+
+    ' Prepare stack for overflow detection
+    stack_check.prepStackForCheck(@sensor_cog_stack, SENSOR_STACK_SIZE_LONGS)
 
     ' Launch sensor COG
     debug("Sensor: Launching single-COG driver...", 13, 10)
@@ -223,17 +235,18 @@ PUB read_single_sensor() : sensor_value | raw_value, event_config
         waitse1                                      ' Wait efficiently for completion
 
         ' Clock finished - read received data from MISO
-        rdpin   raw_value, #ABS_PIN_MISO             ' Read 24-bit value (left-justified, LSB-first)
+        rdpin   raw_value, #ABS_PIN_MISO             ' Read 16-bit value (left-justified, LSB-first)
 
         ' End conversion (CS high)
         drvh    #ABS_PIN_CS
 
-        ' Process data: AD7680 sends MSB-first, but P_SYNC_RX receives LSB-first
-        ' After REV, the 24-bit frame is in Z[23:0] (right-justified)
-        ' AD7680 frame: Z[23:20]=leading 0s, Z[19:4]=16-bit data, Z[3:0]=trailing 0s
+        ' Process data: AD7940 sends MSB-first, but P_SYNC_RX receives LSB-first
+        ' After REV, the 16-bit frame is in Z[15:0] (right-justified)
+        ' AD7940 frame: 1 leading zero + 14-bit data + 1 trailing zero
+        ' After REV: Z[15]=trailing, Z[14:1]=data, Z[0]=leading
         rev     raw_value                            ' Reverse all 32 bits (MSB-first now, right-justified)
-        shr     raw_value, #4                        ' Shift out 4 trailing zeros
-        and     raw_value, ##$FFFF                   ' Mask to 16 bits
+        shr     raw_value, #1                        ' Shift out 1 trailing zero
+        and     raw_value, ##$3FFF                   ' Mask to 14 bits
         mov     sensor_value, raw_value
     end
 
@@ -290,10 +303,18 @@ PRI sensor_loop() | framePtr, patternPtr, subtile_idx, sensor_idx, subtile_num, 
 
     debug("Sensor: COG loop started", 13, 10)
 
+    ' CRITICAL: Show stack address to diagnose memory corruption
+    debug("SENSOR STACK: ", uhex_long(@sensor_cog_stack), " to ", uhex_long(@sensor_cog_stack + (SENSOR_STACK_SIZE_LONGS * 4) - 1), 13, 10)
+
     ' Configure smart pins for SPI (ONCE at startup)
+    stack_check.checkStack(@sensor_cog_stack, SENSOR_STACK_SIZE_LONGS)
     configure_smart_pins()
+    stack_check.checkStack(@sensor_cog_stack, SENSOR_STACK_SIZE_LONGS)
 
     repeat
+        ' Check for stack overflow (halts with debug message if detected)
+        stack_check.checkStack(@sensor_cog_stack, SENSOR_STACK_SIZE_LONGS)
+
         ' Check acquisition mode
         case acquisition_mode
             MODE_STOPPED:
@@ -346,7 +367,7 @@ PRI generate_test_frame() | framePtr, patternPtr
     else
         waitms(100)   ' 100ms between individual patterns
 
-PRI acquire_sensor_frame() | framePtr, subtile_idx, sensor_in_subtile, subtile_num, frame_offset, pixel_pos, sensor_val, buf_ptr, total_sensor_count
+PRI acquire_sensor_frame() | framePtr, subtile_idx, sensor_in_subtile, subtile_num, frame_offset, pixel_pos, sensor_val, buf_ptr, total_sensor_count, lut_subtile_order, lut_subtile_offset, lut_pixel_order
 '' Acquire live sensor frame using inline PASM for timing-critical operations
 '' OPTIMIZED (Nov 2025): Pipelined counter advance during SPI transfer
 ''
@@ -360,11 +381,20 @@ PRI acquire_sensor_frame() | framePtr, subtile_idx, sensor_in_subtile, subtile_n
 
     ' Get frame buffer from FIFO
     framePtr := fifo.getNextFrame()
+    debug("SENSOR: GET ptr=", uhex_long(framePtr), 13, 10)
     if framePtr == 0
         waitms(1)
         return
 
+    ' CRITICAL: Pre-load all lookup table addresses BEFORE inline PASM
+    ' This avoids modifying ptra inside PASM which corrupts stack access
+    lut_subtile_order := @subtile_order
+    lut_subtile_offset := @subtile_offset
+    lut_pixel_order := @pixel_order
+
     ' Use inline PASM to read all 64 sensors with pipelined counter advance
+    ' NOTE: We use pa, pb for temporary pointers instead of ptra to avoid
+    ' corrupting Spin2's stack pointer
     ORG
         ' Jump to main code (subroutines placed first for backward reference only)
         jmp     #.main_start
@@ -375,22 +405,23 @@ PRI acquire_sensor_frame() | framePtr, subtile_idx, sensor_in_subtile, subtile_n
 
 ' store_sensor_value: Map and store sensor reading
 ' Uses: subtile_idx, sensor_in_subtile, sensor_val, framePtr
-' Modifies: ptra, pixel_pos, frame_offset, buf_ptr, subtile_num
+' Uses pa as temp pointer (NOT ptra - that breaks Spin2 stack access!)
+' Modifies: pa, pixel_pos, frame_offset, buf_ptr, subtile_num
 .store_sensor_value
         ' Get current subtile number from subtile_order array
-        mov     ptra, ##@subtile_order
-        add     ptra, subtile_idx
-        rdbyte  subtile_num, ptra
+        mov     pa, lut_subtile_order
+        add     pa, subtile_idx
+        rdbyte  subtile_num, pa
 
         ' Get frame buffer offset for this subtile
-        mov     ptra, ##@subtile_offset
-        add     ptra, subtile_num
-        rdbyte  frame_offset, ptra
+        mov     pa, lut_subtile_offset
+        add     pa, subtile_num
+        rdbyte  frame_offset, pa
 
         ' Map sensor position using pixel_order lookup
-        mov     ptra, ##@pixel_order
-        add     ptra, sensor_in_subtile
-        rdbyte  pixel_pos, ptra
+        mov     pa, lut_pixel_order
+        add     pa, sensor_in_subtile
+        rdbyte  pixel_pos, pa
 
         ' Calculate final frame buffer position
         mov     buf_ptr, pixel_pos
@@ -449,12 +480,12 @@ PRI acquire_sensor_frame() | framePtr, subtile_idx, sensor_in_subtile, subtile_n
         ' Wait for SPI to complete
         waitse1
 
-        ' Read and process sensor 0 data
+        ' Read and process sensor 0 data (AD7940: 1 leading + 14 data + 1 trailing)
         rdpin   sensor_val, #ABS_PIN_MISO
         drvh    #ABS_PIN_CS
         rev     sensor_val
-        shr     sensor_val, #4
-        and     sensor_val, ##$FFFF
+        shr     sensor_val, #1              ' Shift out 1 trailing zero
+        and     sensor_val, ##$3FFF         ' Mask to 14 bits
 
         ' Store sensor 0 using mapping lookup
         mov     subtile_idx, #0
@@ -490,12 +521,12 @@ PRI acquire_sensor_frame() | framePtr, subtile_idx, sensor_in_subtile, subtile_n
         ' Wait for SPI to complete
         waitse1
 
-        ' Read and process current sensor data
+        ' Read and process current sensor data (AD7940: 1 leading + 14 data + 1 trailing)
         rdpin   sensor_val, #ABS_PIN_MISO
         drvh    #ABS_PIN_CS
         rev     sensor_val
-        shr     sensor_val, #4
-        and     sensor_val, ##$FFFF
+        shr     sensor_val, #1              ' Shift out 1 trailing zero
+        and     sensor_val, ##$3FFF         ' Mask to 14 bits
 
         ' Store using mapping lookup
         call    #.store_sensor_value
@@ -514,23 +545,27 @@ PRI acquire_sensor_frame() | framePtr, subtile_idx, sensor_in_subtile, subtile_n
         ' Wait for SPI to complete (no counter advance - we're done)
         waitse1
 
-        ' Read and process final sensor data
+        ' Read and process final sensor data (AD7940: 1 leading + 14 data + 1 trailing)
         rdpin   sensor_val, #ABS_PIN_MISO
         drvh    #ABS_PIN_CS
         rev     sensor_val
-        shr     sensor_val, #4
-        and     sensor_val, ##$FFFF
+        shr     sensor_val, #1              ' Shift out 1 trailing zero
+        and     sensor_val, ##$3FFF         ' Mask to 14 bits
 
         ' Store final sensor
         call    #.store_sensor_value
 
         ' Frame acquisition complete
+        ' NOTE: We no longer need to restore ptra because we never modified it!
+        ' Using pa instead of ptra for lookup pointers preserves Spin2 stack access
 
     END
 
     ' Commit completed frame to sensor FIFO
+    debug("SENSOR: COMMIT ptr=", uhex_long(framePtr), 13, 10)
     if fifo.commitFrame(fifo.FIFO_SENSOR, framePtr) < 0
         ' FIFO full - release frame back to pool
+        debug("SENSOR: RELEASE (full) ptr=", uhex_long(framePtr), 13, 10)
         fifo.releaseFrame(framePtr)
     else
         ' Frame committed successfully

@@ -13,6 +13,9 @@ CON
   ' System modes
   TEST_MODE = false         ' true = generate test patterns, no decimation
                            ' false = normal operation with real sensor data
+  SLOW_SCAN_MODE = true    ' true = one scan every 10 seconds (for sensor testing)
+                           ' false = normal high-speed operation
+  SLOW_SCAN_MS = 10_000    ' Delay between scans in slow mode (10 seconds)
 
   ' Pin group assignments
   HDMI_BASE_PIN   = 0
@@ -90,12 +93,16 @@ PUB main() | success
     hdmi_decimation := 1  ' Send EVERY frame to HDMI
     oled_decimation := 1  ' Send EVERY frame to OLED
     debug("  Decimation in TEST MODE - 1:1 (no decimation)", 13, 10)
+  elseif SLOW_SCAN_MODE
+    hdmi_decimation := 1  ' Send every captured frame to HDMI
+    oled_decimation := 1  ' Send every captured frame to OLED
+    debug("  SLOW SCAN MODE - one scan every ", udec(SLOW_SCAN_MS/1000), " seconds", 13, 10)
   else
     hdmi_decimation := DEFAULT_HDMI_DECIMATION
     oled_decimation := DEFAULT_OLED_DECIMATION
     debug("  Decimation in NORMAL mode - HDMI ", udec(hdmi_decimation), ":1, OLED ", udec(oled_decimation), ":1", 13, 10)
 
-  ' Start sensor interface
+  ' Start sensor interface (with ptra save/restore fix applied)
   debug("Starting sensor interface (P8-P15)...", 13, 10)
   if not sensor.start(SENSOR_BASE_PIN)  ' sensor only takes base_pin parameter
     debug("ERROR: Failed to start sensor interface", 13, 10)
@@ -121,15 +128,124 @@ PUB main() | success
   ' Main decimation loop (runs in main COG)
   decimation_loop()
 
-PRI decimation_loop() | framePtr, sendHDMI, sendOLED, hdmiPtr, oledPtr
+PRI decimation_loop() | framePtr, sendHDMI, sendOLED, hdmiPtr, oledPtr, drained
 '' Main decimation loop running in main COG
 '' Dequeues frames from sensor FIFO, applies decimation, routes to display FIFOs
 
   debug("Main COG: Decimation loop started", 13, 10)
 
+  if SLOW_SCAN_MODE
+    ' SLOW SCAN MODE: One frame every N seconds for sensor debugging
+    slow_scan_loop()
+  else
+    ' NORMAL MODE: High-speed decimation
+    normal_decimation_loop()
+
+PRI slow_scan_loop() | framePtr, hdmiPtr, oledPtr, drained, i
+'' Slow scan mode: One frame every SLOW_SCAN_MS milliseconds
+'' Used for sensor debugging - allows visual inspection of each reading
+
+  debug("Main COG: SLOW SCAN MODE active", 13, 10)
+
+  repeat
+    ' Wait for a frame from sensor FIFO
+    framePtr := fifo.dequeue(fifo.FIFO_SENSOR)
+
+    if framePtr
+      frame_counter++
+      debug("SLOW SCAN: Frame ", udec(frame_counter), " acquired", 13, 10)
+
+      ' WATCHPOINT: Check for corruption after sensor dequeue
+      if fifo.checkFreeListIntegrity() >= 0
+        debug("*** CORRUPTION DETECTED AFTER SENSOR DEQUEUE ***", 13, 10)
+
+      ' Print sensor values for debugging
+      debug("Sensor data (raw 12-bit values):", 13, 10)
+      repeat i from 0 to 7
+        debug("  Row ", udec(i), ": ")
+        debug(udec(WORD[framePtr][i*8+0]), " ")
+        debug(udec(WORD[framePtr][i*8+1]), " ")
+        debug(udec(WORD[framePtr][i*8+2]), " ")
+        debug(udec(WORD[framePtr][i*8+3]), " ")
+        debug(udec(WORD[framePtr][i*8+4]), " ")
+        debug(udec(WORD[framePtr][i*8+5]), " ")
+        debug(udec(WORD[framePtr][i*8+6]), " ")
+        debug(udec(WORD[framePtr][i*8+7]), 13, 10)
+
+      ' Send to HDMI display
+      hdmiPtr := fifo.getNextFrame()
+      ' WATCHPOINT: Check after HDMI getNextFrame
+      if fifo.checkFreeListIntegrity() >= 0
+        debug("*** CORRUPTION AFTER HDMI getNextFrame ***", 13, 10)
+      if hdmiPtr
+        WORDMOVE(hdmiPtr, framePtr, 64)
+        if fifo.commitFrame(fifo.FIFO_HDMI, hdmiPtr) < 0
+          fifo.releaseFrame(hdmiPtr)
+          ' WATCHPOINT: Check after HDMI releaseFrame (error path)
+          if fifo.checkFreeListIntegrity() >= 0
+            debug("*** CORRUPTION AFTER HDMI releaseFrame (err) ***", 13, 10)
+        else
+          debug("  -> Sent to HDMI", 13, 10)
+        ' WATCHPOINT: Check after HDMI commit/release
+        if fifo.checkFreeListIntegrity() >= 0
+          debug("*** CORRUPTION AFTER HDMI commit ***", 13, 10)
+
+      ' Send to OLED display
+      oledPtr := fifo.getNextFrame()
+      ' WATCHPOINT: Check after OLED getNextFrame
+      if fifo.checkFreeListIntegrity() >= 0
+        debug("*** CORRUPTION AFTER OLED getNextFrame ***", 13, 10)
+      if oledPtr
+        WORDMOVE(oledPtr, framePtr, 64)
+        if fifo.commitFrame(fifo.FIFO_OLED, oledPtr) < 0
+          fifo.releaseFrame(oledPtr)
+          ' WATCHPOINT: Check after OLED releaseFrame (error path)
+          if fifo.checkFreeListIntegrity() >= 0
+            debug("*** CORRUPTION AFTER OLED releaseFrame (err) ***", 13, 10)
+        else
+          debug("  -> Sent to OLED", 13, 10)
+        ' WATCHPOINT: Check after OLED commit/release
+        if fifo.checkFreeListIntegrity() >= 0
+          debug("*** CORRUPTION AFTER OLED commit ***", 13, 10)
+
+      ' Release original frame
+      fifo.releaseFrame(framePtr)
+      ' WATCHPOINT: Check after releasing original sensor frame
+      if fifo.checkFreeListIntegrity() >= 0
+        debug("*** CORRUPTION AFTER SENSOR releaseFrame ***", 13, 10)
+
+      ' WATCHPOINT: Check before drain loop
+      if fifo.checkFreeListIntegrity() >= 0
+        debug("*** CORRUPTION BEFORE DRAIN LOOP ***", 13, 10)
+
+      ' Drain any remaining frames from sensor FIFO (keep it fresh)
+      ' Limit to 32 frames max to avoid infinite loop (sensor produces continuously)
+      drained := 0
+      repeat 32
+        framePtr := fifo.dequeue(fifo.FIFO_SENSOR)
+        if framePtr == 0
+          quit
+        fifo.releaseFrame(framePtr)
+        drained++
+        ' WATCHPOINT: Check after each drain release
+        if fifo.checkFreeListIntegrity() >= 0
+          debug("*** CORRUPTION DURING DRAIN (after ", udec(drained), " frames) ***", 13, 10)
+      if drained > 0
+        debug("  (drained ", udec(drained), " stale frames)", 13, 10)
+
+      ' WATCHPOINT: Final check after drain complete
+      if fifo.checkFreeListIntegrity() >= 0
+        debug("*** CORRUPTION AFTER DRAIN COMPLETE ***", 13, 10)
+
+      ' Wait before next scan
+      debug("Waiting ", udec(SLOW_SCAN_MS/1000), " seconds...", 13, 10)
+      WAITMS(SLOW_SCAN_MS)
+
+PRI normal_decimation_loop() | framePtr, sendHDMI, sendOLED, hdmiPtr, oledPtr
+'' Normal high-speed decimation loop
+
   repeat
     ' Wait for frame from sensor FIFO
-    ' Note: Debug removed for high-speed operation (~1300+ fps)
     framePtr := fifo.dequeue(fifo.FIFO_SENSOR)
 
     if framePtr
@@ -138,13 +254,10 @@ PRI decimation_loop() | framePtr, sendHDMI, sendOLED, hdmiPtr, oledPtr
 
       ' Debug every 30 frames (every 0.5 sec at 60fps)
       if (frame_counter // 30) == 1
-        debug("Main COG: Frame ", udec(frame_counter), " from sensor (ptr=", uhex_long(framePtr), ")", 13, 10)
-        debug("  FIFO depths - Sensor: ", udec(fifo.getQueueDepth(fifo.FIFO_SENSOR)))
-        debug(", HDMI: ", udec(fifo.getQueueDepth(fifo.FIFO_HDMI)))
-        debug(", OLED: ", udec(fifo.getQueueDepth(fifo.FIFO_OLED)))
-        debug(", Free: ", udec(fifo.getFreeFrames()), 13, 10)
-        debug("  Display frames - HDMI: ", udec(hdmi_engine.get_frame_count()))
-        debug(", OLED: ", udec(oled.get_frame_count()), 13, 10)
+        debug("MAIN: Frame ", udec(frame_counter), " depths S:", udec(fifo.getQueueDepth(fifo.FIFO_SENSOR)))
+        debug(" H:", udec(fifo.getQueueDepth(fifo.FIFO_HDMI)))
+        debug(" O:", udec(fifo.getQueueDepth(fifo.FIFO_OLED)))
+        debug(" F:", udec(fifo.getFreeFrames()), 13, 10)
 
       ' Process frame based on mode
       case processing_mode

@@ -18,8 +18,8 @@ CON
 
   ' Color mapping ranges
   MIN_FIELD   = 0         ' Minimum field value
-  MAX_FIELD   = 4095      ' Maximum field value (12-bit from sensor)
-  MID_FIELD   = 2048      ' Neutral field value (12-bit midpoint)
+  MAX_FIELD   = 16383     ' Maximum field value (14-bit AD7940 ADC)
+  MID_FIELD   = 8192      ' Neutral field value (14-bit midpoint)
 
   ' FIFO IDs (must match isp_frame_fifo_manager)
   FIFO_HDMI   = 1
@@ -27,6 +27,10 @@ CON
 OBJ
   fifo : "isp_frame_fifo_manager"
   gfx  : "isp_psram_graphics"      ' HDMI graphics system
+  stack_check : "isp_stack_check"  ' Stack overflow detection utility
+
+CON { stack configuration }
+  HDMI_STACK_SIZE_LONGS = 128      ' Stack size for HDMI display COG (increased from 64 - deep call chains)
 
 VAR
   long  cog_id
@@ -38,8 +42,10 @@ VAR
   long  grid_drawn              ' Flag: 0=not drawn, 1=drawn
   word  frame_buffer[64]
 
-  ' COG stack (64 longs per P2KB recommendations)
-  long  display_cog_stack[64]
+DAT { HDMI display COG stack with overflow detection }
+  ' Stack for HDMI COG - placed in DAT with sentinel mark for overflow detection
+  display_cog_stack   LONG    0[HDMI_STACK_SIZE_LONGS]
+  display_stack_mark  LONG    stack_check.DO_NOT_WRITE_MARK   ' Sentinel - overflow if overwritten
 
 PUB null()
   '' Not a top-level object
@@ -77,6 +83,9 @@ PUB start(hdmi_base_pin) : ok
 
   ' Stop any existing display COG before starting new one
   stop()
+
+  ' Prepare stack for overflow detection
+  stack_check.prepStackForCheck(@display_cog_stack, HDMI_STACK_SIZE_LONGS)
 
   debug("HDMI Engine: Starting display COG...", 13, 10)
   ' Start display COG
@@ -136,16 +145,23 @@ PRI display_loop() | framePtr, row, col, sensorIdx, sensorVal, cellColor
 
   debug("HDMI Engine Loop: COG started, TEST_MODE=", udec(TEST_MODE), 13, 10)
 
+  ' CRITICAL: Show stack address to diagnose memory corruption
+  debug("HDMI STACK: ", uhex_long(@display_cog_stack), " to ", uhex_long(@display_cog_stack + (HDMI_STACK_SIZE_LONGS * 4) - 1), 13, 10)
+
   ' Initialize graphics for this COG (Cog4) - sets up PSRAM mailbox
   debug("HDMI Engine Loop: Initializing graphics for this COG...", 13, 10)
+  stack_check.checkStack(@display_cog_stack, HDMI_STACK_SIZE_LONGS)
   gfx.start()
   debug("HDMI Engine Loop: Graphics initialized for COG ", udec(cogid()), 13, 10)
+  stack_check.checkStack(@display_cog_stack, HDMI_STACK_SIZE_LONGS)
 
   if TEST_MODE
     ' Test pattern mode - just idle for now
     ' (Graphics drawing moved to main)
     debug("HDMI Engine Loop: TEST_MODE active, idling...", 13, 10)
     repeat
+      ' Check for stack overflow (halts with debug message if detected)
+      stack_check.checkStack(@display_cog_stack, HDMI_STACK_SIZE_LONGS)
       frame_count++
       waitms(1000)  ' Just keep COG alive
   else
@@ -155,9 +171,11 @@ PRI display_loop() | framePtr, row, col, sensorIdx, sensorVal, cellColor
     ' Clear screen and draw grid on startup
     debug("HDMI Engine Loop: Clearing screen...", 13, 10)
     gfx.cls($00_00_00)  ' Black background
+    stack_check.checkStack(@display_cog_stack, HDMI_STACK_SIZE_LONGS)
 
     debug("HDMI Engine Loop: Drawing sensor grid...", 13, 10)
     gfx.DrawSensorGrid(GRID_X, GRID_Y, CELL_SIZE, CELL_GAP)
+    stack_check.checkStack(@display_cog_stack, HDMI_STACK_SIZE_LONGS)
     grid_drawn := 1
 
     ' Add text labels around the display
@@ -165,18 +183,17 @@ PRI display_loop() | framePtr, row, col, sensorIdx, sensorVal, cellColor
     ' TEMPORARILY DISABLED - Testing if grid and sensor display work without text
     'DrawStaticLabels()
     debug("HDMI Engine Loop: Text drawing disabled for testing, grid ready, waiting for frames...", 13, 10)
+    stack_check.checkStack(@display_cog_stack, HDMI_STACK_SIZE_LONGS)
 
     repeat
+      ' Check for stack overflow (halts with debug message if detected)
+      stack_check.checkStack(@display_cog_stack, HDMI_STACK_SIZE_LONGS)
+
       ' Dequeue frame from HDMI FIFO (blocking)
-      debug("HDMI Engine: [DEQ] Calling dequeue(FIFO_HDMI)...", 13, 10)
       framePtr := fifo.dequeue(FIFO_HDMI)
-      debug("HDMI Engine: [DEQ] Returned from dequeue, ptr=", uhex_long(framePtr), 13, 10)
+      debug("HDMI: DEQUEUE ptr=", uhex_long(framePtr))
 
       if framePtr <> 0
-        ' Log first frame received
-        if frame_count == 0
-          debug("HDMI Engine: First frame received! (ptr=", uhex_long(framePtr), ")", 13, 10)
-
         ' Render all 64 sensor cells to display
         repeat row from 0 to 7
           repeat col from 0 to 7
@@ -193,17 +210,12 @@ PRI display_loop() | framePtr, row, col, sensorIdx, sensorVal, cellColor
         ' Increment frame counter
         frame_count++
 
-        ' Debug: Log all four corner sensor values
-        debug("HDMI Engine: Frame ", udec(frame_count), " rendered", 13, 10)
-        debug("  Corner values - TL[0,0]=", udec(WORD[framePtr][0]), " TR[0,7]=", udec(WORD[framePtr][7]), 13, 10)
-        debug("                  BL[7,0]=", udec(WORD[framePtr][56]), " BR[7,7]=", udec(WORD[framePtr][63]), 13, 10)
-
         ' Release frame back to pool
-        debug("HDMI Engine: Releasing frame ptr=", uhex_long(framePtr), 13, 10)
+        debug("HDMI: RELEASE ptr=", uhex_long(framePtr))
         fifo.releaseFrame(framePtr)
       else
         ' FIFO timeout - shouldn't happen in normal operation
-        debug("HDMI Engine: FIFO dequeue timeout!", 13, 10)
+        debug("HDMI: DEQUEUE timeout")
         waitms(10)
 
 PRI DrawStaticLabels() | row, col, labelX, labelY

@@ -234,3 +234,5 @@ src/test_hdmi_hub_pattern.spin2
 /src/.p2kb-cache
 /src/logs
 /tasks
+/REF-P2-RS
+*.lst

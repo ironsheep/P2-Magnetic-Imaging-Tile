@@ -24,7 +24,7 @@ CON
   ERR_INVALID = -3
 
 DAT
-  ' Singleton shared state - all instances reference this same data
+  ' Singleton shared state - DAT section is shared across ALL OBJ instances
   ' This enables zero-copy frame sharing across all subsystems
 
   ' Frame pool - all frames live here
@@ -76,7 +76,7 @@ PUB start() : ok | i
   ' Initialize free list with all frames
   debug("FIFO: Initializing ", udec(MAX_FRAMES), " frames...", 13, 10)
   repeat i from 0 to MAX_FRAMES-1
-    freeList[i] := @framePool + (i * FRAME_SIZE)
+    LONG[@freeList][i] := @framePool + (i * FRAME_SIZE)
 
   freeHead := 0
   freeTail := MAX_FRAMES - 1  ' CORRECT: Knuth's algorithm with count (full queue, next enqueue wraps to 0)
@@ -91,6 +91,20 @@ PUB start() : ok | i
 
   debug("FIFO: Initialization complete", 13, 10)
 
+  ' Debug: Print addresses of FIFO data structures for correlation with corruption values
+  debug("FIFO ADDRESSES:", 13, 10)
+  debug("  framePool:   ", uhex_long(@framePool), 13, 10)
+  debug("  freeList:    ", uhex_long(@freeList), 13, 10)
+  debug("  freeHead:    ", uhex_long(@freeHead), 13, 10)
+  debug("  sensorFIFO:  ", uhex_long(@sensorFIFO), 13, 10)
+  debug("  sensorHead:  ", uhex_long(@sensorHead), 13, 10)
+  debug("  sensorTail:  ", uhex_long(@sensorTail), 13, 10)
+  debug("  sensorCount: ", uhex_long(@sensorCount), 13, 10)
+  debug("  hdmiFIFO:    ", uhex_long(@hdmiFIFO), 13, 10)
+  debug("  hdmiHead:    ", uhex_long(@hdmiHead), 13, 10)
+  debug("  oledFIFO:    ", uhex_long(@oledFIFO), 13, 10)
+  debug("  oledHead:    ", uhex_long(@oledHead), 13, 10)
+  debug("  lock:        ", uhex_long(@lock), 13, 10)
 
   return true
 
@@ -101,10 +115,14 @@ PUB stop()
     lockrel(lock)
     lock := -1
 
-PUB getNextFrame() : framePtr | timeout
+PUB getNextFrame() : framePtr | timeout, poolStart, poolEnd
   '' Get next available frame from pool
   '' Blocks until frame available
   '' Returns pointer to frame buffer
+
+  ' Calculate valid frame pool address range for validation
+  poolStart := @framePool
+  poolEnd := @framePool + (MAX_FRAMES * FRAME_SIZE)
 
   timeout := 0
   repeat
@@ -112,8 +130,22 @@ PUB getNextFrame() : framePtr | timeout
       ' Spin waiting for lock
 
     if freeCount > 0
+      ' CRITICAL: Bounds check before array access
+      if freeHead >= MAX_FRAMES
+        debug("FIFO FATAL: freeHead=", udec(freeHead), " CORRUPTED! Resetting pool.", 13, 10)
+        freeHead := 0
+        lockrel(lock)
+        return 0
       ' Get frame from free list
-      framePtr := freeList[freeHead]
+      framePtr := LONG[@freeList][freeHead]
+      ' CRITICAL: Validate pointer is within frame pool range
+      if framePtr < poolStart or framePtr >= poolEnd
+        debug("FIFO FATAL: freeList[", udec(freeHead), "] = ", uhex_long(framePtr), " INVALID! Expected ", uhex_long(poolStart), "-", uhex_long(poolEnd), 13, 10)
+        debug("  freeList addr=", uhex_long(@freeList + (freeHead << 2)), 13, 10)
+        freeHead := (freeHead + 1) // MAX_FRAMES
+        freeCount--
+        lockrel(lock)
+        return 0  ' Return 0 instead of garbage pointer
       freeHead := (freeHead + 1) // MAX_FRAMES
       freeCount--
       lockrel(lock)
@@ -126,9 +158,18 @@ PUB getNextFrame() : framePtr | timeout
     if ++timeout > 1000
       return 0  ' Timeout after 1 second
 
-PUB commitFrame(fifoID, framePtr) : result
+PUB commitFrame(fifoID, framePtr) : result | poolStart, poolEnd
   '' Commit frame to specified FIFO
   '' Makes frame visible to consumers
+
+  ' Calculate valid frame pool address range for validation
+  poolStart := @framePool
+  poolEnd := @framePool + (MAX_FRAMES * FRAME_SIZE)
+
+  ' CRITICAL: Validate frame pointer BEFORE acquiring lock
+  if framePtr < poolStart or framePtr >= poolEnd
+    debug("FIFO FATAL: commitFrame() ptr=", uhex_long(framePtr), " INVALID! Expected ", uhex_long(poolStart), "-", uhex_long(poolEnd), 13, 10)
+    return ERR_INVALID
 
   repeat until locktry(lock)
     ' Spin waiting for lock
@@ -136,7 +177,13 @@ PUB commitFrame(fifoID, framePtr) : result
   case fifoID
     FIFO_SENSOR:
       if sensorCount < FIFO_DEPTH
-        sensorFIFO[sensorTail] := framePtr
+        ' CRITICAL: Bounds check tail index before write to prevent memory corruption
+        if sensorTail >= FIFO_DEPTH
+          debug("FIFO FATAL: sensorTail=", udec(sensorTail), " OVERFLOW! Resetting.", 13, 10)
+          sensorTail := 0  ' Emergency reset
+        ' Debug disabled for performance - enable when debugging FIFO issues
+        'debug("FIFO commit SENSOR: tail=", udec(sensorTail), " addr=", uhex_long(@sensorFIFO + (sensorTail << 2)), " ptr=", uhex_long(framePtr), 13, 10)
+        LONG[@sensorFIFO][sensorTail] := framePtr
         sensorTail := (sensorTail + 1) // FIFO_DEPTH
         sensorCount++
         result := SUCCESS
@@ -145,7 +192,11 @@ PUB commitFrame(fifoID, framePtr) : result
 
     FIFO_HDMI:
       if hdmiCount < FIFO_DEPTH
-        hdmiFIFO[hdmiTail] := framePtr
+        ' CRITICAL: Bounds check tail index before write to prevent memory corruption
+        if hdmiTail >= FIFO_DEPTH
+          debug("FIFO FATAL: hdmiTail=", udec(hdmiTail), " OVERFLOW! Resetting.", 13, 10)
+          hdmiTail := 0  ' Emergency reset
+        LONG[@hdmiFIFO][hdmiTail] := framePtr
         hdmiTail := (hdmiTail + 1) // FIFO_DEPTH
         hdmiCount++
         result := SUCCESS
@@ -154,7 +205,11 @@ PUB commitFrame(fifoID, framePtr) : result
 
     FIFO_OLED:
       if oledCount < FIFO_DEPTH
-        oledFIFO[oledTail] := framePtr
+        ' CRITICAL: Bounds check tail index before write to prevent memory corruption
+        if oledTail >= FIFO_DEPTH
+          debug("FIFO FATAL: oledTail=", udec(oledTail), " OVERFLOW! Resetting.", 13, 10)
+          oledTail := 0  ' Emergency reset
+        LONG[@oledFIFO][oledTail] := framePtr
         oledTail := (oledTail + 1) // FIFO_DEPTH
         oledCount++
         result := SUCCESS
@@ -184,7 +239,19 @@ PUB dequeue(fifoID) : framePtr | timeout, poolStart, poolEnd
     case fifoID
       FIFO_SENSOR:
         if sensorCount > 0
-          framePtr := sensorFIFO[sensorHead]
+          ' CRITICAL: Bounds check head index before read to prevent wild memory access
+          if sensorHead >= FIFO_DEPTH
+            debug("FIFO FATAL: sensorHead=", udec(sensorHead), " CORRUPTED! Resetting FIFO.", 13, 10)
+            debug("  sensorHead addr=", uhex_long(@sensorHead), " value=", uhex_long(sensorHead), 13, 10)
+            sensorHead := 0
+            sensorTail := 0
+            sensorCount := 0
+            lockrel(lock)
+            return 0
+          ' Debug: Show exactly what we're reading and from where
+          debug("FIFO dequeue SENSOR: head=", udec(sensorHead), " addr=", uhex_long(@sensorFIFO + (sensorHead << 2)), 13, 10)
+          framePtr := LONG[@sensorFIFO][sensorHead]
+          debug("  read ptr=", uhex_long(framePtr), 13, 10)
           ' CRITICAL: Validate pointer before returning
           if framePtr < poolStart or framePtr >= poolEnd
             debug("FIFO ERROR: Sensor dequeue invalid ptr=", uhex_long(framePtr), " head=", udec(sensorHead), " count=", udec(sensorCount), 13, 10)
@@ -199,7 +266,15 @@ PUB dequeue(fifoID) : framePtr | timeout, poolStart, poolEnd
 
       FIFO_HDMI:
         if hdmiCount > 0
-          framePtr := hdmiFIFO[hdmiHead]
+          ' CRITICAL: Bounds check head index before read to prevent wild memory access
+          if hdmiHead >= FIFO_DEPTH
+            debug("FIFO FATAL: hdmiHead=", udec(hdmiHead), " CORRUPTED! Resetting FIFO.", 13, 10)
+            hdmiHead := 0
+            hdmiTail := 0
+            hdmiCount := 0
+            lockrel(lock)
+            return 0
+          framePtr := LONG[@hdmiFIFO][hdmiHead]
           ' CRITICAL: Validate pointer before returning
           if framePtr < poolStart or framePtr >= poolEnd
             debug("FIFO ERROR: HDMI dequeue invalid ptr=", uhex_long(framePtr), " head=", udec(hdmiHead), " count=", udec(hdmiCount), 13, 10)
@@ -214,7 +289,15 @@ PUB dequeue(fifoID) : framePtr | timeout, poolStart, poolEnd
 
       FIFO_OLED:
         if oledCount > 0
-          framePtr := oledFIFO[oledHead]
+          ' CRITICAL: Bounds check head index before read to prevent wild memory access
+          if oledHead >= FIFO_DEPTH
+            debug("FIFO FATAL: oledHead=", udec(oledHead), " CORRUPTED! Resetting FIFO.", 13, 10)
+            oledHead := 0
+            oledTail := 0
+            oledCount := 0
+            lockrel(lock)
+            return 0
+          framePtr := LONG[@oledFIFO][oledHead]
           ' CRITICAL: Validate pointer before returning
           if framePtr < poolStart or framePtr >= poolEnd
             debug("FIFO ERROR: OLED dequeue invalid ptr=", uhex_long(framePtr), " head=", udec(oledHead), " count=", udec(oledCount), 13, 10)
@@ -238,19 +321,32 @@ PUB dequeue(fifoID) : framePtr | timeout, poolStart, poolEnd
     if ++timeout > 1000
       return 0  ' Timeout
 
-PUB releaseFrame(framePtr)
+PUB releaseFrame(framePtr) | poolStart, poolEnd
   '' Return frame to free pool
   '' Called by consumers when done with frame
 
   if framePtr == 0
     return
 
+  ' Calculate valid frame pool address range for validation
+  poolStart := @framePool
+  poolEnd := @framePool + (MAX_FRAMES * FRAME_SIZE)
+
+  ' CRITICAL: Validate frame pointer BEFORE acquiring lock
+  if framePtr < poolStart or framePtr >= poolEnd
+    debug("FIFO FATAL: releaseFrame() ptr=", uhex_long(framePtr), " INVALID! Expected ", uhex_long(poolStart), "-", uhex_long(poolEnd), 13, 10)
+    return  ' Don't corrupt freeList with garbage pointer
+
   repeat until locktry(lock)
     ' Spin waiting for lock
 
   if freeCount < MAX_FRAMES
     freeTail := (freeTail + 1) // MAX_FRAMES  ' Move tail first
-    freeList[freeTail] := framePtr             ' Then insert
+    ' CRITICAL: Bounds check before array write
+    if freeTail >= MAX_FRAMES
+      debug("FIFO FATAL: freeTail=", udec(freeTail), " CORRUPTED! Resetting.", 13, 10)
+      freeTail := 0
+    LONG[@freeList][freeTail] := framePtr       ' Then insert
     freeCount++
 
   lockrel(lock)
@@ -277,3 +373,28 @@ PUB getFreeFrames() : count
 
   count := freeCount
   lockrel(lock)
+
+PUB getFreeListAddr() : addr
+  '' Get address of freeList array (for debugging/watchpoints)
+  return @freeList
+
+PUB getFramePoolAddr() : addr
+  '' Get address of frame pool (for debugging/watchpoints)
+  return @framePool
+
+PUB checkFreeListIntegrity() : corrupted | i, ptr, poolStart, poolEnd
+  '' Check if any freeList entry has been corrupted
+  '' Call this periodically from main loop to detect corruption moment
+  '' Returns index of first corrupted entry, or -1 if all OK
+
+  poolStart := @framePool
+  poolEnd := @framePool + (MAX_FRAMES * FRAME_SIZE)
+
+  repeat i from 0 to MAX_FRAMES - 1
+    ptr := LONG[@freeList][i]
+    if ptr <> 0  ' 0 means slot is empty (already allocated)
+      if ptr < poolStart or ptr >= poolEnd
+        debug("WATCHPOINT: freeList[", udec(i), "] = ", uhex_long(ptr), " CORRUPTED!", 13, 10)
+        return i
+
+  return -1  ' All OK

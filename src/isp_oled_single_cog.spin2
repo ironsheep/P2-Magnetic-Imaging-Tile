@@ -87,8 +87,8 @@ CON
 
   ' Color mapping ranges
   MIN_FIELD   = 0         ' Minimum field value
-  MAX_FIELD   = 4095      ' Maximum field value (12-bit from sensor)
-  MID_FIELD   = 2048      ' Neutral field value (12-bit midpoint)
+  MAX_FIELD   = 16383     ' Maximum field value (14-bit AD7940 ADC)
+  MID_FIELD   = 8192      ' Neutral field value (14-bit midpoint)
 
 OBJ
   fifo : "isp_frame_fifo_manager"
@@ -607,6 +607,7 @@ PRI init_hardware() | clk_period, temp, i
   ' Add clock pin offset in bits 24-26
   PINSTART(pin_mosi, P_OE | P_SYNC_TX | ((pin_sclk - pin_mosi) & %111) << 24, %1_00000 | 7, 0)
 
+
   ' Hardware reset sequence
   debug("  Performing hardware reset...", 13, 10)
   PINLOW(pin_rst)
@@ -620,14 +621,22 @@ PRI init_hardware() | clk_period, temp, i
 
   debug("  Hardware initialization complete", 13, 10)
 
-PRI init_color_lut() | i, normalized, r, g, b, color
+PRI init_color_lut() | i, normalized, r, g, b, color, start_ms, corruption_idx
 '' Build color lookup table mapping 12-bit sensor values to RGB565 colors
 '' Full resolution: each of 4096 sensor values gets unique color
 '' Color gradient: Blue (cold) -> Green (neutral) -> Red (hot)
 
   debug("  Building color LUT (4096 entries)...", 13, 10)
+  debug("  color_lut addr=", uhex_long(@color_lut), " size=", udec(4096*2), " bytes", 13, 10)
+  start_ms := getms()
 
   repeat i from 0 to 4095
+    ' WATCHPOINT: Check FIFO integrity every 500 iterations
+    if (i // 500) == 0
+      corruption_idx := fifo.checkFreeListIntegrity()
+      if corruption_idx >= 0
+        debug("*** OLED LUT: FIFO CORRUPT at i=", udec(i), " freeList[", udec(corruption_idx), "] ***", 13, 10)
+
     ' Normalize to 0-511 range (full 12-bit resolution, scaled for color calc)
     ' Use 512 steps to get smooth gradient across full range
     normalized := (i * 511) / 4095
@@ -648,7 +657,7 @@ PRI init_color_lut() | i, normalized, r, g, b, color
     color := ((b >> 3) << 11) | ((g >> 2) << 5) | (r >> 3)
     color_lut[i] := color
 
-  debug("  Color LUT ready", 13, 10)
+  debug("  Color LUT ready (", udec(getms() - start_ms), " ms)", 13, 10)
 
 PRI init_cell_origin_lut() | row, col, sensor_idx, px, py, pixel_offset
 '' Build cell origin lookup table for fast PASM rendering
@@ -674,9 +683,13 @@ PRI init_display()
 '' Initialize SSD1351 OLED controller with optimized settings
 '' @returns nothing - sends initialization command sequence
 
+  debug("  init_display: Starting command sequence...", 13, 10)
+
   ' Command lock - unlock normal commands
+  debug("  init_display: CMD_COMMAND_LOCK...", 13, 10)
   send_command(CMD_COMMAND_LOCK)
   send_data($12)
+  debug("  init_display: CMD_COMMAND_LOCK done", 13, 10)
 
   ' Display off during configuration
   send_command(CMD_DISPLAY_OFF)
@@ -756,8 +769,10 @@ PRI init_display()
 
   ' Display ON
   send_command(CMD_DISPLAY_ON)
+  debug("  init_display: Display ON, waiting 10ms...", 13, 10)
 
-  WAITMS(100)
+  WAITMS(10)  ' Reduced from 100ms - SSD1351 only needs a few ms
+  debug("  init_display: Complete", 13, 10)
 
 PRI send_command(cmd)
 '' Send command byte to OLED controller (COPIED FROM WORKING DRIVER)
@@ -937,15 +952,37 @@ PRI display_loop() | framePtr
   ' Background COG initializes its own hardware (owns its pins)
   debug("OLED Single-COG: Initializing hardware in background COG...", 13, 10)
 
+  ' CRITICAL: Show stack address to diagnose memory corruption
+  debug("OLED STACK: ", uhex_long(@display_cog_stack), " to ", uhex_long(@display_cog_stack + (OLED_STACK_SIZE_LONGS * 4) - 1), 13, 10)
+
   ' Show VAR buffer addresses to verify memory layout
   debug("OLED VAR addresses:", 13, 10)
   debug("  pixel_buffer: ", uhex_long(@pixel_buffer), " to ", uhex_long(@pixel_buffer + 32767), 13, 10)
   debug("  color_lut:    ", uhex_long(@color_lut), " to ", uhex_long(@color_lut + 8191), 13, 10)
   debug("  cell_origin:  ", uhex_long(@cell_origin_lut), " to ", uhex_long(@cell_origin_lut + 127), 13, 10)
 
+  ' Check stack BEFORE init (baseline)
+  debug("OLED: Stack check BEFORE init_hardware...", 13, 10)
+  stack_check.checkStack(@display_cog_stack, OLED_STACK_SIZE_LONGS)
+
   init_hardware()
+
+  ' Check stack AFTER init_hardware
+  debug("OLED: Stack check AFTER init_hardware...", 13, 10)
+  stack_check.checkStack(@display_cog_stack, OLED_STACK_SIZE_LONGS)
+
   init_color_lut()
+
+  ' Check stack AFTER init_color_lut
+  debug("OLED: Stack check AFTER init_color_lut...", 13, 10)
+  stack_check.checkStack(@display_cog_stack, OLED_STACK_SIZE_LONGS)
+
   init_cell_origin_lut()
+
+  ' Check stack AFTER init_cell_origin_lut
+  debug("OLED: Stack check AFTER init_cell_origin_lut...", 13, 10)
+  stack_check.checkStack(@display_cog_stack, OLED_STACK_SIZE_LONGS)
+
   debug("OLED Single-COG: Display loop started", 13, 10)
 
   repeat
@@ -954,6 +991,7 @@ PRI display_loop() | framePtr
 
     ' Dequeue frame from OLED FIFO (blocking)
     framePtr := fifo.dequeue(fifo.FIFO_OLED)
+    debug("OLED: DEQUEUE ptr=", uhex_long(framePtr))
 
     if framePtr == 0
       ' No frame available, wait and retry
@@ -964,6 +1002,7 @@ PRI display_loop() | framePtr
     display_frame(framePtr)
 
     ' Release frame back to pool
+    debug("OLED: RELEASE ptr=", uhex_long(framePtr))
     fifo.releaseFrame(framePtr)
 
     ' Increment frame count
