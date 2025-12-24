@@ -154,6 +154,10 @@ PRI display_loop() | framePtr, row, col, sensorIdx, sensorVal, cellColor
     ' Normal operation - process FIFO frames and render to display
     debug("HDMI Engine Loop: FIFO processing mode active", 13, 10)
 
+    ' Register this COG as HDMI FIFO consumer for event-driven wake-ups
+    fifo.registerConsumer(FIFO_HDMI, cogid())
+    debug("HDMI Engine Loop: Registered COG ", udec(cogid()), " for event-driven dequeue", 13, 10)
+
     ' Clear screen and draw grid on startup
     debug("HDMI Engine Loop: Clearing screen...", 13, 10)
     gfx.cls($00_00_00)  ' Black background
@@ -175,9 +179,9 @@ PRI display_loop() | framePtr, row, col, sensorIdx, sensorVal, cellColor
       ' Check for stack overflow (halts with debug message if detected)
       stack_check.checkStack(@display_cog_stack, HDMI_STACK_SIZE_LONGS)
 
-      ' Dequeue frame from HDMI FIFO (blocking)
-      framePtr := fifo.dequeue(FIFO_HDMI)
-      debug("HDMI: DEQUEUE ptr=", uhex_long(framePtr))
+      ' Event-driven dequeue: sleeps until producer sends COGATN
+      ' Zero jitter, zero power while waiting
+      framePtr := fifo.dequeueEventDriven(FIFO_HDMI)
 
       if framePtr <> 0
         ' Render all 64 sensor cells to display
@@ -197,12 +201,8 @@ PRI display_loop() | framePtr, row, col, sensorIdx, sensorVal, cellColor
         frame_count++
 
         ' Release frame back to pool
-        debug("HDMI: RELEASE ptr=", uhex_long(framePtr))
         fifo.releaseFrame(framePtr)
-      else
-        ' FIFO timeout - shouldn't happen in normal operation
-        debug("HDMI: DEQUEUE timeout")
-        waitms(10)
+      ' else: spurious wake (race condition) - just loop back
 
 PRI DrawStaticLabels() | row, col, labelX, labelY
   '' Draw static text labels around the sensor grid display

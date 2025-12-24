@@ -55,6 +55,12 @@ DAT
   ' Lock for atomic operations
   lock            long  -1  ' -1 = uninitialized
 
+  ' Consumer COG registration for event-driven wake-ups
+  ' -1 = no consumer registered, 0-7 = registered COG ID
+  sensorConsumerCog   long  -1
+  hdmiConsumerCog     long  -1
+  oledConsumerCog     long  -1
+
 PUB null()
   '' Not a top-level object
 
@@ -89,6 +95,11 @@ PUB start() : ok | i
   hdmiHead := hdmiTail := hdmiCount := 0
   oledHead := oledTail := oledCount := 0
 
+  ' Initialize consumer registrations (no consumers yet)
+  sensorConsumerCog := -1
+  hdmiConsumerCog := -1
+  oledConsumerCog := -1
+
   debug("FIFO: Initialization complete", 13, 10)
 
   ' Debug: Print addresses of FIFO data structures for correlation with corruption values
@@ -114,6 +125,22 @@ PUB stop()
   if lock >= 0
     lockrel(lock)
     lock := -1
+
+PUB registerConsumer(fifoID, consumerCogID)
+  '' Register a consumer COG for event-driven wake-ups
+  '' Call this from the consumer COG at startup
+  '' @param fifoID - which FIFO this consumer reads from (FIFO_SENSOR, FIFO_HDMI, FIFO_OLED)
+  '' @param consumerCogID - the COG ID of the consumer (use cogid() to get current COG)
+  ''
+  '' After registration, commitFrame() will automatically send COGATN to wake the consumer
+  '' Consumer should use WAITATN instead of polling for frames
+
+  case fifoID
+    FIFO_SENSOR: sensorConsumerCog := consumerCogID
+    FIFO_HDMI:   hdmiConsumerCog := consumerCogID
+    FIFO_OLED:   oledConsumerCog := consumerCogID
+
+  debug("FIFO: Registered COG ", udec(consumerCogID), " as consumer for FIFO ", udec(fifoID), 13, 10)
 
 PUB getNextFrame() : framePtr | timeout, poolStart, poolEnd
   '' Get next available frame from pool
@@ -158,9 +185,10 @@ PUB getNextFrame() : framePtr | timeout, poolStart, poolEnd
     if ++timeout > 1000
       return 0  ' Timeout after 1 second
 
-PUB commitFrame(fifoID, framePtr) : result | poolStart, poolEnd
+PUB commitFrame(fifoID, framePtr) : result | poolStart, poolEnd, consumerCog
   '' Commit frame to specified FIFO
   '' Makes frame visible to consumers
+  '' If a consumer is registered, sends COGATN to wake it
 
   ' Calculate valid frame pool address range for validation
   poolStart := @framePool
@@ -170,6 +198,8 @@ PUB commitFrame(fifoID, framePtr) : result | poolStart, poolEnd
   if framePtr < poolStart or framePtr >= poolEnd
     debug("FIFO FATAL: commitFrame() ptr=", uhex_long(framePtr), " INVALID! Expected ", uhex_long(poolStart), "-", uhex_long(poolEnd), 13, 10)
     return ERR_INVALID
+
+  consumerCog := -1  ' No notification by default
 
   repeat until locktry(lock)
     ' Spin waiting for lock
@@ -181,11 +211,10 @@ PUB commitFrame(fifoID, framePtr) : result | poolStart, poolEnd
         if sensorTail >= FIFO_DEPTH
           debug("FIFO FATAL: sensorTail=", udec(sensorTail), " OVERFLOW! Resetting.", 13, 10)
           sensorTail := 0  ' Emergency reset
-        ' Debug disabled for performance - enable when debugging FIFO issues
-        'debug("FIFO commit SENSOR: tail=", udec(sensorTail), " addr=", uhex_long(@sensorFIFO + (sensorTail << 2)), " ptr=", uhex_long(framePtr), 13, 10)
         LONG[@sensorFIFO][sensorTail] := framePtr
         sensorTail := (sensorTail + 1) // FIFO_DEPTH
         sensorCount++
+        consumerCog := sensorConsumerCog
         result := SUCCESS
       else
         result := ERR_FULL
@@ -199,6 +228,7 @@ PUB commitFrame(fifoID, framePtr) : result | poolStart, poolEnd
         LONG[@hdmiFIFO][hdmiTail] := framePtr
         hdmiTail := (hdmiTail + 1) // FIFO_DEPTH
         hdmiCount++
+        consumerCog := hdmiConsumerCog
         result := SUCCESS
       else
         result := ERR_FULL
@@ -212,6 +242,7 @@ PUB commitFrame(fifoID, framePtr) : result | poolStart, poolEnd
         LONG[@oledFIFO][oledTail] := framePtr
         oledTail := (oledTail + 1) // FIFO_DEPTH
         oledCount++
+        consumerCog := oledConsumerCog
         result := SUCCESS
       else
         result := ERR_FULL
@@ -220,6 +251,11 @@ PUB commitFrame(fifoID, framePtr) : result | poolStart, poolEnd
       result := ERR_INVALID
 
   lockrel(lock)
+
+  ' Notify consumer COG if registered (AFTER releasing lock)
+  if consumerCog >= 0 and result == SUCCESS
+    notifyConsumer(consumerCog)
+
   return result
 
 PUB dequeue(fifoID) : framePtr | timeout, poolStart, poolEnd
@@ -321,6 +357,90 @@ PUB dequeue(fifoID) : framePtr | timeout, poolStart, poolEnd
     if ++timeout > 1000
       return 0  ' Timeout
 
+PUB dequeueEventDriven(fifoID) : framePtr | poolStart, poolEnd
+  '' Event-driven dequeue - uses WAITATN instead of polling
+  '' Consumer must call registerConsumer() first!
+  '' This method:
+  ''   1. Waits for COGATN from producer (zero-power wait)
+  ''   2. Attempts to dequeue frame
+  ''   3. Returns frame pointer, or 0 if FIFO was empty (spurious wake)
+  ''
+  '' Caller should loop on this: framePtr := dequeueEventDriven(FIFO_HDMI)
+
+  ' Wait for producer to signal data available
+  org
+    waitatn
+  end
+
+  ' Calculate valid frame pool address range for validation
+  poolStart := @framePool
+  poolEnd := @framePool + (MAX_FRAMES * FRAME_SIZE)
+
+  repeat until locktry(lock)
+    ' Spin waiting for lock
+
+  case fifoID
+    FIFO_HDMI:
+      if hdmiCount > 0
+        if hdmiHead >= FIFO_DEPTH
+          hdmiHead := 0
+          hdmiTail := 0
+          hdmiCount := 0
+          lockrel(lock)
+          return 0
+        framePtr := LONG[@hdmiFIFO][hdmiHead]
+        if framePtr < poolStart or framePtr >= poolEnd
+          hdmiHead := (hdmiHead + 1) // FIFO_DEPTH
+          hdmiCount--
+          lockrel(lock)
+          return 0
+        hdmiHead := (hdmiHead + 1) // FIFO_DEPTH
+        hdmiCount--
+        lockrel(lock)
+        return framePtr
+
+    FIFO_OLED:
+      if oledCount > 0
+        if oledHead >= FIFO_DEPTH
+          oledHead := 0
+          oledTail := 0
+          oledCount := 0
+          lockrel(lock)
+          return 0
+        framePtr := LONG[@oledFIFO][oledHead]
+        if framePtr < poolStart or framePtr >= poolEnd
+          oledHead := (oledHead + 1) // FIFO_DEPTH
+          oledCount--
+          lockrel(lock)
+          return 0
+        oledHead := (oledHead + 1) // FIFO_DEPTH
+        oledCount--
+        lockrel(lock)
+        return framePtr
+
+    FIFO_SENSOR:
+      if sensorCount > 0
+        if sensorHead >= FIFO_DEPTH
+          sensorHead := 0
+          sensorTail := 0
+          sensorCount := 0
+          lockrel(lock)
+          return 0
+        framePtr := LONG[@sensorFIFO][sensorHead]
+        if framePtr < poolStart or framePtr >= poolEnd
+          sensorHead := (sensorHead + 1) // FIFO_DEPTH
+          sensorCount--
+          lockrel(lock)
+          return 0
+        sensorHead := (sensorHead + 1) // FIFO_DEPTH
+        sensorCount--
+        lockrel(lock)
+        return framePtr
+
+  ' FIFO empty (spurious wake or race condition)
+  lockrel(lock)
+  return 0
+
 PUB releaseFrame(framePtr) | poolStart, poolEnd
   '' Return frame to free pool
   '' Called by consumers when done with frame
@@ -398,3 +518,15 @@ PUB checkFreeListIntegrity() : corrupted | i, ptr, poolStart, poolEnd
         return i
 
   return -1  ' All OK
+
+PRI notifyConsumer(targetCog) | cogMask
+  '' Send COGATN to wake a specific consumer COG
+  '' Uses inline PASM for the COGATN instruction
+  '' @param targetCog - COG to notify (0-7)
+
+  ' Build bitmask for target COG (bit N for COG N)
+  cogMask := 1 << targetCog
+
+  org
+    cogatn  cogMask
+  end

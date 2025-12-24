@@ -82,6 +82,10 @@ VAR { tile sensor variables }
     ' Test pattern state
     LONG    test_frame_counter          ' Test mode: current frame index (0-5)
 
+    ' FIFO diagnostics
+    LONG    status_counter              ' Counter for periodic status output
+    LONG    decimated_count             ' Count of frames dropped due to full FIFO
+
 CON { acquisition modes }
 
     #0                              ' Start enumeration at 0
@@ -410,9 +414,9 @@ PRI acquire_sensor_frame() | framePtr, sensor_val, buf_ptr, total_sensor_count, 
 
     ' Get frame buffer from FIFO
     framePtr := fifo.getNextFrame()
-    debug("SENSOR: GET ptr=", uhex_long(framePtr), 13, 10)
     if framePtr == 0
-        waitms(1)
+        ' No free frames - micro-backoff, not 1ms
+        waitus(10)
         return
 
     ' CRITICAL: Pre-load unified lookup table address BEFORE inline PASM
@@ -581,17 +585,16 @@ PRI acquire_sensor_frame() | framePtr, sensor_val, buf_ptr, total_sensor_count, 
     END
 
     ' Commit completed frame to sensor FIFO
-    debug("SENSOR: COMMIT ptr=", uhex_long(framePtr), 13, 10)
     if fifo.commitFrame(fifo.FIFO_SENSOR, framePtr) < 0
-        ' FIFO full - release frame back to pool
-        debug("SENSOR: RELEASE (full) ptr=", uhex_long(framePtr), 13, 10)
+        ' FIFO full - release frame back to pool (decimation)
         fifo.releaseFrame(framePtr)
     else
         ' Frame committed successfully
         frame_count++
 
-    ' Minimal delay - decimator debug removed so it can keep up
-    waitus(10)                          ' 10 us gap - ~1,370 fps max
+    ' FULL SPEED: No artificial delay - natural timing is:
+    '   SPI: 24 bits × 64 sensors × (1/2.5MHz) = ~614µs per frame
+    '   Plus pipeline overhead: ~750µs total = ~1,330 fps theoretical max
 
 PRI adc_verify_scan() | scan_num, sensor_num, raw_value, processed_value, event_config
 '' ADC Verification Mode: Perform exactly 2 full scans with detailed logging

@@ -188,12 +188,17 @@ PRI oled_loop() | framePtr, row, col, sensorVal, color, idx, changed
     ' Normal operation - process FIFO
     debug("OLED Loop: FIFO processing mode active", 13, 10)
 
+    ' Register this COG as OLED FIFO consumer for event-driven wake-ups
+    fifo.registerConsumer(FIFO_OLED, cogid())
+    debug("OLED Loop: Registered COG ", udec(cogid()), " for event-driven dequeue", 13, 10)
+
     ' Clear display initially
     oled.clear()
 
     repeat
-      ' Dequeue frame from OLED FIFO (blocking)
-      framePtr := fifo.dequeue(FIFO_OLED)
+      ' Event-driven dequeue: sleeps until producer sends COGATN
+      ' Zero jitter, zero power while waiting
+      framePtr := fifo.dequeueEventDriven(FIFO_OLED)
 
       if framePtr <> 0
         ' Log first frame received
