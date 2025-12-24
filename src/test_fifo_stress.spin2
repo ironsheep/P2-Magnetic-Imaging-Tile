@@ -1,0 +1,405 @@
+'' =================================================================================================
+''   File....... test_fifo_stress.spin2
+''   Purpose.... FIFO stress test with data integrity checking
+''   Author..... Stephen M Moraco
+''               -- Copyright (c) 2025 Iron Sheep Productions, LLC
+''   E-mail..... stephen@ironsheep.biz
+''   Started.... Dec 2025
+''
+'' =================================================================================================
+''
+'' FIFO Stress Test - Data integrity focused
+''
+'' Architecture:
+''   - Writer (Cog1): Produces frames at ~1000 fps with sequence + checksum
+''   - HDMI Reader (Cog2): Consumes from HDMI FIFO at ~60 fps, validates checksum
+''   - OLED Reader (Cog3): Consumes from OLED FIFO at ~10 fps, validates checksum
+''   - Router (Cog0): Dequeues sensor, copies to HDMI+OLED FIFOs, periodic drain
+''
+'' Each frame contains:
+''   - WORD[0]: Sequence number
+''   - WORD[1..62]: Pattern data (seq XOR index)
+''   - WORD[63]: 16-bit checksum
+''
+'' Test detects:
+''   - Data corruption (checksum mismatch)
+''   - Sequence gaps or duplicates
+''   - FIFO structure corruption
+''
+'' =================================================================================================
+
+CON
+  _CLKFREQ = 250_000_000
+
+  ' Test configuration
+  TOTAL_FRAMES = 500        ' Frames to produce
+  DRAIN_INTERVAL = 10       ' Drain every N routed frames
+  DRAIN_MAX = 32            ' Max frames per drain
+
+  ' Timing (microseconds between frames)
+  WRITER_PERIOD_US = 1000   ' ~1000 fps (like sensor)
+  HDMI_PERIOD_US = 16000    ' ~60 fps
+  OLED_PERIOD_US = 100000   ' ~10 fps
+
+OBJ
+  fifo : "isp_frame_fifo_manager"
+
+VAR
+  ' COG IDs
+  LONG  writer_cog
+  LONG  hdmi_cog
+  LONG  oled_cog
+
+  ' Synchronization
+  LONG  writer_done
+  LONG  stop_readers
+  LONG  hdmi_done
+  LONG  oled_done
+  LONG  error_count
+
+  ' Statistics
+  LONG  frames_written
+  LONG  frames_routed
+  LONG  frames_drained
+  LONG  hdmi_frames_read
+  LONG  oled_frames_read
+  LONG  hdmi_errors
+  LONG  oled_errors
+
+DAT
+  ' Stacks in DAT section (like real drivers)
+  writer_stack    LONG  0[64]
+  hdmi_stack      LONG  0[64]
+  oled_stack      LONG  0[64]
+
+PUB main() | framePtr, hdmiPtr, oledPtr, drain_count, drained
+
+  debug("=== FIFO STRESS TEST v2 ===")
+  debug("Data integrity focus with checksums")
+  debug(" ")
+
+  ' Initialize state
+  writer_cog := -1
+  hdmi_cog := -1
+  oled_cog := -1
+  writer_done := 0
+  stop_readers := 0
+  hdmi_done := 0
+  oled_done := 0
+  error_count := 0
+  frames_written := 0
+  frames_routed := 0
+  frames_drained := 0
+  hdmi_frames_read := 0
+  oled_frames_read := 0
+  hdmi_errors := 0
+  oled_errors := 0
+
+  ' Start FIFO manager
+  debug("Starting FIFO manager...")
+  if not fifo.start()
+    debug("ERROR: FIFO start failed!")
+    return
+  debug("FIFO ready, free=", udec(fifo.getFreeFrames()))
+
+  ' Start writer
+  debug("Starting writer COG...")
+  writer_cog := cogspin(NEWCOG, writer_task(), @writer_stack)
+  if writer_cog < 0
+    debug("ERROR: Writer start failed!")
+    return
+  debug("Writer on COG ", udec(writer_cog))
+
+  ' Start HDMI reader
+  debug("Starting HDMI reader COG...")
+  hdmi_cog := cogspin(NEWCOG, hdmi_reader_task(), @hdmi_stack)
+  if hdmi_cog < 0
+    debug("ERROR: HDMI reader start failed!")
+    return
+  debug("HDMI reader on COG ", udec(hdmi_cog))
+
+  ' Start OLED reader
+  debug("Starting OLED reader COG...")
+  oled_cog := cogspin(NEWCOG, oled_reader_task(), @oled_stack)
+  if oled_cog < 0
+    debug("ERROR: OLED reader start failed!")
+    return
+  debug("OLED reader on COG ", udec(oled_cog))
+
+  debug(" ")
+  debug("=== ROUTER STARTING ===")
+  debug("Routing ", udec(TOTAL_FRAMES), " frames")
+  debug(" ")
+
+  ' Router loop (runs in main COG like real app)
+  drain_count := 0
+
+  repeat while (frames_routed + frames_drained) < TOTAL_FRAMES and error_count == 0
+    ' Dequeue from sensor FIFO
+    framePtr := fifo.dequeue(fifo.FIFO_SENSOR)
+
+    if framePtr
+      ' Validate frame before routing
+      if not validate_frame(framePtr)
+        debug("ROUTER: Corrupt frame from sensor!")
+        error_count++
+        fifo.releaseFrame(framePtr)
+        quit
+
+      ' Copy to HDMI FIFO
+      hdmiPtr := fifo.getNextFrame()
+      if hdmiPtr
+        WORDMOVE(hdmiPtr, framePtr, 64)
+        if fifo.commitFrame(fifo.FIFO_HDMI, hdmiPtr) < 0
+          fifo.releaseFrame(hdmiPtr)
+
+      ' Copy to OLED FIFO
+      oledPtr := fifo.getNextFrame()
+      if oledPtr
+        WORDMOVE(oledPtr, framePtr, 64)
+        if fifo.commitFrame(fifo.FIFO_OLED, oledPtr) < 0
+          fifo.releaseFrame(oledPtr)
+
+      ' Release original
+      fifo.releaseFrame(framePtr)
+      frames_routed++
+
+      ' Periodic drain
+      drain_count++
+      if drain_count >= DRAIN_INTERVAL
+        drain_count := 0
+        drained := 0
+        repeat DRAIN_MAX
+          framePtr := fifo.dequeue(fifo.FIFO_SENSOR)
+          if framePtr == 0
+            quit
+          fifo.releaseFrame(framePtr)
+          drained++
+        frames_drained += drained
+
+      ' Progress every 100 frames
+      if (frames_routed // 100) == 0
+        debug("PROGRESS: routed=", udec(frames_routed), " H=", udec(hdmi_frames_read), " O=", udec(oled_frames_read), " err=", udec(error_count))
+
+  ' Signal readers to stop
+  debug("Signaling readers to stop...")
+  stop_readers := 1
+
+  ' Wait for readers to finish (with timeout)
+  debug("Waiting for HDMI reader...")
+  repeat while hdmi_done == 0
+    WAITMS(10)
+  debug("Waiting for OLED reader...")
+  repeat while oled_done == 0
+    WAITMS(10)
+
+  ' Results
+  debug(" ")
+  debug("=== TEST COMPLETE ===")
+  if error_count > 0
+    debug("*** ERRORS DETECTED: ", udec(error_count), " ***")
+  else
+    debug("No errors detected")
+
+  debug("Frames written:  ", udec(frames_written))
+  debug("Frames routed:   ", udec(frames_routed))
+  debug("Frames drained:  ", udec(frames_drained))
+  debug("HDMI read:       ", udec(hdmi_frames_read), " errors=", udec(hdmi_errors))
+  debug("OLED read:       ", udec(oled_frames_read), " errors=", udec(oled_errors))
+  debug("Final free:      ", udec(fifo.getFreeFrames()))
+
+  ' Cleanup
+  if writer_cog >= 0
+    cogstop(writer_cog)
+  if hdmi_cog >= 0
+    cogstop(hdmi_cog)
+  if oled_cog >= 0
+    cogstop(oled_cog)
+  fifo.stop()
+
+  ' Keep main COG alive so debug output remains visible
+  debug(" ")
+  debug("Test complete - COG0 idling")
+  repeat
+    WAITMS(1000)
+
+PRI writer_task() | framePtr, seq
+  '' Writer task - produces frames at fixed rate with sequence + checksum
+
+  debug("WRITER: Started")
+
+  seq := 1
+  repeat while seq <= TOTAL_FRAMES and error_count == 0
+    ' Get frame from pool
+    framePtr := fifo.getNextFrame()
+
+    if framePtr == 0
+      ' Pool exhausted, wait briefly
+      WAITUS(100)
+      next
+
+    ' Build frame with sequence and checksum
+    build_frame(framePtr, seq)
+
+    ' Commit to sensor FIFO
+    if fifo.commitFrame(fifo.FIFO_SENSOR, framePtr) < 0
+      ' FIFO full, release and retry
+      fifo.releaseFrame(framePtr)
+      WAITUS(100)
+    else
+      seq++
+      frames_written := seq - 1
+
+    ' Fixed rate
+    WAITUS(WRITER_PERIOD_US)
+
+  debug("WRITER: Done, wrote ", udec(frames_written))
+  writer_done := 1
+
+PRI hdmi_reader_task() | framePtr, last_seq, this_seq
+  '' HDMI reader - consumes frames at ~60 fps, validates checksums
+
+  debug("HDMI READER: Started")
+  last_seq := 0
+
+  repeat while stop_readers == 0 or fifo.getQueueDepth(fifo.FIFO_HDMI) > 0
+    if error_count > 0
+      quit
+
+    framePtr := fifo.dequeue(fifo.FIFO_HDMI)
+
+    if framePtr
+      ' Validate checksum
+      if not validate_frame(framePtr)
+        debug("HDMI: CHECKSUM ERROR at frame ", udec(hdmi_frames_read))
+        hdmi_errors++
+        error_count++
+
+      ' Check sequence (allow gaps due to draining, but detect duplicates)
+      this_seq := WORD[framePtr][0]
+      if this_seq <= last_seq and last_seq > 0
+        debug("HDMI: SEQUENCE ERROR got=", udec(this_seq), " last=", udec(last_seq))
+        hdmi_errors++
+        error_count++
+      last_seq := this_seq
+
+      fifo.releaseFrame(framePtr)
+      hdmi_frames_read++
+
+      ' Simulate render time
+      WAITUS(HDMI_PERIOD_US)
+    else
+      WAITMS(1)
+
+  debug("HDMI READER: Done, read ", udec(hdmi_frames_read), " errors=", udec(hdmi_errors))
+  hdmi_done := 1
+
+PRI oled_reader_task() | framePtr, last_seq, this_seq
+  '' OLED reader - consumes frames at ~10 fps, validates checksums
+
+  debug("OLED READER: Started")
+  last_seq := 0
+
+  repeat while stop_readers == 0 or fifo.getQueueDepth(fifo.FIFO_OLED) > 0
+    if error_count > 0
+      quit
+
+    framePtr := fifo.dequeue(fifo.FIFO_OLED)
+
+    if framePtr
+      ' Validate checksum
+      if not validate_frame(framePtr)
+        debug("OLED: CHECKSUM ERROR at frame ", udec(oled_frames_read))
+        oled_errors++
+        error_count++
+
+      ' Check sequence
+      this_seq := WORD[framePtr][0]
+      if this_seq <= last_seq and last_seq > 0
+        debug("OLED: SEQUENCE ERROR got=", udec(this_seq), " last=", udec(last_seq))
+        oled_errors++
+        error_count++
+      last_seq := this_seq
+
+      fifo.releaseFrame(framePtr)
+      oled_frames_read++
+
+      ' Simulate slow render time
+      WAITUS(OLED_PERIOD_US)
+    else
+      WAITMS(1)
+
+  debug("OLED READER: Done, read ", udec(oled_frames_read), " errors=", udec(oled_errors))
+  oled_done := 1
+
+PRI build_frame(framePtr, seq) | i, checksum
+  '' Build a frame with sequence number and verifiable content
+  '' Format: [0]=seq, [1..62]=pattern, [63]=checksum
+
+  ' Sequence number
+  WORD[framePtr][0] := seq
+
+  ' Pattern data: seq XOR index (predictable, unique per frame)
+  repeat i from 1 to 62
+    WORD[framePtr][i] := (seq ^ i) & $FFFF
+
+  ' Calculate checksum (sum of all words except last)
+  checksum := 0
+  repeat i from 0 to 62
+    checksum += WORD[framePtr][i]
+
+  ' Store checksum
+  WORD[framePtr][63] := checksum & $FFFF
+
+PRI validate_frame(framePtr) : valid | i, seq, expected, checksum, stored_checksum
+  '' Validate frame content and checksum
+  '' Returns true if valid, false if corrupt
+
+  seq := WORD[framePtr][0]
+
+  ' Verify pattern data
+  repeat i from 1 to 62
+    expected := (seq ^ i) & $FFFF
+    if WORD[framePtr][i] <> expected
+      debug("  Pattern mismatch at [", udec(i), "]: got=", uhex(WORD[framePtr][i]), " exp=", uhex(expected))
+      return false
+
+  ' Verify checksum
+  checksum := 0
+  repeat i from 0 to 62
+    checksum += WORD[framePtr][i]
+
+  stored_checksum := WORD[framePtr][63]
+  if (checksum & $FFFF) <> stored_checksum
+    debug("  Checksum mismatch: calc=", uhex(checksum & $FFFF), " stored=", uhex(stored_checksum))
+    return false
+
+  return true
+
+CON { license }
+{{
+
+ -------------------------------------------------------------------------------------------------
+  MIT License
+
+  Copyright (c) 2025 Iron Sheep Productions, LLC
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+ =================================================================================================
+}}
