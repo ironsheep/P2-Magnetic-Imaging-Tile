@@ -16,10 +16,15 @@ CON
   CELL_SIZE   = 30        ' Size of each sensor cell in pixels
   CELL_GAP    = 3         ' Gap between cells in pixels
 
-  ' Color mapping ranges
-  MIN_FIELD   = 0         ' Minimum field value
-  MAX_FIELD   = 65535     ' Maximum field value (16-bit AD7680 ADC)
-  MID_FIELD   = 32768     ' Neutral field value (16-bit midpoint)
+  ' Color mapping ranges - FULL ADC range with observed baseline
+  ' See DOCs/MagSensor-Color-Mapping-Specification.md for details
+  ' Uses full 16-bit ADC range to accommodate stronger magnets in future
+  SENSOR_MIN = 0          ' ADC minimum (theoretical full negative saturation)
+  SENSOR_MID = 20500      ' Zero field baseline (observed neutral point)
+  SENSOR_MAX = 65535      ' ADC maximum (theoretical full positive saturation)
+  NEGATIVE_RANGE = 20500  ' SENSOR_MID - SENSOR_MIN (0 to 20500)
+  POSITIVE_RANGE = 45035  ' SENSOR_MAX - SENSOR_MID (20500 to 65535)
+  GRAY_BASE = 32          ' Neutral gray intensity (dark gray background)
 
   ' FIFO IDs (must match isp_frame_fifo_manager)
   FIFO_HDMI   = 1
@@ -36,7 +41,6 @@ VAR
   long  cog_id
   long  frame_count
   long  display_mode
-  long  color_palette[8]
   long  current_frame_ptr
   long  base_pin
   long  grid_drawn              ' Flag: 0=not drawn, 1=drawn
@@ -63,12 +67,7 @@ PUB start(hdmi_base_pin) : ok
   ' Save pin configuration
   base_pin := hdmi_base_pin
 
-  ' Initialize color palette for magnetic field visualization
-  debug("HDMI Engine: Initializing palette...", 13, 10)
-  init_palette()
-  debug("HDMI Engine: Palette initialized", 13, 10)
-
-  ' Initialize variables
+  ' Initialize variables (no palette needed - using direct RGB calculation)
   debug("HDMI Engine: Setting variables...", 13, 10)
   frame_count := 0
   display_mode := 0
@@ -126,19 +125,6 @@ PUB get_current_frame() : ptr
 ' PUB show_test_pattern() | row, col, value
 '   '' Display a test pattern directly (bypasses FIFO)
 '   '' Removed - graphics drawing now handled in main()
-
-PRI init_palette()
-  '' Initialize color palette for field strength visualization
-  '' Blue (negative) -> Green (neutral) -> Red (positive)
-
-  color_palette[0] := $000080FF  ' Strong negative - Dark blue
-  color_palette[1] := $0000FFFF  ' Negative - Bright blue
-  color_palette[2] := $0080FFFF  ' Weak negative - Cyan
-  color_palette[3] := $00FF00FF  ' Neutral - Green
-  color_palette[4] := $80FF00FF  ' Weak positive - Yellow-green
-  color_palette[5] := $FFFF00FF  ' Positive - Yellow
-  color_palette[6] := $FF8000FF  ' Strong positive - Orange
-  color_palette[7] := $FF0000FF  ' Very strong positive - Red
 
 PRI display_loop() | framePtr, row, col, sensorIdx, sensorVal, cellColor
   '' Main display loop running in dedicated COG
@@ -249,41 +235,39 @@ PRI DrawStaticLabels() | row, col, labelX, labelY
   gfx.DrawText(10, 460, @"Mode: TEST_PATTERN", $FFFF00FF)  ' Yellow
   gfx.DrawText(200, 460, @"FIFOs: S:0 H:1 Free:31", $00FF00FF)  ' Green
 
-PRI field_to_color(fieldVal) : color | index
-  '' Convert magnetic field value to display color
+PRI field_to_color(fieldVal) : color | r, g, b, intensity, gray_fade
+  '' Convert magnetic field value to display color using direct RGB calculation
   '' @param fieldVal - 16-bit sensor reading
-  '' @returns color in RRGGBBAA format
+  '' @returns color in RRGGBBAA format (24-bit color, 256 levels per channel)
+  ''
+  '' Formula from DOCs/MagSensor-Color-Mapping-Specification.md:
+  ''   Negative field (< SENSOR_MID): Red intensity proportional to deviation
+  ''   Positive field (> SENSOR_MID): Green intensity proportional to deviation
+  ''   Neutral (= SENSOR_MID): Dark gray
+  ''
+  '' Values beyond observed range saturate to full color intensity.
 
-  ' Map field value to palette index (0-7)
-  if fieldVal < MID_FIELD / 2
-    index := 0  ' Strong negative
-  elseif fieldVal < MID_FIELD * 3 / 4
-    index := 1  ' Negative
-  elseif fieldVal < MID_FIELD * 7 / 8
-    index := 2  ' Weak negative
-  elseif fieldVal < MID_FIELD * 9 / 8
-    index := 3  ' Neutral
-  elseif fieldVal < MID_FIELD * 5 / 4
-    index := 4  ' Weak positive
-  elseif fieldVal < MID_FIELD * 3 / 2
-    index := 5  ' Positive
-  elseif fieldVal < MID_FIELD * 7 / 4
-    index := 6  ' Strong positive
+  ' Clamp to observed range - values beyond just saturate to full color
+  fieldVal := SENSOR_MIN #> fieldVal <# SENSOR_MAX
+
+  if fieldVal < SENSOR_MID
+    ' Negative field: Red with fading gray
+    ' intensity = 255 * (SENSOR_MID - fieldVal) / NEGATIVE_RANGE
+    ' gray_fade = GRAY_BASE * (fieldVal - SENSOR_MIN) / NEGATIVE_RANGE
+    intensity := ((SENSOR_MID - fieldVal) * 255) / NEGATIVE_RANGE
+    gray_fade := ((fieldVal - SENSOR_MIN) * GRAY_BASE) / NEGATIVE_RANGE
+    r := intensity
+    g := gray_fade
+    b := gray_fade
   else
-    index := 7  ' Very strong positive
+    ' Positive field: Green with fading gray
+    ' intensity = 255 * (fieldVal - SENSOR_MID) / POSITIVE_RANGE
+    ' gray_fade = GRAY_BASE * (SENSOR_MAX - fieldVal) / POSITIVE_RANGE
+    intensity := ((fieldVal - SENSOR_MID) * 255) / POSITIVE_RANGE
+    gray_fade := ((SENSOR_MAX - fieldVal) * GRAY_BASE) / POSITIVE_RANGE
+    r := gray_fade
+    g := intensity
+    b := gray_fade
 
-  ' Apply display mode transformations if needed
-  case display_mode
-    0:  ' Normal mode
-      color := color_palette[index]
-    1:  ' Enhanced contrast mode
-      ' Expand the color range for better visibility
-      if index < 3
-        index := 0  ' More blue
-      elseif index > 4
-        index := 7  ' More red
-      color := color_palette[index]
-    other:
-      color := color_palette[index]
-
-  return color
+  ' Pack as RRGGBBAA (alpha = FF for fully opaque)
+  color := (r << 24) | (g << 16) | (b << 8) | $FF

@@ -52,6 +52,18 @@ CON
   CELL_WIDTH  = WIDTH / SENSOR_GRID_SIZE    ' 16 pixels per cell
   CELL_HEIGHT = HEIGHT / SENSOR_GRID_SIZE   ' 16 pixels per cell
 
+  ' Sensor value calibration - FULL ADC RANGE
+  ' See DOCs/MagSensor-Color-Mapping-Specification.md for details
+  ' Uses full 16-bit ADC range to accommodate stronger magnets in future
+  ' Baseline observed at ~20500, but map entire ADC range for future-proofing
+  SENSOR_MIN = 0          ' ADC minimum (theoretical full negative saturation)
+  SENSOR_MID = 20500      ' Zero field baseline (observed neutral point)
+  SENSOR_MAX = 65535      ' ADC maximum (theoretical full positive saturation)
+  SENSOR_RANGE = 65535    ' Full ADC range for LUT scaling
+  NEGATIVE_RANGE = 20500  ' SENSOR_MID - SENSOR_MIN (0 to 20500)
+  POSITIVE_RANGE = 45035  ' SENSOR_MAX - SENSOR_MID (20500 to 65535)
+  GRAY_BASE = 32          ' Neutral gray intensity (dark gray background)
+
   ' Display orientation (based on ribbon connector position)
   ORIENTATION_0   = 0  ' Ribbon at BOTTOM (hardware default)
   ORIENTATION_90  = 1  ' Ribbon at LEFT (display rotated 90° clockwise)
@@ -85,10 +97,11 @@ CON
   CMD_MUX_RATIO       = $CA  ' Set MUX Ratio
   CMD_COMMAND_LOCK    = $FD  ' Set Command Lock
 
-  ' Color mapping ranges
-  MIN_FIELD   = 0         ' Minimum field value
-  MAX_FIELD   = 65535     ' Maximum field value (16-bit AD7680 ADC)
-  MID_FIELD   = 32768     ' Neutral field value (16-bit midpoint)
+  ' Multi-resolution display modes (future: 8x8 → 16x16 → 32x32 interpolation)
+  ' Sensor data always 8x8; interpolator expands for higher resolution display
+  DISPLAY_MODE_8X8  = 0   ' Direct sensor values (64 cells)
+  DISPLAY_MODE_16X16 = 1  ' 2x interpolated (256 cells)
+  DISPLAY_MODE_32X32 = 2  ' 4x interpolated (1024 cells)
 
 OBJ
   fifo : "isp_frame_fifo_manager"
@@ -278,8 +291,8 @@ PUB display_frame(framePtr) | row, col, sensor_idx, value, color, x, y, px, py, 
       ' Read sensor value (WORD)
       value := WORD[framePtr][sensor_idx]
 
-      ' Convert sensor value to color
-      color := value_to_color(value, MIN_FIELD, MAX_FIELD)
+      ' Convert sensor value to color (uses unified formula internally)
+      color := value_to_color(value, SENSOR_MIN, SENSOR_MAX)
 
       ' Calculate pixel position with orientation-specific coordinate transformation
       transform_coordinates(row, col, @x, @y)
@@ -411,10 +424,27 @@ PRI render_to_pixel_buffer(framePtr) | frame_ptr, lut_ptr, origin_lut_ptr, buf_p
         mov     pb, cell_count        ' 64 cells to process
 
 .cell_loop
-        ' Read sensor value (WORD) and clamp to 12-bit
+        ' Read sensor value (WORD) and scale to 12-bit LUT index
+        ' Actual sensor range: SENSOR_MIN to SENSOR_MAX
+        ' Scale: LUT_index = ((sensor_val - SENSOR_MIN) * 4095) / SENSOR_RANGE
         rdword  sensor_val, ptra++
+
+        ' Subtract SENSOR_MIN to shift range to 0-based
+        sub     sensor_val, ##SENSOR_MIN
+        fges    sensor_val, #0        ' Clamp min to 0 if below SENSOR_MIN
+
+        ' Scale: (val * 4095) / SENSOR_RANGE
+        ' Use QMUL/QDIV for 32-bit precision
+        setq    #0                    ' High 32 bits = 0 (fits in 9-bit)
+        qmul    sensor_val, ##4095    ' sensor_val * 4095 (4095 > 511, needs ##)
+        getqx   sensor_val            ' Get low 32 bits of result
+        setq    #0                    ' High 32 bits for division = 0
+        qdiv    sensor_val, ##SENSOR_RANGE   ' Divide by range
+        getqx   sensor_val            ' Get quotient (LUT index 0-4095)
+
+        ' Final clamp to valid LUT range (4095 > 511, needs ##)
         fle     sensor_val, ##4095    ' Clamp max to 4095
-        fges    sensor_val, #0        ' Clamp min to 0
+        fges    sensor_val, #0        ' Clamp min to 0 (0 fits in 9-bit #)
 
         ' Lookup color from LUT: color = lut_ptr[sensor_val]
         ' LUT is WORD array, so offset = sensor_val * 2
@@ -621,13 +651,16 @@ PRI init_hardware() | clk_period, temp, i
 
   debug("  Hardware initialization complete", 13, 10)
 
-PRI init_color_lut() | i, normalized, r, g, b, color, start_ms, corruption_idx
-'' Build color lookup table mapping 12-bit sensor values to RGB565 colors
-'' Full resolution: each of 4096 sensor values gets unique color
-'' Color gradient: Blue (cold) -> Green (neutral) -> Red (hot)
+PRI init_color_lut() | i, sensor_val, r, g, b, color, start_ms, corruption_idx, intensity, gray_fade
+'' Build color lookup table mapping 12-bit LUT indices to RGB565 colors
+'' LUT index maps to full ADC range: index 0 = ADC 0, index 4095 = ADC 65535
+'' Uses unified formula from DOCs/MagSensor-Color-Mapping-Specification.md
+'' Color gradient: Red (negative) -> Dark Gray (neutral) -> Green (positive)
+'' Matches HDMI color scheme for consistent display
 
   debug("  Building color LUT (4096 entries)...", 13, 10)
   debug("  color_lut addr=", uhex_long(@color_lut), " size=", udec(4096*2), " bytes", 13, 10)
+  debug("  Baseline at LUT index: ", udec((SENSOR_MID * 4095) / SENSOR_RANGE), 13, 10)
   start_ms := getms()
 
   repeat i from 0 to 4095
@@ -637,21 +670,35 @@ PRI init_color_lut() | i, normalized, r, g, b, color, start_ms, corruption_idx
       if corruption_idx >= 0
         debug("*** OLED LUT: FIFO CORRUPT at i=", udec(i), " freeList[", udec(corruption_idx), "] ***", 13, 10)
 
-    ' Normalize to 0-511 range (full 12-bit resolution, scaled for color calc)
-    ' Use 512 steps to get smooth gradient across full range
-    normalized := (i * 511) / 4095
+    ' Convert LUT index back to sensor value (0-65535)
+    ' index 0 = sensor 0, index 4095 = sensor 65535
+    sensor_val := (i * SENSOR_MAX) / 4095
 
-    ' Bipolar color mapping with full resolution
-    if normalized < 256
-      ' Blue to Green (cold to neutral): 0-255
-      r := 0
-      g := normalized                     ' 0 -> 255
-      b := 255 - normalized               ' 255 -> 0
+    ' Apply unified color formula (same as HDMI)
+    ' See DOCs/MagSensor-Color-Mapping-Specification.md
+    if sensor_val < SENSOR_MID
+      ' Negative field: Red with fading gray
+      ' intensity = 255 * (SENSOR_MID - sensor_val) / NEGATIVE_RANGE
+      ' gray_fade = GRAY_BASE * (sensor_val - SENSOR_MIN) / NEGATIVE_RANGE
+      intensity := ((SENSOR_MID - sensor_val) * 255) / NEGATIVE_RANGE
+      gray_fade := (sensor_val * GRAY_BASE) / NEGATIVE_RANGE
+      r := intensity
+      g := gray_fade
+      b := gray_fade
     else
-      ' Green to Red (neutral to hot): 256-511
-      r := normalized - 256               ' 0 -> 255
-      g := 511 - normalized               ' 255 -> 0
-      b := 0
+      ' Positive field: Green with fading gray
+      ' intensity = 255 * (sensor_val - SENSOR_MID) / POSITIVE_RANGE
+      ' gray_fade = GRAY_BASE * (SENSOR_MAX - sensor_val) / POSITIVE_RANGE
+      intensity := ((sensor_val - SENSOR_MID) * 255) / POSITIVE_RANGE
+      gray_fade := ((SENSOR_MAX - sensor_val) * GRAY_BASE) / POSITIVE_RANGE
+      r := gray_fade
+      g := intensity
+      b := gray_fade
+
+    ' Clamp values to valid range (shouldn't be needed but safety)
+    r := 0 #> r <# 255
+    g := 0 #> g <# 255
+    b := 0 #> b <# 255
 
     ' Convert 8-bit RGB to 5-6-5 BGR565 format (SSD1351 expects BGR)
     color := ((b >> 3) << 11) | ((g >> 2) << 5) | (r >> 3)
@@ -910,37 +957,42 @@ PRI transform_coordinates(row, col, x_ptr, y_ptr) | x, y, temp_row, temp_col
   LONG[x_ptr] := x
   LONG[y_ptr] := y
 
-PRI value_to_color(value, min_val, max_val) : color | range, normalized, r, g, b
-'' Convert sensor value to RGB565 color using bipolar color mapping
-'' @param value - sensor value
-'' @param min_val - minimum expected value
-'' @param max_val - maximum expected value
+PRI value_to_color(value, min_val, max_val) : color | r, g, b, intensity, gray_fade
+'' Convert sensor value to RGB565 color using unified bipolar color mapping
+'' @param value - sensor value (0-65535)
+'' @param min_val - minimum expected value (unused, kept for API compatibility)
+'' @param max_val - maximum expected value (unused, kept for API compatibility)
 '' @returns RGB565 color (16-bit)
 ''
+'' Uses unified formula from DOCs/MagSensor-Color-Mapping-Specification.md
 '' Color mapping:
-''   Below midpoint -> Blue (cold)
-''   At midpoint -> Green (neutral)
-''   Above midpoint -> Red (hot)
+''   Below SENSOR_MID (20500) -> Red (negative field)
+''   At SENSOR_MID -> Dark Gray (neutral/background)
+''   Above SENSOR_MID -> Green (positive field)
 
-  range := max_val - min_val
-  if range == 0
-    return $07E0  ' Green if no range
+  ' Clamp to valid ADC range
+  value := SENSOR_MIN #> value <# SENSOR_MAX
 
-  ' Normalize to 0-255 range
-  normalized := ((value - min_val) * 255) / range
-  normalized := 0 #> normalized <# 255
-
-  ' Bipolar color mapping
-  if normalized < 128
-    ' Blue to Green (cold to neutral)
-    r := 0
-    g := (normalized * 2)
-    b := 255 - (normalized * 2)
+  ' Apply unified color formula (same as HDMI and LUT)
+  if value < SENSOR_MID
+    ' Negative field: Red with fading gray
+    intensity := ((SENSOR_MID - value) * 255) / NEGATIVE_RANGE
+    gray_fade := (value * GRAY_BASE) / NEGATIVE_RANGE
+    r := intensity
+    g := gray_fade
+    b := gray_fade
   else
-    ' Green to Red (neutral to hot)
-    r := ((normalized - 128) * 2)
-    g := 255 - ((normalized - 128) * 2)
-    b := 0
+    ' Positive field: Green with fading gray
+    intensity := ((value - SENSOR_MID) * 255) / POSITIVE_RANGE
+    gray_fade := ((SENSOR_MAX - value) * GRAY_BASE) / POSITIVE_RANGE
+    r := gray_fade
+    g := intensity
+    b := gray_fade
+
+  ' Clamp to valid range
+  r := 0 #> r <# 255
+  g := 0 #> g <# 255
+  b := 0 #> b <# 255
 
   ' Convert 8-bit RGB to 5-6-5 BGR565 format (SSD1351 expects BGR, not RGB)
   color := ((b >> 3) << 11) | ((g >> 2) << 5) | (r >> 3)
