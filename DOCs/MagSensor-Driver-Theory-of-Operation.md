@@ -2,9 +2,9 @@
 **Magnetic Imaging Tile - isp_tile_sensor.spin2**
 
 ## Document Version
-- **Version:** 1.3
+- **Version:** 1.4
 - **Date:** 2025-12-23
-- **Status:** Implementation Documentation - VERIFIED MAPPING
+- **Status:** Implementation Documentation - VERIFIED MAPPING + EVENT-DRIVEN FIFO
 
 > **NOTE**: This document describes the *implemented* sensor mapping based on empirical testing.
 > The unified_sensor_map table v3 has been **VERIFIED** via quadrant center testing.
@@ -15,12 +15,14 @@
 The tile sensor driver (`isp_tile_sensor.spin2`) is a high-performance, single-COG solution for acquiring magnetic field data from the SparkFun Magnetic Imaging Tile V3. Through careful optimization using pipelined SPI transfers, the driver achieves **~1,370 fps** frame rate capability while consuming only a single COG resource.
 
 ### Key Achievements
-- **~1,370 fps** theoretical frame rate (measured)
+- **~1,330 fps** theoretical frame rate (full-speed operation)
 - **11.2 us** per sensor read (pipelined)
-- **718 us** total frame acquisition time (64 sensors)
+- **~750 us** total frame acquisition time (64 sensors)
 - **Single COG** operation
 - **Smart Pin** SPI for hardware-assisted ADC communication
 - **Pipelined** counter advance overlaps with SPI transfer time
+- **Event-driven FIFO** with COGATN wake-up of consumer COGs
+- **Zero artificial delays** - runs at natural SPI timing limit
 
 ### Performance Comparison
 | Metric | Before Optimization | After Optimization | Improvement |
@@ -625,6 +627,80 @@ Each frame is 128 bytes (64 sensors x 2 bytes per sensor):
 
 ---
 
+## Event-Driven FIFO Integration
+
+### Producer-Consumer Architecture
+
+The sensor driver operates as a **producer** in an event-driven architecture:
+
+```
+Sensor COG (Producer)          Consumer COGs (HDMI/OLED)
+        │                              │
+        │ acquire_sensor_frame()       │ dequeueEventDriven()
+        │         │                    │         │
+        │         ▼                    │         ▼
+        │ ┌─────────────┐              │ ┌─────────────┐
+        │ │ Get frame   │              │ │ WAITATN     │ ← Zero-power wait
+        │ │ from pool   │              │ │ (sleeping)  │
+        │ └─────────────┘              │ └─────────────┘
+        │         │                    │         │
+        │         ▼                    │         │
+        │ ┌─────────────┐              │         │
+        │ │ Fill frame  │              │         │
+        │ │ (64 sensors)│              │         │
+        │ └─────────────┘              │         │
+        │         │                    │         │
+        │         ▼                    │         │
+        │ ┌─────────────┐              │         │
+        │ │ commitFrame │──── COGATN ──│────────►│ Wake!
+        │ │ + notify    │              │         │
+        │ └─────────────┘              │         ▼
+        │         │                    │ ┌─────────────┐
+        │         │                    │ │ Dequeue &   │
+        │         │                    │ │ render      │
+        │         │                    │ └─────────────┘
+```
+
+### Full-Speed Operation
+
+The sensor runs at maximum SPI speed with **zero artificial delays**:
+
+```spin2
+' After frame acquisition completes:
+if fifo.commitFrame(fifo.FIFO_SENSOR, framePtr) < 0
+    ' FIFO full - release frame (decimation)
+    fifo.releaseFrame(framePtr)
+else
+    frame_count++
+
+' FULL SPEED: No artificial delay - natural timing is:
+'   SPI: 24 bits × 64 sensors × (1/2.5MHz) = ~614µs per frame
+'   Plus pipeline overhead: ~750µs total = ~1,330 fps theoretical max
+```
+
+### COGATN Wake-up Mechanism
+
+When the sensor commits a frame, the FIFO manager automatically sends COGATN:
+
+1. **Sensor commits frame:** `fifo.commitFrame(FIFO_SENSOR, framePtr)`
+2. **FIFO manager notifies:** Sends COGATN to registered decimator COG
+3. **Decimator wakes:** Processes frame, routes to HDMI/OLED FIFOs
+4. **Display COGs wake:** Each receives COGATN when their FIFO gets data
+
+**Benefits:**
+- **Zero jitter:** COGs wake in ~4 clock cycles (vs 0-1ms polling)
+- **Zero power waste:** WAITATN consumes no power while waiting
+- **Independent rates:** Each display wakes only when its FIFO has data
+
+### Timing Characteristics
+
+| Metric | Value | Notes |
+|--------|-------|-------|
+| Frame acquisition | ~750 µs | 64 sensors, pipelined SPI |
+| Theoretical max fps | ~1,330 | No artificial delays |
+| COGATN latency | ~4 clocks | ~16 ns at 250 MHz |
+| Consumer wake time | ~20 clocks | Event detection + WAITATN return |
+
 ## Debug Output
 
 The driver reports frame count via `get_frame_count()` method. Periodic status is reported by the main application decimation loop every 30 frames.
@@ -663,3 +739,4 @@ Ping-pong between two frame buffers to eliminate FIFO wait time.
 | 1.1 | 2025-12-23 | Added Coordinate Transformation Pipeline section. Verified ADC bit extraction with logic analyzer (AD7680 16-bit confirmed). Added MODE_ADC_VERIFY. Added 90° CCW rotation lookup table for correct physical orientation. |
 | 1.2 | 2025-12-23 | Added "Schematic vs Empirical Findings" section. Marked unified_sensor_map as PROVISIONAL. Documented testing caveats. Distinguished between hardware documentation (pristine, schematic-based) and implementation documentation (empirical observations). |
 | 1.3 | 2025-12-23 | **VERIFIED** unified_sensor_map v3 via quadrant center testing. All 4 quadrants map correctly (centroids within 0.3 pixels of expected). Clarified orientation choice: implementation uses connector-at-bottom viewing (author's choice), schematic uses different reference frame. Removed PROVISIONAL status. |
+| 1.4 | 2025-12-23 | **EVENT-DRIVEN FIFO**: Added COGATN-based wake-up mechanism. Removed all artificial delays for full-speed operation (~1,330 fps). Added "Event-Driven FIFO Integration" section documenting producer-consumer architecture with WAITATN. |
