@@ -2,19 +2,21 @@
 **Magnetic Imaging Tile - Multi-Frame Processing & Super-Resolution**
 
 ## Document Version
-- **Version:** 1.0
-- **Date:** 2025-11-04
-- **Status:** Design Specification
+- **Version:** 1.1
+- **Date:** 2025-12-26
+- **Status:** Design Specification (Updated for measured 1,370 fps)
 
 ## Overview
 
-The Image Processing COG transforms raw high-speed sensor data (2000 fps) into optimized composite images for display. By analyzing multiple consecutive frames within a sliding window, the system achieves noise reduction, super-resolution reconstruction, and advanced visualization modes that would be impossible from single-frame analysis.
+The Image Processing COG transforms raw high-speed sensor data (**1,370 fps measured**) into optimized composite images for display. By analyzing multiple consecutive frames within a sliding window, the system achieves noise reduction, super-resolution reconstruction, and advanced visualization modes that would be impossible from single-frame analysis.
+
+> **Update (Dec 2025):** Sensor frame rate confirmed at 1,370 fps after inline PASM calibration optimization. This gives us ~23 frames per 60 fps display interval (vs. 33 at original 2000 fps estimate). SNR improvement is now ~4.8× (√23) instead of ~5.7× (√33). All algorithms remain valid; performance budgets updated accordingly.
 
 ## Design Goals
 
 1. **Super-Resolution Reconstruction** - Extract 4× spatial detail (32×32 from 8×8 sensors) during manual scanning
-2. **Noise Reduction** - Improve signal-to-noise ratio through multi-frame averaging
-3. **Real-Time Performance** - Process 33-frame windows at 60 fps output rate
+2. **Noise Reduction** - Improve signal-to-noise ratio through multi-frame averaging (~4.8× with 23 frames)
+3. **Real-Time Performance** - Process 23-frame windows at 60 fps output rate
 4. **Multiple Visualization Modes** - Switch between modes optimized for different measurement scenarios
 5. **Non-Blocking Operation** - Process frames without impacting sensor acquisition or display refresh
 
@@ -24,21 +26,21 @@ The Image Processing COG transforms raw high-speed sensor data (2000 fps) into o
 
 ### Input Source
 - **Source:** Sensor FIFO (raw sensor data from magnetic tile)
-- **Rate:** 2000 fps (0.5ms per frame)
+- **Rate:** 1,370 fps (~0.73ms per frame) - *measured Dec 2025*
 - **Format:** 64 WORDs (8×8 sensor array, 16-bit values)
-- **Value Range:** 0-4095 (12-bit ADC readings)
+- **Value Range:** 0-65535 (16-bit ADC readings)
 
 ### Output Destination
 - **Destination:** Results FIFO (processed composite images)
 - **Rate:** 60 fps (16.67ms per composite)
 - **Format:** Variable based on mode (8×8, 16×16, or 32×32)
-- **Processing Window:** 33 consecutive raw frames → 1 composite frame
+- **Processing Window:** 23 consecutive raw frames → 1 composite frame
 
 ### System Integration
 ```
-Sensor PASM (2000fps) → Sensor FIFO → Processing COG → Results FIFO → Main → Display FIFOs
+Sensor PASM (1370fps) → Sensor FIFO → Processing COG → Results FIFO → Main → Display FIFOs
                         (raw 8×8)    (sliding window)   (composites)  (route)    ↓
-                        128 bytes     33-frame buffer    var. size              HDMI/OLED
+                        128 bytes     23-frame buffer    var. size              HDMI/OLED
 ```
 
 ---
@@ -47,7 +49,7 @@ Sensor PASM (2000fps) → Sensor FIFO → Processing COG → Results FIFO → Ma
 
 ### 1. Frame Acquisition & Buffering
 - Dequeue raw frames from Sensor FIFO continuously
-- Maintain sliding window of 33 most recent frames
+- Maintain sliding window of 23 most recent frames
 - Circular buffer management (FIFO behavior)
 
 ### 2. Multi-Frame Analysis
@@ -56,7 +58,7 @@ Sensor PASM (2000fps) → Sensor FIFO → Processing COG → Results FIFO → Ma
 - Spatial correlation computation
 
 ### 3. Composite Generation
-- Apply selected processing mode to 33-frame window
+- Apply selected processing mode to 23-frame window
 - Generate output frame (8×8, 16×16, or 32×32)
 - Format conversion for display compatibility
 
@@ -77,16 +79,16 @@ Sensor PASM (2000fps) → Sensor FIFO → Processing COG → Results FIFO → Ma
 ```
 For each sensor position (x, y):
   accumulator[x,y] = 0
-  For frame = 0 to 32:
+  For frame = 0 to 22:
     accumulator[x,y] += frame[i][x,y]
 
-  output[x,y] = accumulator[x,y] / 33
+  output[x,y] = accumulator[x,y] / 23
 ```
 
 **Output:** 8×8 array (64 WORDs = 128 bytes)
 
 **Benefits:**
-- **5.7× SNR improvement** (√33 averaging)
+- **4.8× SNR improvement** (√23 averaging)
 - Ultra-clean, precise measurements
 - Removes random ADC noise
 - Stable readings for analysis
@@ -100,7 +102,7 @@ For each sensor position (x, y):
 **Performance:**
 - Per-frame: 64 accumulations = <0.01ms
 - Composite: 64 divisions = 0.1ms
-- **Total: ~0.4ms** (2% of available time)
+- **Total: ~0.3ms** (2% of available time)
 
 **Advantages:**
 - Minimal CPU usage
@@ -120,7 +122,7 @@ For each sensor position (x, y):
 **Algorithm:**
 ```
 Step 1: Average raw frames (same as Mode 1)
-  avg[8×8] = average of 33 frames
+  avg[8×8] = average of 23 frames
 
 Step 2: Bilinear interpolation to 16×16
   For each output position (x, y) in 16×16:
@@ -142,7 +144,7 @@ Step 2: Bilinear interpolation to 16×16
 
 **Benefits:**
 - **2× spatial resolution** (16×16 vs 8×8)
-- **5.7× SNR improvement** (full averaging maintained)
+- **4.8× SNR improvement** (full averaging maintained)
 - Smooth, visually appealing interpolation
 - Good general-purpose mode
 
@@ -153,9 +155,9 @@ Step 2: Bilinear interpolation to 16×16
 - Balance between detail and precision
 
 **Performance:**
-- Averaging: 0.4ms
+- Averaging: 0.3ms
 - Interpolation: 256 bilinear calcs = 1.5ms
-- **Total: ~1.9ms** (11% of available time)
+- **Total: ~1.8ms** (11% of available time)
 
 **Advantages:**
 - Best SNR + resolution balance
@@ -175,7 +177,7 @@ Step 2: Bilinear interpolation to 16×16
 **Algorithm:**
 ```
 Step 1: Motion Tracking
-  For each frame i from 0 to 32:
+  For each frame i from 0 to 22:
     motion[i] = estimate_motion(frame[i], frame[i-1])
     # Returns (dx, dy) in sub-pixel units
     # Uses phase correlation or simple cross-correlation
@@ -189,7 +191,7 @@ Step 3: Super-Resolution Reconstruction
   Initialize 32×32 accumulator grid
   Initialize contribution count grid
 
-  For each frame i from 0 to 32:
+  For each frame i from 0 to 22:
     For each sensor (sx, sy) in 8×8:
       # Calculate output position for this sensor reading
       output_x = 16 + sx*4 + position[i].x
@@ -221,10 +223,10 @@ Step 3: Super-Resolution Reconstruction
 - High-detail field mapping
 
 **Performance:**
-- Motion estimation: 0.1ms × 33 frames = 3.3ms
-- Reconstruction splatting: 33 frames × 64 sensors × ~4 pixels = 8448 operations = 4.5ms
+- Motion estimation: 0.1ms × 23 frames = 2.3ms
+- Reconstruction splatting: 23 frames × 64 sensors × ~4 pixels = 5888 operations = 3.2ms
 - Normalization: 1024 divisions = 0.5ms
-- **Total: ~8.3ms** (50% of available time)
+- **Total: ~6.0ms** (36% of available time)
 
 **Motion Estimation Details:**
 ```spin2
@@ -251,13 +253,13 @@ PRI estimate_motion(frame1, frame2) : dx, dy | best_dx, best_dy, min_error, erro
 - Maximizes information extraction from hardware
 
 **Requirements:**
-- Sensor motion during 33-frame window (~16ms)
-- Typical hand motion (10mm/sec) = 0.16mm shift (sufficient!)
+- Sensor motion during 23-frame window (~17ms)
+- Typical hand motion (10mm/sec) = 0.17mm shift (sufficient!)
 - Even vibration (0.05mm) enables reconstruction
 
 **Limitations:**
 - Requires motion (won't improve stationary images)
-- More CPU intensive (50% load)
+- More CPU intensive (36% load)
 - Complex algorithm (more code to maintain)
 
 ---
@@ -276,7 +278,7 @@ For each sensor position (x, y):
   peak = 0
   valley = $FFFF
 
-  For frame = 0 to 32:
+  For frame = 0 to 22:
     value = frame[i][x,y]
     sum += value
     sum_sq += value * value
@@ -284,8 +286,8 @@ For each sensor position (x, y):
     valley = min(valley, value)
 
   # Compute metrics
-  mean[x,y] = sum / 33
-  variance[x,y] = (sum_sq / 33) - (mean * mean)
+  mean[x,y] = sum / 23
+  variance[x,y] = (sum_sq / 23) - (mean * mean)
   stddev[x,y] = sqrt(variance)
   activity[x,y] = stddev / mean  # Coefficient of variation
 
@@ -326,7 +328,7 @@ For HDMI/OLED rendering:
 - Per-frame: 64 accumulations × 3 = 0.02ms
 - Statistics: 64 × (variance + sqrt) = 1.5ms
 - Encoding: 0.2ms
-- **Total: ~2.2ms** (13% of available time)
+- **Total: ~2.1ms** (13% of available time)
 
 **Advantages:**
 - Multiple metrics in one display
@@ -389,10 +391,10 @@ For (x, y) in 32×32 output:
 - Comprehensive field characterization
 
 **Performance:**
-- Motion tracking: 0.15ms per frame
+- Motion tracking: 0.15ms per frame × 23 frames = 3.5ms
 - Panorama update: 64 placements = 0.1ms
 - Window extraction: 0.1ms
-- **Total: ~7ms per composite** (42% of available time)
+- **Total: ~5.5ms per composite** (33% of available time)
 
 **Memory:**
 - Panorama buffer: 128×128 × 2 bytes = 32 KB (fits in Hub RAM)
@@ -417,8 +419,8 @@ For (x, y) in 32×32 output:
 ```spin2
 VAR
   ' Sliding window buffer
-  WORD frame_buffer[33][64]      ' 33 frames × 64 sensors = 4224 bytes
-  LONG buffer_write_index        ' Circular write position (0-32)
+  WORD frame_buffer[23][64]      ' 23 frames × 64 sensors = 2944 bytes
+  LONG buffer_write_index        ' Circular write position (0-22)
   LONG frames_accumulated        ' Count for composite timing
 
   ' Processing mode control
@@ -429,7 +431,7 @@ VAR
   LONG avg_accumulator[64]       ' Sum of values (4× WORDs for headroom)
 
   ' Mode 3: Super-resolution workspace
-  LONG motion_vectors[33][2]     ' dx, dy for each frame
+  LONG motion_vectors[23][2]     ' dx, dy for each frame
   LONG position_tracker[2]       ' Current cumulative position
   LONG superres_accumulator[1024] ' 32×32 accumulator grid
   LONG superres_count[1024]      ' Contribution count per pixel
@@ -450,13 +452,13 @@ VAR
 ```
 
 **Total Memory Usage:**
-- Frame buffer: 4,224 bytes
+- Frame buffer: 2,944 bytes
 - Mode 1 workspace: 256 bytes
-- Mode 3 workspace: ~12 KB
+- Mode 3 workspace: ~10 KB
 - Mode 4 workspace: 768 bytes
 - Mode 5 workspace: 32 KB
 - Output buffer: 2,048 bytes
-- **Total: ~51 KB** (10% of Hub RAM)
+- **Total: ~48 KB** (9% of Hub RAM)
 
 ---
 
@@ -485,7 +487,7 @@ PRI processing_cog_loop() | framePtr, i
     fifo.releaseFrame(framePtr)
 
     ' Update sliding window index
-    buffer_write_index := (buffer_write_index + 1) // 33
+    buffer_write_index := (buffer_write_index + 1) // 23
     frames_accumulated++
 
     ' Process frame based on mode (incremental work)
@@ -504,8 +506,8 @@ PRI processing_cog_loop() | framePtr, i
         ' Update statistics
         update_statistics_incremental(buffer_write_index)
 
-    ' Every 33 frames: generate composite
-    if frames_accumulated => 33
+    ' Every 23 frames: generate composite
+    if frames_accumulated => 23
       generate_composite_for_mode(current_mode)
 
       ' Post to Results FIFO
@@ -546,7 +548,7 @@ PRI initialize_mode(mode)
       longfill(@avg_accumulator, 0, 64)
 
     MODE_32X32_SUPERRES:
-      longfill(@motion_vectors, 0, 66)
+      longfill(@motion_vectors, 0, 46)   ' 23 frames × 2 elements
       longfill(@superres_accumulator, 0, 1024)
       longfill(@superres_count, 0, 1024)
       position_tracker[0] := 0
@@ -623,15 +625,15 @@ DAT
 ### Processing Budget per Mode
 
 **Available time:** 16.67ms (60 fps output rate)
-**Input:** 33 frames arriving over 16.5ms (0.5ms each)
+**Input:** 23 frames arriving over ~17ms (0.73ms each)
 
 | Mode | Per-Frame Work | Composite Work | Total | CPU Load |
 |------|----------------|----------------|-------|----------|
-| Max Precision (8×8) | <0.01ms | 0.1ms | **0.4ms** | 2% |
-| Enhanced (16×16) | <0.01ms | 1.5ms | **1.9ms** | 11% |
-| **Ultra Detail (32×32)** | **0.1ms** | **4.5ms** | **8.3ms** | **50%** |
-| Transient Detector | 0.02ms | 1.5ms | **2.2ms** | 13% |
-| Scan Trail | 0.15ms | 2ms | **7ms** | 42% |
+| Max Precision (8×8) | <0.01ms | 0.1ms | **0.3ms** | 2% |
+| Enhanced (16×16) | <0.01ms | 1.5ms | **1.8ms** | 11% |
+| **Ultra Detail (32×32)** | **0.1ms** | **3.2ms** | **6.0ms** | **36%** |
+| Transient Detector | 0.02ms | 1.5ms | **2.1ms** | 13% |
+| Scan Trail | 0.15ms | 2ms | **5.5ms** | 33% |
 
 **All modes sustainable at 60 fps output!**
 
@@ -671,11 +673,14 @@ PRI compute_correlation_error(frame1, frame2, dx, dy) : error | x, y, x2, y2, di
 - 17×17 search window (±2 sensor units @ 0.25 steps)
 - Each correlation: 36 pixel compares = ~20µs
 - Total search: 289 positions × 20µs = **5.8ms per frame pair**
+- With 23 frame pairs: 133ms (too slow for real-time!)
+- *Simplified algorithm needed for production*
 
 **Optimization opportunities:**
-- Reduce search window (±1 unit = 9×9 = 81 positions)
+- Reduce search window (±1 unit = 9×9 = 81 positions → 1.6ms/pair)
 - Coarse-to-fine search (fast approximate, then refine)
 - PASM implementation (10× speedup possible)
+- Note: Mode 3 algorithm simplified in practice to ~100µs/pair
 
 ---
 
@@ -837,3 +842,4 @@ debug("FIFO depths - Sensor:", udec(sensor_depth), " Results:", udec(results_dep
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
 | 1.0 | 2025-11-04 | Claude + Stephen | Initial architecture specification |
+| 1.1 | 2025-12-26 | Claude + Stephen | Updated for measured 1,370 fps sensor rate. Recalculated frame windows from 33 to 23 frames per 60 fps display interval. SNR improvement updated from √33 (5.7×) to √23 (4.8×). Memory usage reduced. All mode performance estimates updated. |

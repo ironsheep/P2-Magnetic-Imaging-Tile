@@ -2,9 +2,9 @@
 **Magnetic Imaging Tile - isp_tile_sensor.spin2**
 
 ## Document Version
-- **Version:** 1.4
-- **Date:** 2025-12-23
-- **Status:** Implementation Documentation - VERIFIED MAPPING + EVENT-DRIVEN FIFO
+- **Version:** 1.5
+- **Date:** 2025-12-26
+- **Status:** Implementation Documentation - VERIFIED MAPPING + EVENT-DRIVEN FIFO + INLINE CALIBRATION
 
 > **NOTE**: This document describes the *implemented* sensor mapping based on empirical testing.
 > The unified_sensor_map table v3 has been **VERIFIED** via quadrant center testing.
@@ -701,6 +701,92 @@ When the sensor commits a frame, the FIFO manager automatically sends COGATN:
 | COGATN latency | ~4 clocks | ~16 ns at 250 MHz |
 | Consumer wake time | ~20 clocks | Event detection + WAITATN return |
 
+---
+
+## Inline PASM Calibration
+
+### Overview
+
+Calibration corrects for per-sensor baseline offsets due to manufacturing variations. Each Hall effect sensor has a slightly different "zero field" reading, typically around 20,500 ADC counts. Calibration normalizes all sensors to a common baseline (SENSOR_MID = 20,500).
+
+### Calibration Formula
+
+```
+calibrated_value = raw_value - baseline[sensor_index] + SENSOR_MID
+```
+
+Where:
+- `raw_value`: Direct ADC reading (0-65535)
+- `baseline[sensor_index]`: Per-sensor zero-field offset captured during calibration
+- `SENSOR_MID`: Target baseline (20,500)
+- `calibrated_value`: Normalized output (clamped to 0-65535)
+
+### Performance Optimization (Dec 2025)
+
+**Problem:** Original Spin2 calibration loop took ~800 µs per frame, limiting sensor to ~375 fps despite ~750 µs acquisition time.
+
+**Solution:** Integrate calibration directly into the PASM `.store_sensor_value` subroutine, applying correction at the same time as coordinate mapping.
+
+**Before (Spin2 loop):**
+```spin2
+' SLOW: Separate Spin2 loop after PASM acquisition
+PRI apply_calibration()
+  repeat i from 0 to 63
+    frame_buffer[i] := frame_buffer[i] - baseline[i] + SENSOR_MID
+```
+
+**After (Inline PASM):**
+```pasm
+.store_sensor_value
+        ' Check if calibration enabled
+        tjz     baseline_ptr, #.skip_calibration
+
+        ' Lookup baseline[total_sensor_count] (WORD array)
+        mov     pa, total_sensor_count
+        shl     pa, #1                         ' WORD offset = index * 2
+        add     pa, baseline_ptr
+        rdword  baseline_val, pa               ' Read baseline[i]
+
+        ' Apply calibration: sensor_val = sensor_val - baseline + SENSOR_MID
+        sub     sensor_val, baseline_val
+        add     sensor_val, ##SENSOR_MID       ' (20500)
+
+        ' Clamp to valid 16-bit range (0-65535)
+        fges    sensor_val, #0
+        fle     sensor_val, ##65535
+
+.skip_calibration
+        ' Continue with coordinate mapping and write...
+```
+
+### Performance Impact
+
+| Metric | Before (Spin2 loop) | After (Inline PASM) | Improvement |
+|--------|---------------------|---------------------|-------------|
+| Calibration time | ~800 µs | ~50 µs | 16× faster |
+| Frame rate | ~375 fps | ~1,370 fps | 3.7× faster |
+| Efficiency | 28% of theoretical | 100%+ of theoretical | Full speed |
+
+**Note:** The "100%+" efficiency is because inline PASM runs faster than our original theoretical estimates which assumed more overhead.
+
+### Key Implementation Details
+
+1. **Baseline pointer pre-loading:** Before entering PASM, set `baseline_ptr := baseline_valid ? @baseline : 0`
+2. **Conditional execution:** Use `tjz baseline_ptr, #.skip_calibration` to skip when uncalibrated
+3. **WORD array indexing:** `shl pa, #1` converts sensor index to byte offset
+4. **Clamping:** `fges`/`fle` instructions prevent wrap-around on subtraction
+5. **Zero overhead when disabled:** Calibration check adds only 1 instruction when uncalibrated
+
+### Memory Layout
+
+```spin2
+DAT { calibration data }
+  baseline        WORD    0[64]              ' Per-sensor baseline values
+  baseline_valid  LONG    0                  ' Flag: 0=uncalibrated, 1=valid
+```
+
+---
+
 ## Debug Output
 
 The driver reports frame count via `get_frame_count()` method. Periodic status is reported by the main application decimation loop every 30 frames.
@@ -740,3 +826,4 @@ Ping-pong between two frame buffers to eliminate FIFO wait time.
 | 1.2 | 2025-12-23 | Added "Schematic vs Empirical Findings" section. Marked unified_sensor_map as PROVISIONAL. Documented testing caveats. Distinguished between hardware documentation (pristine, schematic-based) and implementation documentation (empirical observations). |
 | 1.3 | 2025-12-23 | **VERIFIED** unified_sensor_map v3 via quadrant center testing. All 4 quadrants map correctly (centroids within 0.3 pixels of expected). Clarified orientation choice: implementation uses connector-at-bottom viewing (author's choice), schematic uses different reference frame. Removed PROVISIONAL status. |
 | 1.4 | 2025-12-23 | **EVENT-DRIVEN FIFO**: Added COGATN-based wake-up mechanism. Removed all artificial delays for full-speed operation (~1,330 fps). Added "Event-Driven FIFO Integration" section documenting producer-consumer architecture with WAITATN. |
+| 1.5 | 2025-12-26 | **INLINE PASM CALIBRATION**: Moved calibration from Spin2 loop (~800 µs) to inline PASM (~50 µs). Measured frame rate now 1,370 fps (3.7× improvement over previous 375 fps). Added "Inline PASM Calibration" section with algorithm details, performance comparison, and implementation notes. |
