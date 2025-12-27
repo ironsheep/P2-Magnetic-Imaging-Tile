@@ -435,7 +435,7 @@ PUB configure_smart_pins() | sclk_x, event_config
 
     debug("Sensor: Smart pins configured (MISO stays enabled, SE1 event ready)", 13, 10)
 
-PRI sensor_loop() | framePtr, patternPtr, sensor_idx, sensor_val
+PRI sensor_loop() | framePtr, patternPtr, sensor_idx, sensor_val, fps_start_time, fps_frame_count, elapsed_ms, fps
 '' Main sensor loop running in dedicated COG
 '' Handles both test pattern generation and live sensor acquisition
 
@@ -449,6 +449,10 @@ PRI sensor_loop() | framePtr, patternPtr, sensor_idx, sensor_val
     configure_smart_pins()
     stack_check.checkStack(@sensor_cog_stack, SENSOR_STACK_SIZE_LONGS)
 
+    ' Initialize fps measurement
+    fps_start_time := getct()
+    fps_frame_count := 0
+
     repeat
         ' Check for stack overflow (halts with debug message if detected)
         stack_check.checkStack(@sensor_cog_stack, SENSOR_STACK_SIZE_LONGS)
@@ -457,6 +461,9 @@ PRI sensor_loop() | framePtr, patternPtr, sensor_idx, sensor_val
         case acquisition_mode
             MODE_STOPPED:
                 waitms(10)
+                ' Reset fps counter when stopped
+                fps_start_time := getct()
+                fps_frame_count := 0
                 next
 
             MODE_TEST_PATTERN:
@@ -466,6 +473,17 @@ PRI sensor_loop() | framePtr, patternPtr, sensor_idx, sensor_val
             MODE_LIVE:
                 ' Acquire live sensor data
                 acquire_sensor_frame()
+                fps_frame_count++
+
+                ' Report fps every 1000 frames
+                if (fps_frame_count // 1000) == 0
+                    elapsed_ms := (getct() - fps_start_time) / (clkfreq / 1000)
+                    if elapsed_ms > 0
+                        fps := (fps_frame_count * 1000) / elapsed_ms
+                        debug("SENSOR FPS: ", udec(fps), " (", udec(fps_frame_count), " frames in ", udec(elapsed_ms), " ms)", 13, 10)
+                    ' Reset for next measurement period
+                    fps_start_time := getct()
+                    fps_frame_count := 0
 
             MODE_ADC_VERIFY:
                 ' ADC verification mode: 2 scans with full logging, then stop
@@ -510,10 +528,11 @@ PRI generate_test_frame() | framePtr, patternPtr
     else
         waitms(100)   ' 100ms between individual patterns
 
-PRI acquire_sensor_frame() | framePtr, sensor_val, buf_ptr, total_sensor_count, lut_unified
+PRI acquire_sensor_frame() | framePtr, sensor_val, buf_ptr, total_sensor_count, lut_unified, baseline_ptr, baseline_val
 '' Acquire live sensor frame using inline PASM for timing-critical operations
 '' OPTIMIZED (Nov 2025): Pipelined counter advance during SPI transfer
 '' SIMPLIFIED (Dec 2025): Single unified lookup table replaces 4 separate tables
+'' OPTIMIZED (Dec 2025): Inline calibration in PASM eliminates Spin2 loop (~800µs saved)
 ''
 '' Pipeline strategy:
 ''   - First sensor: Full settle wait, then start SPI
@@ -530,13 +549,18 @@ PRI acquire_sensor_frame() | framePtr, sensor_val, buf_ptr, total_sensor_count, 
         waitus(10)
         return
 
-    ' CRITICAL: Pre-load unified lookup table address BEFORE inline PASM
+    ' CRITICAL: Pre-load lookup table addresses BEFORE inline PASM
     ' This avoids modifying ptra inside PASM which corrupts stack access
     lut_unified := @unified_sensor_map
+
+    ' Pre-load baseline array pointer (or 0 if calibration not valid)
+    ' This allows PASM to apply calibration inline during sensor write
+    baseline_ptr := baseline_valid ? @baseline : 0
 
     ' Use inline PASM to read all 64 sensors with pipelined counter advance
     ' NOTE: We use pa, pb for temporary pointers instead of ptra to avoid
     ' corrupting Spin2's stack pointer
+    ' OPTIMIZED (Dec 2025): Calibration now applied inline, eliminating Spin2 loop
     ORG
         ' Jump to main code (subroutines placed first for backward reference only)
         jmp     #.main_start
@@ -549,22 +573,48 @@ PRI acquire_sensor_frame() | framePtr, sensor_val, buf_ptr, total_sensor_count, 
 ' store_sensor_value: Store ADC reading at mapped buffer location
 '------------------------------------------------------------------------------
 ' UNIFIED MAPPING: counter index → final buffer position (single lookup)
+' INLINE CALIBRATION: Applies baseline correction before storing (Dec 2025)
 '
 ' The unified_sensor_map table combines all transformations:
 '   - EN signal → physical quadrant mapping (from empirical testing)
 '   - Channel → position within quadrant (from schematic)
 '   - Physical position = buffer position (1:1 mapping goal)
 '
+' Calibration formula: calibrated = raw - baseline[i] + SENSOR_MID
+'   - If baseline_ptr == 0, calibration is skipped (raw value stored)
+'   - This eliminates the expensive Spin2 apply_calibration() loop
+'
 ' Inputs:
 '   total_sensor_count - Current counter index (0-63)
-'   sensor_val         - ADC value to store
+'   sensor_val         - ADC value to store (will be calibrated in-place)
 '   framePtr           - Base address of frame buffer
 '   lut_unified        - Unified lookup table address (pre-loaded in Spin2)
+'   baseline_ptr       - Baseline array address, or 0 if not calibrated
 '
 ' Uses pa as temp pointer (NOT ptra - that breaks Spin2 stack access!)
-' Modifies: pa, buf_ptr
+' Modifies: pa, buf_ptr, baseline_val, sensor_val
 '------------------------------------------------------------------------------
 .store_sensor_value
+        '======================================================================
+        ' INLINE CALIBRATION: Apply baseline correction if enabled
+        '======================================================================
+        tjz     baseline_ptr, #.skip_calibration
+
+        ' Lookup baseline[total_sensor_count] (WORD array, so multiply index by 2)
+        mov     pa, total_sensor_count
+        shl     pa, #1                         ' WORD offset = index * 2
+        add     pa, baseline_ptr               ' Add base address
+        rdword  baseline_val, pa               ' Read baseline[i]
+
+        ' Apply calibration: sensor_val = sensor_val - baseline + SENSOR_MID
+        sub     sensor_val, baseline_val       ' raw - baseline
+        add     sensor_val, ##SENSOR_MID       ' + SENSOR_MID (20500)
+
+        ' Clamp to valid 16-bit range (0-65535)
+        fges    sensor_val, #0                 ' max(sensor_val, 0)
+        fle     sensor_val, ##65535            ' min(sensor_val, 65535)
+
+.skip_calibration
         '======================================================================
         ' UNIFIED MAPPING: Counter index → Buffer position (single lookup)
         '======================================================================
@@ -578,7 +628,7 @@ PRI acquire_sensor_frame() | framePtr, sensor_val, buf_ptr, total_sensor_count, 
         shl     buf_ptr, #1                    ' Convert to byte offset (* 2 for WORD)
         add     buf_ptr, framePtr              ' Add frame base address
 
-        ' Store value in frame buffer at mapped position
+        ' Store calibrated value in frame buffer at mapped position
         wrword  sensor_val, buf_ptr
         ret
 
@@ -695,10 +745,9 @@ PRI acquire_sensor_frame() | framePtr, sensor_val, buf_ptr, total_sensor_count, 
 
     END
 
-    ' Apply per-sensor baseline calibration (if calibrated)
-    ' This normalizes each sensor to SENSOR_MID, eliminating per-sensor variation
-    if baseline_valid
-      apply_calibration(framePtr)
+    ' NOTE: Calibration is now applied inline in PASM (Dec 2025 optimization)
+    ' The apply_calibration() Spin2 loop has been eliminated, saving ~800µs per frame
+    ' Calibration is performed in .store_sensor_value if baseline_ptr != 0
 
     ' Commit completed frame to sensor FIFO
     if fifo.commitFrame(fifo.FIFO_SENSOR, framePtr) < 0
@@ -713,6 +762,12 @@ PRI acquire_sensor_frame() | framePtr, sensor_val, buf_ptr, total_sensor_count, 
     '   Plus pipeline overhead: ~750µs total = ~1,330 fps theoretical max
 
 PRI apply_calibration(framePtr) | i, raw, calibrated
+'' LEGACY: This function is no longer used in the acquisition hot path (Dec 2025)
+'' Calibration is now applied inline in PASM within .store_sensor_value
+'' This eliminates ~800µs of Spin2 overhead per frame
+''
+'' Kept for debugging/testing purposes only.
+''
 '' Apply per-sensor baseline calibration to a frame buffer
 '' @param framePtr - pointer to 64-word frame buffer
 ''
