@@ -52,16 +52,16 @@ CON
   CELL_WIDTH  = WIDTH / SENSOR_GRID_SIZE    ' 16 pixels per cell
   CELL_HEIGHT = HEIGHT / SENSOR_GRID_SIZE   ' 16 pixels per cell
 
-  ' Sensor value calibration - FULL ADC RANGE
+  ' Sensor value calibration - symmetric scaling for equal red/green intensity
   ' See DOCs/MagSensor-Color-Mapping-Specification.md for details
-  ' Uses full 16-bit ADC range to accommodate stronger magnets in future
-  ' Baseline observed at ~20500, but map entire ADC range for future-proofing
+  ' Full ADC range is 0-65535, but we use symmetric color range for balanced display
   SENSOR_MIN = 0          ' ADC minimum (theoretical full negative saturation)
   SENSOR_MID = 20500      ' Zero field baseline (observed neutral point)
   SENSOR_MAX = 65535      ' ADC maximum (theoretical full positive saturation)
   SENSOR_RANGE = 65535    ' Full ADC range for LUT scaling
-  NEGATIVE_RANGE = 20500  ' SENSOR_MID - SENSOR_MIN (0 to 20500)
-  POSITIVE_RANGE = 45035  ' SENSOR_MAX - SENSOR_MID (20500 to 65535)
+  ' Use symmetric color range: same scaling for both red and green
+  ' Values beyond this range saturate to max intensity (which is fine)
+  COLOR_RANGE = 20500     ' Symmetric range for equal red/green response
   GRAY_BASE = 32          ' Neutral gray intensity (dark gray background)
 
   ' Stuck pixel indicator color - bright magenta in BGR565 format (SSD1351)
@@ -689,18 +689,20 @@ PRI init_color_lut() | i, sensor_val, r, g, b, color, start_ms, corruption_idx, 
     sensor_val := (i * SENSOR_MAX) / 4095
 
     ' Apply perceptually uniform color formula with gamma correction
-    ' Uses single intensity calculation (no gray_fade) to prevent banding
+    ' Uses symmetric COLOR_RANGE for equal red/green intensity
     ' Gamma ~2.0 approximation: gamma = (linear * linear) / 255
     if sensor_val < SENSOR_MID
       ' Negative field: Red increases from gray background
-      linear := ((SENSOR_MID - sensor_val) * 255) / NEGATIVE_RANGE
+      linear := ((SENSOR_MID - sensor_val) * 255) / COLOR_RANGE
+      linear := linear <# 255               ' Clamp if beyond expected range (saturate to max)
       intensity := (linear * linear) / 255  ' Gamma correction ~2.0
       r := GRAY_BASE + intensity            ' Red increases from gray
       g := GRAY_BASE
       b := GRAY_BASE
     else
       ' Positive field: Green increases from gray background
-      linear := ((sensor_val - SENSOR_MID) * 255) / POSITIVE_RANGE
+      linear := ((sensor_val - SENSOR_MID) * 255) / COLOR_RANGE
+      linear := linear <# 255               ' Clamp if beyond expected range (saturate to max)
       intensity := (linear * linear) / 255  ' Gamma correction ~2.0
       r := GRAY_BASE
       g := GRAY_BASE + intensity            ' Green increases from gray
@@ -979,21 +981,25 @@ PRI value_to_color(value, min_val, max_val) : color | r, g, b, intensity, linear
 '' See DOCs/Visualization-Theory-of-Operations.md for details.
 ''
 '' FIX (2025-12-26): Removed gray_fade to eliminate banding artifact.
+'' FIX (2025-12-26): Use symmetric COLOR_RANGE for equal red/green intensity.
 
   ' Clamp to valid ADC range
   value := SENSOR_MIN #> value <# SENSOR_MAX
 
   ' Apply perceptually uniform color formula with gamma correction
+  ' Uses symmetric COLOR_RANGE for equal red/green intensity
   if value < SENSOR_MID
     ' Negative field: Red increases from gray background
-    linear := ((SENSOR_MID - value) * 255) / NEGATIVE_RANGE
+    linear := ((SENSOR_MID - value) * 255) / COLOR_RANGE
+    linear := linear <# 255               ' Clamp if beyond expected range (saturate to max)
     intensity := (linear * linear) / 255  ' Gamma correction ~2.0
     r := GRAY_BASE + intensity            ' Red increases from gray
     g := GRAY_BASE
     b := GRAY_BASE
   else
     ' Positive field: Green increases from gray background
-    linear := ((value - SENSOR_MID) * 255) / POSITIVE_RANGE
+    linear := ((value - SENSOR_MID) * 255) / COLOR_RANGE
+    linear := linear <# 255               ' Clamp if beyond expected range (saturate to max)
     intensity := (linear * linear) / 255  ' Gamma correction ~2.0
     r := GRAY_BASE
     g := GRAY_BASE + intensity            ' Green increases from gray

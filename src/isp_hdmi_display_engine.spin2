@@ -25,14 +25,15 @@ CON
   STATS_FRAME_Y = 110     ' Y position for Frame counter
   STATS_CLEAR_W = 80      ' Width to clear for value update
 
-  ' Color mapping ranges - FULL ADC range with observed baseline
+  ' Color mapping ranges - symmetric scaling for equal red/green intensity
   ' See DOCs/MagSensor-Color-Mapping-Specification.md for details
-  ' Uses full 16-bit ADC range to accommodate stronger magnets in future
+  ' Full ADC range is 0-65535, but we use symmetric color range for balanced display
   SENSOR_MIN = 0          ' ADC minimum (theoretical full negative saturation)
   SENSOR_MID = 20500      ' Zero field baseline (observed neutral point)
   SENSOR_MAX = 65535      ' ADC maximum (theoretical full positive saturation)
-  NEGATIVE_RANGE = 20500  ' SENSOR_MID - SENSOR_MIN (0 to 20500)
-  POSITIVE_RANGE = 45035  ' SENSOR_MAX - SENSOR_MID (20500 to 65535)
+  ' Use symmetric color range: same scaling for both red and green
+  ' Values beyond this range saturate to max intensity (which is fine)
+  COLOR_RANGE = 20500     ' Symmetric range for equal red/green response
   GRAY_BASE = 32          ' Neutral gray intensity (dark gray background)
 
   ' Stuck pixel indicator color - bright magenta (RRGGBBAA format)
@@ -356,24 +357,27 @@ PRI field_to_color(fieldVal) : color | r, g, b, intensity, linear
   '' See DOCs/Visualization-Theory-of-Operations.md for details.
   ''
   '' FIX (2025-12-26): Removed gray_fade to eliminate banding artifact.
-  '' Now uses single intensity with gamma correction for perceptually uniform colors.
+  '' FIX (2025-12-26): Use symmetric COLOR_RANGE for equal red/green intensity.
+  '' Values beyond COLOR_RANGE from baseline saturate to max intensity.
 
-  ' Clamp to observed range - values beyond just saturate to full color
+  ' Clamp to full ADC range
   fieldVal := SENSOR_MIN #> fieldVal <# SENSOR_MAX
 
   if fieldVal < SENSOR_MID
     ' Negative field: Red increases from gray background
-    linear := ((SENSOR_MID - fieldVal) * 255) / NEGATIVE_RANGE
+    linear := ((SENSOR_MID - fieldVal) * 255) / COLOR_RANGE
+    linear := linear <# 255               ' Clamp if beyond expected range (saturate to max)
     intensity := (linear * linear) / 255  ' Gamma correction ~2.0
-    r := (GRAY_BASE + intensity) <# 255   ' Red increases from gray (clamped to prevent overflow)
+    r := (GRAY_BASE + intensity) <# 255   ' Red increases from gray
     g := GRAY_BASE
     b := GRAY_BASE
   else
     ' Positive field: Green increases from gray background
-    linear := ((fieldVal - SENSOR_MID) * 255) / POSITIVE_RANGE
+    linear := ((fieldVal - SENSOR_MID) * 255) / COLOR_RANGE
+    linear := linear <# 255               ' Clamp if beyond expected range (saturate to max)
     intensity := (linear * linear) / 255  ' Gamma correction ~2.0
     r := GRAY_BASE
-    g := (GRAY_BASE + intensity) <# 255   ' Green increases from gray (clamped to prevent overflow)
+    g := (GRAY_BASE + intensity) <# 255   ' Green increases from gray
     b := GRAY_BASE
 
   ' Pack as RRGGBBAA (alpha = FF for fully opaque)
