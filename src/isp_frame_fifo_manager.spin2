@@ -284,10 +284,7 @@ PUB dequeue(fifoID) : framePtr | timeout, poolStart, poolEnd
             sensorCount := 0
             lockrel(lock)
             return 0
-          ' Debug: Show exactly what we're reading and from where
-          debug("FIFO dequeue SENSOR: head=", udec(sensorHead), " addr=", uhex_long(@sensorFIFO + (sensorHead << 2)), 13, 10)
           framePtr := LONG[@sensorFIFO][sensorHead]
-          debug("  read ptr=", uhex_long(framePtr), 13, 10)
           ' CRITICAL: Validate pointer before returning
           if framePtr < poolStart or framePtr >= poolEnd
             debug("FIFO ERROR: Sensor dequeue invalid ptr=", uhex_long(framePtr), " head=", udec(sensorHead), " count=", udec(sensorCount), 13, 10)
@@ -519,14 +516,10 @@ PUB checkFreeListIntegrity() : corrupted | i, ptr, poolStart, poolEnd
 
   return -1  ' All OK
 
-PRI notifyConsumer(targetCog) | cogMask
+PRI notifyConsumer(targetCog)
   '' Send COGATN to wake a specific consumer COG
-  '' Uses inline PASM for the COGATN instruction
+  '' Uses Spin2 built-in COGATN method
   '' @param targetCog - COG to notify (0-7)
 
-  ' Build bitmask for target COG (bit N for COG N)
-  cogMask := 1 << targetCog
-
-  org
-    cogatn  cogMask
-  end
+  ' Use Spin2 built-in COGATN with bitmask (bit N for COG N)
+  COGATN(1 << targetCog)

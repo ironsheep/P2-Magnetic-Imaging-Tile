@@ -64,6 +64,11 @@ CON
   POSITIVE_RANGE = 45035  ' SENSOR_MAX - SENSOR_MID (20500 to 65535)
   GRAY_BASE = 32          ' Neutral gray intensity (dark gray background)
 
+  ' Stuck pixel indicator color - bright magenta in BGR565 format (SSD1351)
+  ' Distinct from red/green field colors, clearly indicates non-operational sensor
+  ' BGR565: B=31 (5 bits), G=0 (6 bits), R=31 (5 bits)
+  STUCK_PIXEL_COLOR = $F81F  ' Magenta: 11111_000000_11111
+
   ' Display orientation (based on ribbon connector position)
   ORIENTATION_0   = 0  ' Ribbon at BOTTOM (hardware default)
   ORIENTATION_90  = 1  ' Ribbon at LEFT (display rotated 90° clockwise)
@@ -106,6 +111,7 @@ CON
 OBJ
   fifo : "isp_frame_fifo_manager"
   stack_check : "isp_stack_check"  ' Stack overflow detection utility
+  sensor : "isp_tile_sensor"       ' Sensor interface (for stuck pixel detection)
 
 CON { stack configuration }
   OLED_STACK_SIZE_LONGS = 128      ' Stack size for OLED display COG (increased from 64 - deep call chains)
@@ -291,8 +297,13 @@ PUB display_frame(framePtr) | row, col, sensor_idx, value, color, x, y, px, py, 
       ' Read sensor value (WORD)
       value := WORD[framePtr][sensor_idx]
 
-      ' Convert sensor value to color (uses unified formula internally)
-      color := value_to_color(value, SENSOR_MIN, SENSOR_MAX)
+      ' Check if this sensor is stuck (detected during calibration)
+      ' Stuck sensors show as bright magenta to indicate non-operational
+      if sensor.is_stuck(sensor_idx)
+        color := STUCK_PIXEL_COLOR
+      else
+        ' Convert sensor value to color (uses unified formula internally)
+        color := value_to_color(value, SENSOR_MIN, SENSOR_MAX)
 
       ' Calculate pixel position with orientation-specific coordinate transformation
       transform_coordinates(row, col, @x, @y)
@@ -651,14 +662,17 @@ PRI init_hardware() | clk_period, temp, i
 
   debug("  Hardware initialization complete", 13, 10)
 
-PRI init_color_lut() | i, sensor_val, r, g, b, color, start_ms, corruption_idx, intensity, gray_fade
+PRI init_color_lut() | i, sensor_val, r, g, b, color, start_ms, corruption_idx, intensity, linear
 '' Build color lookup table mapping 12-bit LUT indices to RGB565 colors
 '' LUT index maps to full ADC range: index 0 = ADC 0, index 4095 = ADC 65535
-'' Uses unified formula from DOCs/MagSensor-Color-Mapping-Specification.md
+'' Uses perceptually uniform gradient with gamma correction
 '' Color gradient: Red (negative) -> Dark Gray (neutral) -> Green (positive)
 '' Matches HDMI color scheme for consistent display
+''
+'' FIX (2025-12-26): Removed gray_fade to eliminate banding artifact.
+'' See DOCs/Visualization-Theory-of-Operations.md for details.
 
-  debug("  Building color LUT (4096 entries)...", 13, 10)
+  debug("  Building color LUT (4096 entries, gamma-corrected)...", 13, 10)
   debug("  color_lut addr=", uhex_long(@color_lut), " size=", udec(4096*2), " bytes", 13, 10)
   debug("  Baseline at LUT index: ", udec((SENSOR_MID * 4095) / SENSOR_RANGE), 13, 10)
   start_ms := getms()
@@ -674,26 +688,23 @@ PRI init_color_lut() | i, sensor_val, r, g, b, color, start_ms, corruption_idx, 
     ' index 0 = sensor 0, index 4095 = sensor 65535
     sensor_val := (i * SENSOR_MAX) / 4095
 
-    ' Apply unified color formula (same as HDMI)
-    ' See DOCs/MagSensor-Color-Mapping-Specification.md
+    ' Apply perceptually uniform color formula with gamma correction
+    ' Uses single intensity calculation (no gray_fade) to prevent banding
+    ' Gamma ~2.0 approximation: gamma = (linear * linear) / 255
     if sensor_val < SENSOR_MID
-      ' Negative field: Red with fading gray
-      ' intensity = 255 * (SENSOR_MID - sensor_val) / NEGATIVE_RANGE
-      ' gray_fade = GRAY_BASE * (sensor_val - SENSOR_MIN) / NEGATIVE_RANGE
-      intensity := ((SENSOR_MID - sensor_val) * 255) / NEGATIVE_RANGE
-      gray_fade := (sensor_val * GRAY_BASE) / NEGATIVE_RANGE
-      r := intensity
-      g := gray_fade
-      b := gray_fade
+      ' Negative field: Red increases from gray background
+      linear := ((SENSOR_MID - sensor_val) * 255) / NEGATIVE_RANGE
+      intensity := (linear * linear) / 255  ' Gamma correction ~2.0
+      r := GRAY_BASE + intensity            ' Red increases from gray
+      g := GRAY_BASE
+      b := GRAY_BASE
     else
-      ' Positive field: Green with fading gray
-      ' intensity = 255 * (sensor_val - SENSOR_MID) / POSITIVE_RANGE
-      ' gray_fade = GRAY_BASE * (SENSOR_MAX - sensor_val) / POSITIVE_RANGE
-      intensity := ((sensor_val - SENSOR_MID) * 255) / POSITIVE_RANGE
-      gray_fade := ((SENSOR_MAX - sensor_val) * GRAY_BASE) / POSITIVE_RANGE
-      r := gray_fade
-      g := intensity
-      b := gray_fade
+      ' Positive field: Green increases from gray background
+      linear := ((sensor_val - SENSOR_MID) * 255) / POSITIVE_RANGE
+      intensity := (linear * linear) / 255  ' Gamma correction ~2.0
+      r := GRAY_BASE
+      g := GRAY_BASE + intensity            ' Green increases from gray
+      b := GRAY_BASE
 
     ' Clamp values to valid range (shouldn't be needed but safety)
     r := 0 #> r <# 255
@@ -957,37 +968,36 @@ PRI transform_coordinates(row, col, x_ptr, y_ptr) | x, y, temp_row, temp_col
   LONG[x_ptr] := x
   LONG[y_ptr] := y
 
-PRI value_to_color(value, min_val, max_val) : color | r, g, b, intensity, gray_fade
-'' Convert sensor value to RGB565 color using unified bipolar color mapping
+PRI value_to_color(value, min_val, max_val) : color | r, g, b, intensity, linear
+'' Convert sensor value to RGB565 color using perceptually uniform gradient
 '' @param value - sensor value (0-65535)
 '' @param min_val - minimum expected value (unused, kept for API compatibility)
 '' @param max_val - maximum expected value (unused, kept for API compatibility)
 '' @returns RGB565 color (16-bit)
 ''
-'' Uses unified formula from DOCs/MagSensor-Color-Mapping-Specification.md
-'' Color mapping:
-''   Below SENSOR_MID (20500) -> Red (negative field)
-''   At SENSOR_MID -> Dark Gray (neutral/background)
-''   Above SENSOR_MID -> Green (positive field)
+'' Uses gamma-corrected intensity for smooth perceptual gradient.
+'' See DOCs/Visualization-Theory-of-Operations.md for details.
+''
+'' FIX (2025-12-26): Removed gray_fade to eliminate banding artifact.
 
   ' Clamp to valid ADC range
   value := SENSOR_MIN #> value <# SENSOR_MAX
 
-  ' Apply unified color formula (same as HDMI and LUT)
+  ' Apply perceptually uniform color formula with gamma correction
   if value < SENSOR_MID
-    ' Negative field: Red with fading gray
-    intensity := ((SENSOR_MID - value) * 255) / NEGATIVE_RANGE
-    gray_fade := (value * GRAY_BASE) / NEGATIVE_RANGE
-    r := intensity
-    g := gray_fade
-    b := gray_fade
+    ' Negative field: Red increases from gray background
+    linear := ((SENSOR_MID - value) * 255) / NEGATIVE_RANGE
+    intensity := (linear * linear) / 255  ' Gamma correction ~2.0
+    r := GRAY_BASE + intensity            ' Red increases from gray
+    g := GRAY_BASE
+    b := GRAY_BASE
   else
-    ' Positive field: Green with fading gray
-    intensity := ((value - SENSOR_MID) * 255) / POSITIVE_RANGE
-    gray_fade := ((SENSOR_MAX - value) * GRAY_BASE) / POSITIVE_RANGE
-    r := gray_fade
-    g := intensity
-    b := gray_fade
+    ' Positive field: Green increases from gray background
+    linear := ((value - SENSOR_MID) * 255) / POSITIVE_RANGE
+    intensity := (linear * linear) / 255  ' Gamma correction ~2.0
+    r := GRAY_BASE
+    g := GRAY_BASE + intensity            ' Green increases from gray
+    b := GRAY_BASE
 
   ' Clamp to valid range
   r := 0 #> r <# 255
@@ -1043,7 +1053,6 @@ PRI display_loop() | framePtr
 
     ' Dequeue frame from OLED FIFO (blocking)
     framePtr := fifo.dequeue(fifo.FIFO_OLED)
-    debug("OLED: DEQUEUE ptr=", uhex_long(framePtr))
 
     if framePtr == 0
       ' No frame available, wait and retry
@@ -1054,7 +1063,6 @@ PRI display_loop() | framePtr
     display_frame(framePtr)
 
     ' Release frame back to pool
-    debug("OLED: RELEASE ptr=", uhex_long(framePtr))
     fifo.releaseFrame(framePtr)
 
     ' Increment frame count

@@ -59,6 +59,11 @@ CON { tile sensor constants }
     SPI_PERIOD = 250_000_000 / SPI_CLOCK_FREQ  ' Period in sysclks = 100 @ 250 MHz
     SPI_LOW_TIME = SPI_PERIOD / 2       ' 50% duty cycle = 50 sysclks
 
+    ' Calibration constants
+    ' Each sensor has a slightly different zero-field baseline due to manufacturing variation.
+    ' SENSOR_MID is the nominal baseline value; calibration normalizes all sensors to this.
+    SENSOR_MID = 20500                  ' Nominal zero-field baseline (observed average)
+
 OBJ
     fifo : "isp_frame_fifo_manager"    ' Multi-FIFO frame pool manager (shared singleton)
     stack_check : "isp_stack_check"    ' Stack overflow detection utility
@@ -77,7 +82,9 @@ VAR { tile sensor variables }
 
     ' Baseline calibration
     WORD    baseline[SENSORS_PER_FRAME] ' Zero-field baseline values (64 sensors)
+    BYTE    stuck_pixel[SENSORS_PER_FRAME] ' Stuck pixel flags (0=OK, 1=stuck)
     LONG    baseline_valid              ' TRUE if baseline has been calibrated
+    LONG    stuck_count                 ' Number of stuck pixels detected
 
     ' Test pattern state
     LONG    test_frame_counter          ' Test mode: current frame index (0-5)
@@ -208,6 +215,110 @@ PUB is_running() : state
 '' @returns TRUE if running, FALSE if stopped
 
     return (cog_id >= 0)
+
+PUB capture_baseline() : success | framePtr, i, retries
+'' Capture current sensor readings as per-sensor baseline for calibration
+'' IMPORTANT: Call this with NO MAGNET present to capture zero-field baselines!
+'' After calling this, all subsequent sensor readings will be normalized to SENSOR_MID.
+'' @returns TRUE if baseline captured successfully, FALSE if acquisition failed
+''
+'' This eliminates per-sensor variation that causes visible "banding" artifacts
+'' in the display. Each Hall effect sensor has a slightly different zero-field
+'' reading due to manufacturing tolerances; this calibration normalizes them.
+''
+'' NOTE: This function dequeues a frame from the sensor FIFO rather than reading
+'' sensors directly, to avoid race conditions with the sensor COG.
+
+    debug("Sensor: Capturing baseline (remove all magnets!)...", 13, 10)
+
+    ' Temporarily disable calibration during capture
+    baseline_valid := FALSE
+
+    ' Wait for a frame from the sensor FIFO (sensor COG produces these)
+    ' This avoids race conditions - we use a frame the sensor COG already acquired
+    retries := 100
+    framePtr := 0
+    repeat while retries > 0
+      framePtr := fifo.dequeue(fifo.FIFO_SENSOR)
+      if framePtr <> 0
+        quit
+      retries--
+      waitms(10)
+
+    if framePtr == 0
+      debug("Sensor: ERROR - No frame available for baseline capture", 13, 10)
+      return FALSE
+
+    ' Copy frame data to baseline array and detect stuck pixels
+    ' Frame was already acquired with correct mapping by sensor COG
+    ' Stuck pixels are those reading 0 (stuck low) or 65535 (stuck high)
+    stuck_count := 0
+    repeat i from 0 to 63
+      baseline[i] := WORD[framePtr][i]
+      ' Detect stuck pixels (at ADC limits)
+      if baseline[i] == 0 or baseline[i] == 65535
+        stuck_pixel[i] := 1
+        stuck_count++
+        ' Use SENSOR_MID as baseline for stuck pixels so they don't cause weird colors
+        baseline[i] := SENSOR_MID
+      else
+        stuck_pixel[i] := 0
+
+    ' Release frame back to pool
+    fifo.releaseFrame(framePtr)
+
+    ' Enable calibration
+    baseline_valid := TRUE
+
+    debug("Sensor: Baseline captured successfully:", 13, 10)
+    ' Report stuck pixels if any found
+    if stuck_count > 0
+      debug("  WARNING: ", udec(stuck_count), " STUCK PIXEL(S) DETECTED!", 13, 10)
+      repeat i from 0 to 63
+        if stuck_pixel[i]
+          debug("    Stuck pixel at row ", udec(i / 8), ", col ", udec(i // 8), 13, 10)
+
+    ' Log all baseline values by row so we can spot anomalies
+    repeat i from 0 to 7
+      debug("  Row ", udec(i), ": ")
+      debug(udec(baseline[i*8+0]), " ")
+      debug(udec(baseline[i*8+1]), " ")
+      debug(udec(baseline[i*8+2]), " ")
+      debug(udec(baseline[i*8+3]), " ")
+      debug(udec(baseline[i*8+4]), " ")
+      debug(udec(baseline[i*8+5]), " ")
+      debug(udec(baseline[i*8+6]), " ")
+      debug(udec(baseline[i*8+7]), 13, 10)
+
+    return TRUE
+
+PUB is_calibrated() : state
+'' Check if per-sensor baseline calibration has been performed
+'' @returns TRUE if calibrated, FALSE if not
+
+    return baseline_valid
+
+PUB is_stuck(index) : stuck
+'' Check if a specific sensor is stuck (detected during calibration)
+'' @param index - sensor index (0-63)
+'' @returns TRUE if sensor is stuck, FALSE if operational
+
+    if index < 0 or index > 63
+      return FALSE
+    return stuck_pixel[index] <> 0
+
+PUB get_stuck_count() : count
+'' Get the number of stuck pixels detected during calibration
+'' @returns number of stuck pixels (0-64)
+
+    return stuck_count
+
+PUB clear_calibration()
+'' Clear per-sensor calibration, returning to raw sensor output
+'' Useful for debugging or when re-calibration is needed
+
+    baseline_valid := FALSE
+    debug("Sensor: Calibration cleared, using raw sensor values", 13, 10)
 
 PUB reset_counter_test()
 '' TEST METHOD: Reset hardware counter to sensor 0
@@ -584,6 +695,11 @@ PRI acquire_sensor_frame() | framePtr, sensor_val, buf_ptr, total_sensor_count, 
 
     END
 
+    ' Apply per-sensor baseline calibration (if calibrated)
+    ' This normalizes each sensor to SENSOR_MID, eliminating per-sensor variation
+    if baseline_valid
+      apply_calibration(framePtr)
+
     ' Commit completed frame to sensor FIFO
     if fifo.commitFrame(fifo.FIFO_SENSOR, framePtr) < 0
         ' FIFO full - release frame back to pool (decimation)
@@ -595,6 +711,22 @@ PRI acquire_sensor_frame() | framePtr, sensor_val, buf_ptr, total_sensor_count, 
     ' FULL SPEED: No artificial delay - natural timing is:
     '   SPI: 24 bits × 64 sensors × (1/2.5MHz) = ~614µs per frame
     '   Plus pipeline overhead: ~750µs total = ~1,330 fps theoretical max
+
+PRI apply_calibration(framePtr) | i, raw, calibrated
+'' Apply per-sensor baseline calibration to a frame buffer
+'' @param framePtr - pointer to 64-word frame buffer
+''
+'' For each sensor: calibrated = raw - baseline[i] + SENSOR_MID
+'' This normalizes all sensors to the same zero-field baseline.
+
+    repeat i from 0 to SENSORS_PER_FRAME - 1
+      raw := WORD[framePtr][i]
+      ' Calculate calibrated value: shift raw relative to this sensor's baseline,
+      ' then re-center around the nominal SENSOR_MID
+      calibrated := raw - baseline[i] + SENSOR_MID
+      ' Clamp to valid 16-bit range (handle underflow/overflow)
+      calibrated := 0 #> calibrated <# 65535
+      WORD[framePtr][i] := calibrated
 
 PRI adc_verify_scan() | scan_num, sensor_num, raw_value, processed_value, event_config
 '' ADC Verification Mode: Perform exactly 2 full scans with detailed logging

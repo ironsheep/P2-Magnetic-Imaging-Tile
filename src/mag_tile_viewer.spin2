@@ -21,6 +21,13 @@ CON
                            ' false = normal operation
                            ' NOTE: When true, overrides TEST_MODE and SLOW_SCAN_MODE
 
+  AUTO_CALIBRATE = true    ' true = capture baseline at startup (removes per-sensor variation)
+                           ' false = skip calibration (raw sensor values, may show banding)
+                           ' NOTE: For accurate calibration, remove all magnets before starting!
+
+  LOG_SENSOR_VALUES = false ' true = log sensor values to debug output (verbose!)
+                           ' false = suppress sensor value logging for cleaner output
+
   ' Pin group assignments
   HDMI_BASE_PIN   = 0
   SENSOR_BASE_PIN = 8
@@ -126,11 +133,41 @@ PUB main() | success
       sensor.set_acquisition_mode(sensor.MODE_LIVE)
       debug("  Sensor set to LIVE mode", 13, 10)
 
-  debug(" ", 13, 10)
-  debug("System initialization complete!", 13, 10)
-  debug(" ", 13, 10)
-  debug("=== PIPELINE ACTIVE ===", 13, 10)
-  debug("Data flow: Sensor -> Sensor FIFO -> Main COG (decimator) -> HDMI/OLED FIFOs", 13, 10)
+  ' Perform per-sensor baseline calibration (optional)
+  ' This eliminates manufacturing variation between sensors that causes "banding" artifacts
+  if AUTO_CALIBRATE
+    debug(" ", 13, 10)
+    debug("****************************************", 13, 10)
+    debug("*         CALIBRATION MODE             *", 13, 10)
+    debug("*    REMOVE ALL MAGNETS FROM SENSOR    *", 13, 10)
+    debug("****************************************", 13, 10)
+    debug(" ", 13, 10)
+    debug("Calibrating in: 5...", 13, 10)
+    waitms(1000)
+    debug("Calibrating in: 4...", 13, 10)
+    waitms(1000)
+    debug("Calibrating in: 3...", 13, 10)
+    waitms(1000)
+    debug("Calibrating in: 2...", 13, 10)
+    waitms(1000)
+    debug("Calibrating in: 1...", 13, 10)
+    waitms(1000)
+    debug(">>> CAPTURING BASELINE NOW <<<", 13, 10)
+    if sensor.capture_baseline()
+      debug("Calibration SUCCESS", 13, 10)
+      ' Report stuck pixel summary
+      if sensor.get_stuck_count() > 0
+        debug(" ", 13, 10)
+        debug("*** STUCK PIXELS: ", udec(sensor.get_stuck_count()), " ***", 13, 10)
+        debug("*** These will display as MAGENTA ***", 13, 10)
+    else
+      debug("Calibration FAILED - using raw values", 13, 10)
+    debug(" ", 13, 10)
+
+  debug("****************************************", 13, 10)
+  debug("*            SYSTEM LIVE               *", 13, 10)
+  debug("*     MAGNET CAN NOW BE PLACED         *", 13, 10)
+  debug("****************************************", 13, 10)
   debug(" ", 13, 10)
 
   ' Main decimation loop (runs in main COG)
@@ -167,18 +204,19 @@ PRI slow_scan_loop() | framePtr, hdmiPtr, oledPtr, drained, i
       if fifo.checkFreeListIntegrity() >= 0
         debug("*** CORRUPTION DETECTED AFTER SENSOR DEQUEUE ***", 13, 10)
 
-      ' Print sensor values for debugging
-      debug("Sensor data (raw 12-bit values):", 13, 10)
-      repeat i from 0 to 7
-        debug("  Row ", udec(i), ": ")
-        debug(udec(WORD[framePtr][i*8+0]), " ")
-        debug(udec(WORD[framePtr][i*8+1]), " ")
-        debug(udec(WORD[framePtr][i*8+2]), " ")
-        debug(udec(WORD[framePtr][i*8+3]), " ")
-        debug(udec(WORD[framePtr][i*8+4]), " ")
-        debug(udec(WORD[framePtr][i*8+5]), " ")
-        debug(udec(WORD[framePtr][i*8+6]), " ")
-        debug(udec(WORD[framePtr][i*8+7]), 13, 10)
+      ' Print sensor values for debugging (controlled by LOG_SENSOR_VALUES)
+      if LOG_SENSOR_VALUES
+        debug("Sensor data (calibrated 16-bit values):", 13, 10)
+        repeat i from 0 to 7
+          debug("  Row ", udec(i), ": ")
+          debug(udec(WORD[framePtr][i*8+0]), " ")
+          debug(udec(WORD[framePtr][i*8+1]), " ")
+          debug(udec(WORD[framePtr][i*8+2]), " ")
+          debug(udec(WORD[framePtr][i*8+3]), " ")
+          debug(udec(WORD[framePtr][i*8+4]), " ")
+          debug(udec(WORD[framePtr][i*8+5]), " ")
+          debug(udec(WORD[framePtr][i*8+6]), " ")
+          debug(udec(WORD[framePtr][i*8+7]), 13, 10)
 
       ' Send to HDMI display
       hdmiPtr := fifo.getNextFrame()
@@ -192,8 +230,6 @@ PRI slow_scan_loop() | framePtr, hdmiPtr, oledPtr, drained, i
           ' WATCHPOINT: Check after HDMI releaseFrame (error path)
           if fifo.checkFreeListIntegrity() >= 0
             debug("*** CORRUPTION AFTER HDMI releaseFrame (err) ***", 13, 10)
-        else
-          debug("  -> Sent to HDMI", 13, 10)
         ' WATCHPOINT: Check after HDMI commit/release
         if fifo.checkFreeListIntegrity() >= 0
           debug("*** CORRUPTION AFTER HDMI commit ***", 13, 10)
@@ -210,8 +246,6 @@ PRI slow_scan_loop() | framePtr, hdmiPtr, oledPtr, drained, i
           ' WATCHPOINT: Check after OLED releaseFrame (error path)
           if fifo.checkFreeListIntegrity() >= 0
             debug("*** CORRUPTION AFTER OLED releaseFrame (err) ***", 13, 10)
-        else
-          debug("  -> Sent to OLED", 13, 10)
         ' WATCHPOINT: Check after OLED commit/release
         if fifo.checkFreeListIntegrity() >= 0
           debug("*** CORRUPTION AFTER OLED commit ***", 13, 10)
