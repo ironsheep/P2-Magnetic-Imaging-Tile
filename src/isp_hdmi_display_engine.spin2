@@ -16,6 +16,15 @@ CON
   CELL_SIZE   = 30        ' Size of each sensor cell in pixels
   CELL_GAP    = 3         ' Gap between cells in pixels
 
+  ' Statistics display area (right side of grid)
+  STATS_X       = 480     ' Left edge of stats text
+  STATS_VALUE_X = 530     ' Left edge of numeric values (after "Min: " etc.)
+  STATS_MIN_Y   = 50      ' Y position for Min line
+  STATS_MAX_Y   = 65      ' Y position for Max line
+  STATS_AVG_Y   = 80      ' Y position for Avg line
+  STATS_FRAME_Y = 110     ' Y position for Frame counter
+  STATS_CLEAR_W = 80      ' Width to clear for value update
+
   ' Color mapping ranges - FULL ADC range with observed baseline
   ' See DOCs/MagSensor-Color-Mapping-Specification.md for details
   ' Uses full 16-bit ADC range to accommodate stronger magnets in future
@@ -50,6 +59,12 @@ VAR
   long  base_pin
   long  grid_drawn              ' Flag: 0=not drawn, 1=drawn
   word  frame_buffer[64]
+
+  ' Dynamic statistics (updated per frame)
+  word  stat_min                ' Minimum sensor value in frame
+  word  stat_max                ' Maximum sensor value in frame
+  long  stat_avg                ' Average sensor value in frame
+  byte  text_buf[16]            ' Buffer for number-to-string conversion
 
 DAT { HDMI display COG stack with overflow detection }
   ' Stack for HDMI COG - placed in DAT with sentinel mark for overflow detection
@@ -175,9 +190,8 @@ PRI display_loop() | framePtr, row, col, sensorIdx, sensorVal, cellColor
 
     ' Add text labels around the display
     debug("HDMI Engine Loop: Drawing text labels...", 13, 10)
-    ' TEMPORARILY DISABLED - Testing if grid and sensor display work without text
-    'DrawStaticLabels()
-    debug("HDMI Engine Loop: Text drawing disabled for testing, grid ready, waiting for frames...", 13, 10)
+    DrawStaticLabels()
+    debug("HDMI Engine Loop: Static labels drawn, grid ready, waiting for frames...", 13, 10)
     stack_check.checkStack(@display_cog_stack, HDMI_STACK_SIZE_LONGS)
 
     repeat
@@ -210,13 +224,18 @@ PRI display_loop() | framePtr, row, col, sensorIdx, sensorVal, cellColor
         ' Increment frame counter
         frame_count++
 
+        ' Calculate and display frame statistics
+        CalculateFrameStats(framePtr)
+        DrawDynamicStats()
+
         ' Release frame back to pool
         fifo.releaseFrame(framePtr)
       ' else: spurious wake (race condition) - just loop back
 
 PRI DrawStaticLabels() | row, col, labelX, labelY
   '' Draw static text labels around the sensor grid display
-  '' Includes title, row/column labels, and placeholders for statistics
+  '' Includes title, row/column labels, and static label prefixes
+  '' Dynamic values (min/max/avg/frame) are drawn by DrawDynamicStats()
 
   ' Title at top center
   gfx.DrawTextCentered(320, 10, @"Magnetic Imaging Tile Display", $FFFFFFFF)  ' White
@@ -233,17 +252,100 @@ PRI DrawStaticLabels() | row, col, labelX, labelY
     labelX := GRID_X + col * (CELL_SIZE + CELL_GAP) + 12  ' Centered in cell
     gfx.DrawChar(labelX, labelY, "0" + col, $FFFF00FF)  ' Yellow
 
-  ' Statistics area (top right) - sample placeholders
-  gfx.DrawText(480, 50, @"Min: 1200", $00FF00FF)   ' Green
-  gfx.DrawText(480, 65, @"Max: 3000", $FF0000FF)   ' Red
-  gfx.DrawText(480, 80, @"Avg: 2100", $00FFFFFF)   ' Cyan
+  ' Statistics area labels (values drawn dynamically)
+  gfx.DrawText(STATS_X, STATS_MIN_Y, @"Min:", $00FF00FF)    ' Green
+  gfx.DrawText(STATS_X, STATS_MAX_Y, @"Max:", $FF0000FF)    ' Red
+  gfx.DrawText(STATS_X, STATS_AVG_Y, @"Avg:", $00FFFFFF)    ' Cyan
+  gfx.DrawText(STATS_X, STATS_FRAME_Y, @"Frame:", $FFFFFFFF) ' White
 
-  ' Frame counter (top right)
-  gfx.DrawText(480, 110, @"Frame: 0/10", $FFFFFFFF)  ' White
+  ' Status line (bottom left) - static for now
+  gfx.DrawText(10, 460, @"Mode: LIVE", $FFFF00FF)  ' Yellow
 
-  ' Status line (bottom left)
-  gfx.DrawText(10, 460, @"Mode: TEST_PATTERN", $FFFF00FF)  ' Yellow
-  gfx.DrawText(200, 460, @"FIFOs: S:0 H:1 Free:31", $00FF00FF)  ' Green
+PRI CalculateFrameStats(framePtr) | i, val, sum
+  '' Calculate min, max, and average from frame data
+  '' @param framePtr - pointer to 64-word frame buffer
+  '' Results stored in stat_min, stat_max, stat_avg
+
+  stat_min := 65535
+  stat_max := 0
+  sum := 0
+
+  repeat i from 0 to 63
+    val := WORD[framePtr][i]
+
+    ' Skip stuck pixels in statistics
+    if not sensor.is_stuck(i)
+      if val < stat_min
+        stat_min := val
+      if val > stat_max
+        stat_max := val
+      sum += val
+
+  ' Calculate average (avoid divide by zero)
+  stat_avg := sum / 64
+
+PRI DrawDynamicStats()
+  '' Update dynamic statistics display
+  '' Call after CalculateFrameStats() to show current values
+
+  ' Clear previous values by drawing black rectangles
+  gfx.FillRect(STATS_VALUE_X, STATS_MIN_Y, STATS_VALUE_X + STATS_CLEAR_W, STATS_MIN_Y + 12, $000000FF)
+  gfx.FillRect(STATS_VALUE_X, STATS_MAX_Y, STATS_VALUE_X + STATS_CLEAR_W, STATS_MAX_Y + 12, $000000FF)
+  gfx.FillRect(STATS_VALUE_X, STATS_AVG_Y, STATS_VALUE_X + STATS_CLEAR_W, STATS_AVG_Y + 12, $000000FF)
+  gfx.FillRect(STATS_VALUE_X, STATS_FRAME_Y, STATS_VALUE_X + STATS_CLEAR_W, STATS_FRAME_Y + 12, $000000FF)
+
+  ' Draw min value
+  FormatNumber(stat_min)
+  gfx.DrawText(STATS_VALUE_X, STATS_MIN_Y, @text_buf, $00FF00FF)  ' Green
+
+  ' Draw max value
+  FormatNumber(stat_max)
+  gfx.DrawText(STATS_VALUE_X, STATS_MAX_Y, @text_buf, $FF0000FF)  ' Red
+
+  ' Draw avg value
+  FormatNumber(stat_avg)
+  gfx.DrawText(STATS_VALUE_X, STATS_AVG_Y, @text_buf, $00FFFFFF)  ' Cyan
+
+  ' Draw frame counter
+  FormatNumber(frame_count)
+  gfx.DrawText(STATS_VALUE_X, STATS_FRAME_Y, @text_buf, $FFFFFFFF)  ' White
+
+PRI FormatNumber(value) | i, digit, started
+  '' Convert integer value to zero-terminated string in text_buf
+  '' @param value - integer to convert (0-99999)
+
+  ' Handle zero specially
+  if value == 0
+    text_buf[0] := "0"
+    text_buf[1] := 0
+    return
+
+  ' Build digits from right to left, then reverse
+  i := 0
+  repeat while value > 0 and i < 10
+    digit := value // 10
+    text_buf[i++] := "0" + digit
+    value /= 10
+
+  ' Null terminate
+  text_buf[i] := 0
+
+  ' Reverse the string in place
+  ReverseString(@text_buf, i)
+
+PRI ReverseString(pStr, len) | i, j, temp
+  '' Reverse a string in place
+  '' @param pStr - pointer to string
+  '' @param len - length of string (not including null)
+
+  i := 0
+  j := len - 1
+  repeat while i < j
+    temp := BYTE[pStr][i]
+    BYTE[pStr][i] := BYTE[pStr][j]
+    BYTE[pStr][j] := temp
+    i++
+    j--
 
 PRI field_to_color(fieldVal) : color | r, g, b, intensity, linear
   '' Convert magnetic field value to display color using perceptually uniform gradient

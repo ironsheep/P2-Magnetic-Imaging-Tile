@@ -1,0 +1,243 @@
+'' =================================================================================================
+''
+''   File....... test_hdmi_text_only.spin2
+''   Purpose.... Minimal HDMI text rendering test - Stage 1 verification
+''   Author..... Stephen M Moraco
+''   Created.... 2025-12-26
+''
+''   Tests text rendering on HDMI display in isolation.
+''   NO sensors, NO FIFOs, NO display engine - just graphics subsystem.
+''
+''   Expected Display:
+''   +------------------------------------------------------------------+
+''   |                                                                  |
+''   |              "HDMI Text Test - Stage 1"  (white, centered)       |
+''   |                                                                  |
+''   |    TEST 1: Single Char                                           |
+''   |         A B C 1 2 3                                              |
+''   |                                                                  |
+''   |    TEST 2: Text String                                           |
+''   |         Hello World                                              |
+''   |                                                                  |
+''   |    TEST 3: Centered Text                                         |
+''   |              <- CENTERED ->                                      |
+''   |                                                                  |
+''   |    TEST 4: Colors                                                |
+''   |         RED GREEN BLUE YELLOW CYAN                               |
+''   |                                                                  |
+''   |    TEST 5: All Fonts                                             |
+''   |         5x7: ABC  8x8A: ABC  8x8B: ABC  Dith: ABC                |
+''   |                                                                  |
+''   |                                                                  |
+''   |    PASS: All text visible and correctly positioned               |
+''   +------------------------------------------------------------------+
+''
+'' =================================================================================================
+
+CON
+  _clkfreq  = 250_000_000
+
+  ' HDMI base pin (must match hardware)
+  HDMI_BASE_PIN = 0
+
+  ' Test layout positions
+  TITLE_Y       = 20
+  TEST1_Y       = 60
+  TEST2_Y       = 120
+  TEST3_Y       = 180
+  TEST4_Y       = 240
+  TEST5_Y       = 300
+  RESULT_Y      = 400
+
+  LEFT_MARGIN   = 20
+  INDENT        = 40
+
+  ' Colors (RRGGBBAA format)
+  WHITE   = $FF_FF_FF_FF
+  RED     = $FF_00_00_FF
+  GREEN   = $00_FF_00_FF
+  BLUE    = $00_00_FF_FF
+  YELLOW  = $FF_FF_00_FF
+  CYAN    = $00_FF_FF_FF
+  MAGENTA = $FF_00_FF_FF
+  GRAY    = $80_80_80_FF
+  BLACK   = $00_00_00_FF
+
+OBJ
+  gfx   : "isp_psram_graphics"
+  fonts : "isp_hub75_fonts"
+
+PUB main() | test_num
+  '' Main entry point - run all text tests
+
+  debug("===========================================", 13, 10)
+  debug("  HDMI Text Test - Stage 1", 13, 10)
+  debug("===========================================", 13, 10)
+  debug(" ", 13, 10)
+
+  ' Initialize HDMI graphics hardware
+  debug("Initializing HDMI graphics on pin ", udec(HDMI_BASE_PIN), "...", 13, 10)
+  gfx.init(HDMI_BASE_PIN)
+  debug("Hardware initialized", 13, 10)
+
+  ' Initialize graphics for this COG (main COG)
+  debug("Initializing graphics for COG ", udec(cogid()), "...", 13, 10)
+  gfx.start()
+  debug("Graphics ready", 13, 10)
+
+  ' Clear screen to dark gray (so we can see if text area has issues)
+  debug("Clearing screen...", 13, 10)
+  gfx.cls($20_20_20_FF)  ' Dark gray background
+  debug("Screen cleared", 13, 10)
+
+  ' Run all tests
+  debug(" ", 13, 10)
+  debug("Running text tests...", 13, 10)
+
+  test_num := 1
+  run_test_title()
+  debug("  Test ", udec(test_num++), " complete: Title", 13, 10)
+
+  run_test_single_chars()
+  debug("  Test ", udec(test_num++), " complete: Single chars", 13, 10)
+
+  run_test_string()
+  debug("  Test ", udec(test_num++), " complete: Text string", 13, 10)
+
+  run_test_centered()
+  debug("  Test ", udec(test_num++), " complete: Centered text", 13, 10)
+
+  run_test_colors()
+  debug("  Test ", udec(test_num++), " complete: Colors", 13, 10)
+
+  run_test_fonts()
+  debug("  Test ", udec(test_num++), " complete: All fonts", 13, 10)
+
+  run_test_result()
+  debug("  Result line drawn", 13, 10)
+
+  debug(" ", 13, 10)
+  debug("===========================================", 13, 10)
+  debug("  ALL TESTS COMPLETE", 13, 10)
+  debug("  Check HDMI display for visual verification", 13, 10)
+  debug("===========================================", 13, 10)
+
+  ' Hold - keep display active
+  repeat
+    waitms(1000)
+
+PRI run_test_title()
+  '' Draw the title centered at top
+
+  gfx.SetFont(fonts.TEXT_FONT_5x7_DITH_DCNDR)  ' Anti-aliased font
+  gfx.DrawTextCentered(320, TITLE_Y, @"HDMI Text Test - Stage 1", WHITE)
+
+PRI run_test_single_chars() | x
+  '' Test 1: Draw individual characters
+
+  gfx.SetFont(fonts.TEXT_FONT_5x7)
+  gfx.DrawText(LEFT_MARGIN, TEST1_Y, @"TEST 1: Single Chars", GRAY)
+
+  ' Draw individual characters with spacing
+  x := INDENT
+  gfx.DrawChar(x, TEST1_Y + 20, "A", WHITE)
+  x += 15
+  gfx.DrawChar(x, TEST1_Y + 20, "B", WHITE)
+  x += 15
+  gfx.DrawChar(x, TEST1_Y + 20, "C", WHITE)
+  x += 25
+  gfx.DrawChar(x, TEST1_Y + 20, "1", WHITE)
+  x += 15
+  gfx.DrawChar(x, TEST1_Y + 20, "2", WHITE)
+  x += 15
+  gfx.DrawChar(x, TEST1_Y + 20, "3", WHITE)
+
+PRI run_test_string()
+  '' Test 2: Draw a text string
+
+  gfx.SetFont(fonts.TEXT_FONT_5x7)
+  gfx.DrawText(LEFT_MARGIN, TEST2_Y, @"TEST 2: Text String", GRAY)
+
+  gfx.SetFont(fonts.TEXT_FONT_5x7_DITH_DCNDR)
+  gfx.DrawText(INDENT, TEST2_Y + 20, @"Hello World! The quick brown fox.", WHITE)
+
+PRI run_test_centered()
+  '' Test 3: Draw centered text
+
+  gfx.SetFont(fonts.TEXT_FONT_5x7)
+  gfx.DrawText(LEFT_MARGIN, TEST3_Y, @"TEST 3: Centered Text", GRAY)
+
+  gfx.SetFont(fonts.TEXT_FONT_5x7_DITH_DCNDR)
+  gfx.DrawTextCentered(320, TEST3_Y + 20, @"<- CENTERED ->", YELLOW)
+
+  ' Draw reference lines to verify centering
+  gfx.DrawVLine(320, TEST3_Y + 15, TEST3_Y + 35, GRAY)  ' Center line
+
+PRI run_test_colors()
+  '' Test 4: Draw text in different colors
+
+  gfx.SetFont(fonts.TEXT_FONT_5x7)
+  gfx.DrawText(LEFT_MARGIN, TEST4_Y, @"TEST 4: Colors", GRAY)
+
+  gfx.SetFont(fonts.TEXT_FONT_5x7_DITH_DCNDR)
+  gfx.DrawText(INDENT, TEST4_Y + 20, @"RED", RED)
+  gfx.DrawText(INDENT + 50, TEST4_Y + 20, @"GREEN", GREEN)
+  gfx.DrawText(INDENT + 110, TEST4_Y + 20, @"BLUE", BLUE)
+  gfx.DrawText(INDENT + 160, TEST4_Y + 20, @"YELLOW", YELLOW)
+  gfx.DrawText(INDENT + 230, TEST4_Y + 20, @"CYAN", CYAN)
+  gfx.DrawText(INDENT + 290, TEST4_Y + 20, @"MAGENTA", MAGENTA)
+
+PRI run_test_fonts() | y_offset
+  '' Test 5: Draw text in all available fonts
+
+  gfx.SetFont(fonts.TEXT_FONT_5x7)
+  gfx.DrawText(LEFT_MARGIN, TEST5_Y, @"TEST 5: All Fonts", GRAY)
+
+  y_offset := TEST5_Y + 20
+
+  ' Font 1: 5x7 standard
+  gfx.SetFont(fonts.TEXT_FONT_5x7)
+  gfx.DrawText(INDENT, y_offset, @"5x7:", GRAY)
+  gfx.DrawText(INDENT + 40, y_offset, @"ABCabc123", WHITE)
+
+  y_offset += 15
+
+  ' Font 2: 8x8A
+  gfx.SetFont(fonts.TEXT_FONT_8x8A)
+  gfx.DrawText(INDENT, y_offset, @"8x8A:", GRAY)
+  gfx.DrawText(INDENT + 50, y_offset, @"ABCabc123", WHITE)
+
+  y_offset += 15
+
+  ' Font 3: 8x8B
+  gfx.SetFont(fonts.TEXT_FONT_8x8B)
+  gfx.DrawText(INDENT, y_offset, @"8x8B:", GRAY)
+  gfx.DrawText(INDENT + 55, y_offset, @"ABCabc123", WHITE)
+
+  y_offset += 15
+
+  ' Font 4: 5x7 Dithered (anti-aliased)
+  gfx.SetFont(fonts.TEXT_FONT_5x7_DITH)
+  gfx.DrawText(INDENT, y_offset, @"Dith:", GRAY)
+  gfx.DrawText(INDENT + 45, y_offset, @"ABCabc123", WHITE)
+
+  y_offset += 15
+
+  ' Font 5: 5x7 Dithered with Descenders (default, anti-aliased)
+  gfx.SetFont(fonts.TEXT_FONT_5x7_DITH_DCNDR)
+  gfx.DrawText(INDENT, y_offset, @"DithD:", GRAY)
+  gfx.DrawText(INDENT + 50, y_offset, @"ABCabc123 gypj", WHITE)
+
+PRI run_test_result()
+  '' Draw the result/pass indicator at bottom
+
+  gfx.SetFont(fonts.TEXT_FONT_5x7_DITH_DCNDR)
+
+  ' Draw a box around the result
+  gfx.DrawBox(100, RESULT_Y - 5, 540, RESULT_Y + 25, WHITE)
+
+  gfx.DrawTextCentered(320, RESULT_Y, @"PASS: If all text above is visible and readable", GREEN)
+
+  ' Draw version/info at very bottom
+  gfx.SetFont(fonts.TEXT_FONT_5x7)
+  gfx.DrawText(LEFT_MARGIN, 460, @"Stage 1 Complete - Text rendering verified", GRAY)
