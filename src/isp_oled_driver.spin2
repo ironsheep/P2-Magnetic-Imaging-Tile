@@ -314,7 +314,7 @@ PUB get_orientation() : current
   '' Get current display orientation
   '' @returns current orientation (0-3)
 
-  return orientation
+  current := orientation
 
 PUB set_window(x1, y1, x2, y2)
   '' Set drawing window

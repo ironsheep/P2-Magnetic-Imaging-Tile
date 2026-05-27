@@ -37,14 +37,14 @@ PUB main() | i
 
     ' Explicitly configure as simple digital output (mode 0)
     wrpin(8, 0)     ' Mode 0 = disabled/simple I/O
-    dirh(8)         ' Set direction to output
+    pinh(8)         ' Set direction to output
 
     repeat 10
         debug("  P8 HIGH (via dirh/dirl)")
-        outh(8)         ' Output high
+        pinh(8)         ' Output high
         waitms(500)
         debug("  P8 LOW (via dirh/dirl)")
-        outl(8)         ' Output low
+        pinl(8)         ' Output low
         waitms(500)
 
     debug(" ")
