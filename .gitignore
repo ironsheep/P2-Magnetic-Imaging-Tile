@@ -237,3 +237,8 @@ src/test_hdmi_hub_pattern.spin2
 /REF-P2-RS
 *.lst
 /REF-IMAGES
+.devcontainer/docker-compose.override.yml
+.devcontainer/*.zip
+.claude/settings.local.json
+src/.vscode/
+src/isp_oled_single_cog.txt
