@@ -1,5 +1,15 @@
-'' test_pin_mapping.spin2 - Pin Mapping Test
-'' Counts binary pattern on OLED pins to identify actual pin assignments
+'' =================================================================================================
+''
+''   File....... test_pin_mapping.spin2
+''   Purpose.... Drive a binary counter on the OLED pins to validate physical pin assignments
+''   Authors.... Stephen M Moraco
+''               -- Copyright (c) 2025 Iron Sheep Productions, LLC
+''               -- see below for terms of use
+''   E-mail..... stephen@ironsheep.biz
+''   Started.... Oct 2025
+''   Updated.... Oct 2025
+''
+'' =================================================================================================
 ''
 '' OLED Pin assignments from README:
 ''   Bit 0 = Pin 16 (DIN/MOSI)
@@ -8,7 +18,7 @@
 ''   Bit 3 = Pin 22 (DC)
 ''   Bit 4 = Pin 23 (RST)
 
-CON
+CON ' ---- Pin Assignments ----
   _clkfreq = 250_000_000
 
   ' OLED pins (non-consecutive!)
@@ -18,12 +28,23 @@ CON
   PIN_3 = 22    ' DC         - Bit 3
   PIN_4 = 23    ' RST        - Bit 4
 
-  DELAY_MS = 100      ' Delay between counts (100ms)
+  DELAY_MS         = 100   ' Delay between counts (100ms)
+  PIN_COUNT        = 5     ' Number of pins in pins[] table
+  COUNTER_WRAP_MASK = $1F  ' 5-bit wrap mask (0..31)
+  LOG_EVERY_MASK   = $07   ' Log every 8th count (counter & MASK == 0)
 
-DAT
+DAT ' ---- Pin Table ----
   pins    long  16, 18, 20, 22, 23   ' Pin numbers to test
 
-PUB main() | counter, idx, value, pin_num
+PUB main() | counter, idx, pinBits, pin_num
+'' Drive a binary counter on the OLED pins to validate physical pin assignments.
+''
+
+' Local Variables:
+' @local counter - Free-running 5-bit count value
+' @local idx - Index into the pin table
+' @local pinBits - Working copy of counter shifted as bits are consumed
+' @local pin_num - Resolved pin number from the table
 
   debug("Pin Mapping Test Started", 13, 10)
   debug("Testing OLED pins: P16, P18, P20, P22, P23", 13, 10)
@@ -36,7 +57,7 @@ PUB main() | counter, idx, value, pin_num
   debug("  Bit 4 = P23 (RST)", 13, 10)
 
   ' Set all test pins as outputs, starting low
-  repeat idx from 0 to 4
+  repeat idx from 0 to PIN_COUNT - 1
     pinlow(long[@pins][idx])
 
   debug("Pins initialized. Starting count...", 13, 10)
@@ -45,21 +66,21 @@ PUB main() | counter, idx, value, pin_num
   counter := 0
   repeat
     ' Write counter value to pins
-    value := counter
-    repeat idx from 0 to 4
+    pinBits := counter
+    repeat idx from 0 to PIN_COUNT - 1
       pin_num := long[@pins][idx]
-      if (value & 1)
+      if (pinBits & 1)
         pinhigh(pin_num)
       else
         pinlow(pin_num)
-      value >>= 1
+      pinBits >>= 1
 
     ' Print current count every 8 values
-    if (counter & $07) == 0
+    if (counter & LOG_EVERY_MASK) == 0
       debug("Count: ", udec(counter), 13, 10)
 
     ' Delay
     waitms(DELAY_MS)
 
     ' Increment and wrap at 32
-    counter := (counter + 1) & $1F
+    counter := (counter + 1) & COUNTER_WRAP_MASK

@@ -1,5 +1,17 @@
-'' isp_frame_processor.spin2 - Frame routing and decimation COG
-'' Reads from sensor FIFO, processes/decimates, routes to display FIFOs
+'' =================================================================================================
+''
+''   File....... isp_frame_transform.spin2
+''   Purpose.... Frame routing and decimation COG that processes sensor frames for display FIFOs
+''   Authors.... Stephen M Moraco
+''               -- Copyright (c) 2025 Iron Sheep Productions, LLC
+''               -- see below for terms of use
+''   E-mail..... stephen@ironsheep.biz
+''   Started.... Oct 2025
+''   Updated.... Nov 2025
+''
+'' =================================================================================================
+''
+'' Reads from sensor FIFO, processes/decimates, routes to display FIFOs.
 ''
 '' Processing modes:
 ''   - Simple decimation (every Nth frame)
@@ -7,7 +19,8 @@
 ''   - Peak detection
 ''   - Future: Edge detection, filtering, etc.
 
-CON
+CON ' ---- Transform Public API ----
+  {Spin2_Doc_CON}
   ' Decimation ratios (configurable)
   ' Note: These defaults assume ~375 fps sensor rate at 250 MHz
   DEFAULT_HDMI_DECIMATION = 9    ' Every 9th frame to HDMI
@@ -18,10 +31,19 @@ CON
   MODE_AVERAGING  = 1            ' Average multiple frames
   MODE_PEAK       = 2            ' Peak detection across frames
 
-OBJ
+  ' Frame layout
+  FRAME_WORD_COUNT      = 64     ' 64 words per sensor frame (8x8 grid)
+
+  ' Statistics buffer (4 longs: frames, hdmi_count, oled_count, mode)
+  STATS_LONG_COUNT      = 4
+
+  ' Debug status interval
+  STATUS_FRAME_INTERVAL = 30     ' Log status every Nth frame (~0.5s @ 60 fps)
+
+OBJ ' ---- Subsystem Objects ----
   fifo : "isp_frame_fifo_manager"
 
-VAR
+VAR ' ---- Processor State ----
   long  cog_id
   long  processing_mode
   long  hdmi_decimation
@@ -29,17 +51,19 @@ VAR
   long  frame_counter
   long  hdmi_counter
   long  oled_counter
-  long  stats[4]                 ' Performance statistics
+  long  stats[STATS_LONG_COUNT]  ' Performance statistics
 
   ' COG stack (64 longs per P2KB recommendations)
   long  processor_cog_stack[64]
 
 PUB null()
-  '' Not a top-level object
+'' Not a top-level object.
+''
 
 PUB start() : ok
-  '' Start the frame processor COG
-  '' @returns cog_id if successful, -1 if failed
+'' Start the frame processor COG that routes sensor frames to display FIFOs.
+''
+'' @returns ok - Cog id (0..7) if successful, -1 if failed
 
   ' Initialize COG ID FIRST (critical - must be set before calling stop()!)
   cog_id := -1
@@ -56,27 +80,29 @@ PUB start() : ok
 
   ' Start processing COG
   cog_id := cogspin(NEWCOG, processor_loop(), @processor_cog_stack)
-
-  return cog_id
+  ok := cog_id
 
 PUB stop()
-  '' Stop the frame processor COG
+'' Stop the frame processor COG and clear the cog id.
+''
 
   if cog_id >= 0
     cogstop(cog_id)
     cog_id := -1
 
 PUB set_mode(mode)
-  '' Set processing mode
-  '' @param mode - MODE_DECIMATION, MODE_AVERAGING, or MODE_PEAK
+'' Set processing mode (decimation, averaging, or peak).
+''
+'' @param mode - MODE_DECIMATION, MODE_AVERAGING, or MODE_PEAK
 
   if mode >= MODE_DECIMATION and mode <= MODE_PEAK
     processing_mode := mode
 
 PUB set_decimation(hdmi_ratio, oled_ratio)
-  '' Set decimation ratios for displays
-  '' @param hdmi_ratio - frames to skip before sending to HDMI (1 = every frame)
-  '' @param oled_ratio - frames to skip before sending to OLED
+'' Set decimation ratios for the HDMI and OLED display paths.
+''
+'' @param hdmi_ratio - Frames to skip before sending to HDMI (1 = every frame)
+'' @param oled_ratio - Frames to skip before sending to OLED
 
   if hdmi_ratio > 0
     hdmi_decimation := hdmi_ratio
@@ -84,13 +110,22 @@ PUB set_decimation(hdmi_ratio, oled_ratio)
     oled_decimation := oled_ratio
 
 PUB get_stats(stat_ptr)
-  '' Copy statistics to provided buffer
-  '' @param stat_ptr - pointer to 4-long buffer for stats
+'' Copy statistics to a caller-provided 4-long buffer.
+''
+'' @param stat_ptr - Hub pointer to a 4-long output buffer (frames, hdmi, oled, mode)
 
-  longmove(stat_ptr, @stats, 4)
+  longmove(stat_ptr, @stats, STATS_LONG_COUNT)
 
 PRI processor_loop() | framePtr, sendHDMI, sendOLED, hdmiPtr, oledPtr
-  '' Main processing loop running in dedicated COG
+' Main processing loop running in the dedicated transform COG.
+'
+
+' Local Variables:
+' @local framePtr - Hub pointer to the frame buffer
+' @local sendHDMI - TRUE when this frame should be sent to HDMI
+' @local sendOLED - TRUE when this frame should be sent to OLED
+' @local hdmiPtr - Hub pointer to the HDMI-bound copy of a frame
+' @local oledPtr - Hub pointer to the OLED-bound copy of a frame
 
   debug("Frame Processor: Loop started", 13, 10)
 
@@ -103,7 +138,7 @@ PRI processor_loop() | framePtr, sendHDMI, sendOLED, hdmiPtr, oledPtr
       frame_counter++
 
       ' Debug every 30 frames (every 0.5 sec at 60fps)
-      if (frame_counter // 30) == 1
+      if (frame_counter // STATUS_FRAME_INTERVAL) == 1
         debug("Processor: Frame ", udec(frame_counter), " from sensor (ptr=", uhex_long(framePtr), ")", 13, 10)
 
       ' Process frame based on mode
@@ -130,25 +165,25 @@ PRI processor_loop() | framePtr, sendHDMI, sendOLED, hdmiPtr, oledPtr
       if sendHDMI
         hdmiPtr := fifo.getNextFrame()
         if hdmiPtr
-          wordmove(hdmiPtr, framePtr, 64)  ' Copy 64 words (128 bytes)
+          wordmove(hdmiPtr, framePtr, FRAME_WORD_COUNT)  ' Copy 64 words (128 bytes)
           if fifo.commitFrame(fifo.FIFO_HDMI, hdmiPtr) < 0
             ' HDMI FIFO full, release the copy
             debug("Processor: HDMI FIFO FULL!", 13, 10)
             fifo.releaseFrame(hdmiPtr)
           else
-            if (frame_counter // 30) == 1
+            if (frame_counter // STATUS_FRAME_INTERVAL) == 1
               debug("Processor: -> HDMI (frame ", udec(frame_counter), ")", 13, 10)
 
       if sendOLED
         oledPtr := fifo.getNextFrame()
         if oledPtr
-          wordmove(oledPtr, framePtr, 64)  ' Copy 64 words (128 bytes)
+          wordmove(oledPtr, framePtr, FRAME_WORD_COUNT)  ' Copy 64 words (128 bytes)
           if fifo.commitFrame(fifo.FIFO_OLED, oledPtr) < 0
             ' OLED FIFO full, release the copy
             debug("Processor: OLED FIFO FULL!", 13, 10)
             fifo.releaseFrame(oledPtr)
           else
-            if (frame_counter // 30) == 1
+            if (frame_counter // STATUS_FRAME_INTERVAL) == 1
               debug("Processor: -> OLED (frame ", udec(frame_counter), ")", 13, 10)
 
       ' Always release the original sensor frame

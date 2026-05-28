@@ -1,7 +1,8 @@
 '' =================================================================================================
+''
 ''   File....... test_fifo_regression.spin2
-''   Purpose.... FIFO regression test - validate frame pool and FIFO operations
-''   Author..... Stephen M Moraco
+''   Purpose.... Regression test for FIFO frame integrity under concurrent producer/consumer COGs
+''   Authors.... Stephen M Moraco
 ''               -- Copyright (c) 2025 Iron Sheep Productions, LLC
 ''               -- see below for terms of use
 ''   E-mail..... stephen@ironsheep.biz
@@ -19,16 +20,27 @@
 ''
 '' =================================================================================================
 
-CON
+CON ' ---- Test Configuration ----
   _CLKFREQ = 250_000_000  ' 250 MHz system clock
 
   ' Test configuration
   FRAME_COUNT = 6         ' Number of frames to send through pipeline
 
-OBJ
+  ' Frame layout (64 words per frame: [0]=seq, [1..62]=test data, [63]=checksum)
+  FRAME_WORD_COUNT     = 64
+  FRAME_SEQ_INDEX      = 0
+  FRAME_DATA_FIRST     = 1
+  FRAME_DATA_LAST      = FRAME_WORD_COUNT - 2     ' 62 = last data word index
+  FRAME_CHECKSUM_INDEX = FRAME_WORD_COUNT - 1     ' 63 = checksum slot
+  FRAME_DATA_BASE      = 100                      ' Per-frame data offset (seq * BASE + i)
+  COMPLETED_COG_COUNT  = 2                        ' Producer + consumer COGs
+  PRODUCER_DELAY_MS    = 50                       ' Inter-frame producer pacing
+  TEST_POLL_MS         = 100                      ' Main-COG completion poll interval
+
+OBJ ' ---- Subsystem Objects ----
   fifo : "isp_frame_fifo_manager"
 
-VAR
+VAR ' ---- Test State ----
   LONG  producer_cog
   LONG  consumer_cog
   LONG  test_complete
@@ -38,6 +50,8 @@ VAR
   LONG  consumer_stack[64]
 
 PUB main()
+'' Regression test for FIFO frame integrity under concurrent producer/consumer COGs.
+''
 
   debug("=== FIFO PIPELINE REGRESSION TEST ===", 13, 10)
   debug("Testing frame pool integrity, ordering, and thread-safety", 13, 10)
@@ -52,63 +66,79 @@ PUB main()
   debug("Initializing FIFO manager...", 13, 10)
   if not fifo.start()
     debug("ERROR: Failed to start FIFO manager!", 13, 10)
-    return
-  debug("FIFO manager initialized", 13, 10)
-  debug("  Free frames: ", udec(fifo.getFreeFrames()), 13, 10)
-  debug(" ", 13, 10)
+  else
+    debug("FIFO manager initialized", 13, 10)
+    debug("  Free frames: ", udec(fifo.getFreeFrames()), 13, 10)
+    debug(" ", 13, 10)
 
-  ' Start producer COG
-  debug("Starting producer COG...", 13, 10)
-  producer_cog := cogspin(NEWCOG, producer_loop(), @producer_stack)
-  if producer_cog < 0
-    debug("ERROR: Failed to start producer COG!", 13, 10)
-    return
-  debug("  Producer COG ", udec(producer_cog), " started", 13, 10)
+    ' Start producer COG
+    debug("Starting producer COG...", 13, 10)
+    producer_cog := cogspin(NEWCOG, producer_loop(), @producer_stack)
+    if producer_cog < 0
+      debug("ERROR: Failed to start producer COG!", 13, 10)
+    else
+      debug("  Producer COG ", udec(producer_cog), " started", 13, 10)
 
-  ' Start consumer COG
-  debug("Starting consumer COG...", 13, 10)
-  consumer_cog := cogspin(NEWCOG, consumer_loop(), @consumer_stack)
-  if consumer_cog < 0
-    debug("ERROR: Failed to start consumer COG!", 13, 10)
-    return
-  debug("  Consumer COG ", udec(consumer_cog), " started", 13, 10)
-  debug(" ", 13, 10)
+      ' Start consumer COG
+      debug("Starting consumer COG...", 13, 10)
+      consumer_cog := cogspin(NEWCOG, consumer_loop(), @consumer_stack)
+      if consumer_cog < 0
+        debug("ERROR: Failed to start consumer COG!", 13, 10)
+      else
+        debug("  Consumer COG ", udec(consumer_cog), " started", 13, 10)
+        debug(" ", 13, 10)
 
-  debug("=== TEST RUNNING ===" , 13, 10)
-  debug("Producer will enqueue ", udec(FRAME_COUNT), " frames", 13, 10)
-  debug("Consumer will dequeue and validate all frames", 13, 10)
-  debug(" ", 13, 10)
+        debug("=== TEST RUNNING ===" , 13, 10)
+        debug("Producer will enqueue ", udec(FRAME_COUNT), " frames", 13, 10)
+        debug("Consumer will dequeue and validate all frames", 13, 10)
+        debug(" ", 13, 10)
 
-  ' Wait for test to complete
-  repeat until test_complete == 2
-    WAITMS(100)
+        ' Wait for test to complete
+        repeat until test_complete == COMPLETED_COG_COUNT
+          WAITMS(TEST_POLL_MS)
 
-  debug(" ", 13, 10)
-  debug("=== TEST COMPLETE ===", 13, 10)
-  debug("Both COGs finished - check logs for data integrity", 13, 10)
-  debug("Final free frames: ", udec(fifo.getFreeFrames()), 13, 10)
-  debug(" ", 13, 10)
+        debug(" ", 13, 10)
+        debug("=== TEST COMPLETE ===", 13, 10)
+        debug("Both COGs finished - check logs for data integrity", 13, 10)
+        debug("Final free frames: ", udec(fifo.getFreeFrames()), 13, 10)
+        debug(" ", 13, 10)
 
-  ' Clean shutdown
-  if producer_cog >= 0
-    cogstop(producer_cog)
-  if consumer_cog >= 0
-    cogstop(consumer_cog)
-  fifo.stop()
+        ' Clean shutdown
+        if producer_cog >= 0
+          cogstop(producer_cog)
+        if consumer_cog >= 0
+          cogstop(consumer_cog)
+        fifo.stop()
 
 PRI show_status(labelPtr) | sensor_depth, free_count
-'' Display current FIFO status (depths and free frame count)
-'' @param labelPtr - pointer to descriptive label string
+' Display current FIFO status (sensor queue depth and free-frame count).
+'
+' @param labelPtr - Hub pointer to a zero-terminated label string
+
+' Local Variables:
+' @local sensor_depth - Current depth of the SENSOR FIFO
+' @local free_count - Current count of frames in the free pool
 
   sensor_depth := fifo.getQueueDepth(fifo.FIFO_SENSOR)
   free_count := fifo.getFreeFrames()
 
   debug(ZSTR_(labelPtr), ": SENSOR_FIFO=", udec(sensor_depth), ", FREE=", udec(free_count), 13, 10)
 
-PRI producer_loop() | framePtr, seq, checksum, i
+PRI producer_loop() | framePtr, seq, checksum, i, bAborted
+' Producer COG loop that enqueues FRAME_COUNT frames carrying sequence + checksum.
+'
+
+' Local Variables:
+' @local framePtr - Hub pointer to the frame buffer
+' @local seq - Sequence number for the current frame
+' @local checksum - Running 16-bit checksum across frame words
+' @local i - Word index within the frame buffer
+' @local bAborted - Flag indicating the producer aborted on error
 
   debug("PRODUCER: Started", 13, 10)
   show_status(@"PRODUCER: Initial state")
+
+  bAborted := FALSE
 
   ' Send FRAME_COUNT frames through pipeline
   repeat seq from 1 to FRAME_COUNT
@@ -120,27 +150,28 @@ PRI producer_loop() | framePtr, seq, checksum, i
     if framePtr == 0
       debug("PRODUCER: ERROR - getNextFrame() returned NULL!", 13, 10)
       test_complete++
-      return
+      bAborted := TRUE
+      quit
     debug("PRODUCER: getNextFrame() returned frame at ", uhex_long(framePtr), 13, 10)
 
     ' Build frame with sequence number and checksum
     ' Format: [0]=sequence, [1..62]=test data, [63]=checksum
 
     ' Store sequence number in first word
-    WORD[framePtr][0] := seq
+    WORD[framePtr][FRAME_SEQ_INDEX] := seq
 
     ' Fill middle with test pattern (makes checksum unique per frame)
-    ' Use a simple pattern: word[i] = seq * 100 + i
-    repeat i from 1 to 62
-      WORD[framePtr][i] := (seq * 100) + i
+    ' Use a simple pattern: word[i] = seq * FRAME_DATA_BASE + i
+    repeat i from FRAME_DATA_FIRST to FRAME_DATA_LAST
+      WORD[framePtr][i] := (seq * FRAME_DATA_BASE) + i
 
     ' Calculate checksum (simple: sum all words except last)
     checksum := 0
-    repeat i from 0 to 62
+    repeat i from 0 to FRAME_DATA_LAST
       checksum += WORD[framePtr][i]
 
     ' Store checksum in last word (mask to 16 bits)
-    WORD[framePtr][63] := checksum & $FFFF
+    WORD[framePtr][FRAME_CHECKSUM_INDEX] := checksum & $FFFF
 
     debug("PRODUCER: Frame ", udec(seq), " built with checksum ", uhex_word(checksum & $FFFF), 13, 10)
 
@@ -150,25 +181,40 @@ PRI producer_loop() | framePtr, seq, checksum, i
       debug("PRODUCER: ERROR - commitFrame() returned error (FIFO FULL)!", 13, 10)
       fifo.releaseFrame(framePtr)
       test_complete++
-      return
+      bAborted := TRUE
+      quit
     debug("PRODUCER: commitFrame() SUCCESS", 13, 10)
 
     show_status(@"PRODUCER: Status")
 
     ' Small delay to allow consumer to process (makes test more realistic)
-    WAITMS(50)
+    WAITMS(PRODUCER_DELAY_MS)
 
-  debug("PRODUCER: All ", udec(FRAME_COUNT), " frames enqueued", 13, 10)
-  show_status(@"PRODUCER: Final state")
-  test_complete++
+  if not bAborted
+    debug("PRODUCER: All ", udec(FRAME_COUNT), " frames enqueued", 13, 10)
+    show_status(@"PRODUCER: Final state")
+    test_complete++
 
-PRI consumer_loop() | framePtr, seq, expected_seq, stored_checksum, calculated_checksum, i, received_count
+PRI consumer_loop() | framePtr, seq, expected_seq, stored_checksum, calculated_checksum, i, received_count, bAborted
+' Consumer COG loop that dequeues frames and validates ordering and checksum integrity.
+'
+
+' Local Variables:
+' @local framePtr - Hub pointer to the frame buffer
+' @local seq - Sequence number read from the received frame
+' @local expected_seq - Next sequence number the consumer expects
+' @local stored_checksum - Checksum value embedded in the received frame
+' @local calculated_checksum - Checksum recomputed locally for verification
+' @local i - Word index within the frame buffer
+' @local received_count - Running count of frames consumed
+' @local bAborted - Flag indicating the consumer aborted on error
 
   debug("CONSUMER: Started", 13, 10)
   show_status(@"CONSUMER: Initial state")
 
   expected_seq := 1
   received_count := 0
+  bAborted := FALSE
 
   ' Process all frames
   repeat while received_count < FRAME_COUNT
@@ -181,18 +227,19 @@ PRI consumer_loop() | framePtr, seq, expected_seq, stored_checksum, calculated_c
     if framePtr == 0
       debug("CONSUMER: ERROR - dequeue() returned NULL!", 13, 10)
       test_complete++
-      return
+      bAborted := TRUE
+      quit
     debug("CONSUMER: dequeue() returned frame at ", uhex_long(framePtr), 13, 10)
 
     ' Extract sequence number from first word
-    seq := WORD[framePtr][0]
+    seq := WORD[framePtr][FRAME_SEQ_INDEX]
 
     ' Extract stored checksum from last word
-    stored_checksum := WORD[framePtr][63]
+    stored_checksum := WORD[framePtr][FRAME_CHECKSUM_INDEX]
 
     ' Recalculate checksum to verify integrity
     calculated_checksum := 0
-    repeat i from 0 to 62
+    repeat i from 0 to FRAME_DATA_LAST
       calculated_checksum += WORD[framePtr][i]
     calculated_checksum &= $FFFF
 
@@ -222,11 +269,12 @@ PRI consumer_loop() | framePtr, seq, expected_seq, stored_checksum, calculated_c
     ' Small delay between frames
     WAITMS(20)
 
-  debug("CONSUMER: All ", udec(FRAME_COUNT), " frames received and validated", 13, 10)
-  show_status(@"CONSUMER: Final state")
-  test_complete++
+  if not bAborted
+    debug("CONSUMER: All ", udec(FRAME_COUNT), " frames received and validated", 13, 10)
+    show_status(@"CONSUMER: Final state")
+    test_complete++
 
-CON { license }
+CON ' ---- License ----
 {{
 
  -------------------------------------------------------------------------------------------------

@@ -1,5 +1,15 @@
-' mag_tile_viewer - Main Application
-' Magnetic Field Imaging Tile Viewer for P2 Edge with PSRAM
+'' =================================================================================================
+''
+''   File....... mag_tile_viewer.spin2
+''   Purpose.... Top-level Magnetic Field Imaging Tile Viewer application for P2 Edge with PSRAM
+''   Authors.... Stephen M Moraco
+''               -- Copyright (c) 2025 Iron Sheep Productions, LLC
+''               -- see below for terms of use
+''   E-mail..... stephen@ironsheep.biz
+''   Started.... Oct 2025
+''   Updated.... May 2026
+''
+'' =================================================================================================
 '
 ' Pin Assignments:
 '   P0-P7:   HDMI Display
@@ -7,7 +17,7 @@
 '   P16-P23: OLED Display (128 x 128 SPI)
 '   P40-P57: PSRAM (P2 Edge)
 
-CON
+CON ' ---- Clock and Modes ----
   _CLKFREQ = 250_000_000   ' 250 MHz for HDMI timing
 
   ' System modes
@@ -36,7 +46,7 @@ CON
 DAT ' ---- Build Version ----
   BUILD_VERSION   BYTE  "0.5.0", 0       ' project version; bumped by build-wrapup at sprint closeout
 
-OBJ
+OBJ ' ---- Subsystem Objects ----
   ' Core system components
   fifo       : "isp_frame_fifo_manager"      ' Multi-FIFO frame pool manager
 
@@ -47,7 +57,7 @@ OBJ
   ' Data acquisition
   sensor      : "isp_tile_sensor"            ' Magnetic tile sensor interface
 
-VAR
+VAR ' ---- Viewer State ----
   LONG  system_status
 
   ' Decimation state (integrated into main COG)
@@ -58,7 +68,7 @@ VAR
   LONG  hdmi_counter
   LONG  oled_counter
 
-CON { decimation constants }
+CON ' ---- Decimation Constants ----
 
   ' Default decimation ratios @ 250 MHz system clock
   ' Sensor runs at ~375 fps, HDMI at 60 fps, OLED at ~55 fps (measured)
@@ -70,7 +80,17 @@ CON { decimation constants }
   MODE_AVERAGING  = 1            ' Average multiple frames
   MODE_PEAK       = 2            ' Peak detection across frames
 
-PUB main() | success
+  ' Drain / status / unit constants
+  MAX_DRAIN_FRAMES        = 32   ' Max sensor-FIFO drain per scan in slow mode
+  STATUS_FRAME_INTERVAL   = 30   ' Log status every Nth frame (~0.5s @ 60 fps)
+  MS_PER_SECOND           = 1000 ' Used to format SLOW_SCAN_MS as seconds
+
+PUB main() | status
+'' Top-level entry point that wires up FIFO, displays, sensor, and runs the decimation loop.
+''
+
+' Local Variables:
+' @local status - Reserved status accumulator (unused at present)
 
   debug("Starting Magnetic Tile Viewer", 13, 10)
   debug("Build version: ", zstr_(@BUILD_VERSION), 13, 10)
@@ -80,106 +100,112 @@ PUB main() | success
   debug("Initializing frame FIFO manager...", 13, 10)
   if not fifo.start()
     debug("ERROR: Failed to start FIFO manager", 13, 10)
-    return
-
-  ' Start HDMI display engine (owns graphics system)
-  debug("Starting HDMI display engine (P0-P7)...", 13, 10)
-  if hdmi_engine.start(HDMI_BASE_PIN) < 0
-    debug("ERROR: Failed to start HDMI engine", 13, 10)
-    return
-  debug("  HDMI engine ready", 13, 10)
-
-  ' Start OLED single-COG driver (P16-P23) with orientation
-  debug("Starting OLED single-COG driver (ribbon LEFT)...", 13, 10)
-  if not oled.start(OLED_BASE_PIN, oled.ORIENTATION_90)
-    debug("ERROR: Failed to start OLED driver", 13, 10)
-    return
-  debug("  OLED driver ready (ORIENTATION_90, ribbon LEFT)", 13, 10)
-
-  ' Initialize decimation state (integrated into main COG)
-  debug("Initializing decimation in main COG...", 13, 10)
-  processing_mode := MODE_DECIMATION
-  frame_counter := 0
-  hdmi_counter := 0
-  oled_counter := 0
-
-  ' Configure decimation based on test mode
-  if TEST_MODE
-    hdmi_decimation := 1  ' Send EVERY frame to HDMI
-    oled_decimation := 1  ' Send EVERY frame to OLED
-    debug("  Decimation in TEST MODE - 1:1 (no decimation)", 13, 10)
-  elseif SLOW_SCAN_MODE
-    hdmi_decimation := 1  ' Send every captured frame to HDMI
-    oled_decimation := 1  ' Send every captured frame to OLED
-    debug("  SLOW SCAN MODE - one scan every ", udec(SLOW_SCAN_MS/1000), " seconds", 13, 10)
   else
-    hdmi_decimation := DEFAULT_HDMI_DECIMATION
-    oled_decimation := DEFAULT_OLED_DECIMATION
-    debug("  Decimation in NORMAL mode - HDMI ", udec(hdmi_decimation), ":1, OLED ", udec(oled_decimation), ":1", 13, 10)
-
-  ' Start sensor interface (with ptra save/restore fix applied)
-  debug("Starting sensor interface (P8-P15)...", 13, 10)
-  if not sensor.start(SENSOR_BASE_PIN)  ' sensor only takes base_pin parameter
-    debug("ERROR: Failed to start sensor interface", 13, 10)
-    return
-  else
-    debug("  Sensor interface ready", 13, 10)
-
-    ' Set acquisition mode based on mode flags
-    ' ADC_VERIFY_MODE takes priority over other modes
-    if ADC_VERIFY_MODE
-      sensor.set_acquisition_mode(sensor.MODE_ADC_VERIFY)
-      debug("  Sensor set to ADC VERIFY mode (2 scans then stop)", 13, 10)
-    elseif TEST_MODE
-      sensor.set_acquisition_mode(sensor.MODE_TEST_PATTERN)
-      debug("  Sensor set to TEST PATTERN mode", 13, 10)
+    ' Start HDMI display engine (owns graphics system)
+    debug("Starting HDMI display engine (P0-P7)...", 13, 10)
+    if hdmi_engine.start(HDMI_BASE_PIN) < 0
+      debug("ERROR: Failed to start HDMI engine", 13, 10)
     else
-      sensor.set_acquisition_mode(sensor.MODE_LIVE)
-      debug("  Sensor set to LIVE mode", 13, 10)
+      debug("  HDMI engine ready", 13, 10)
 
-  ' Perform per-sensor baseline calibration (optional)
-  ' This eliminates manufacturing variation between sensors that causes "banding" artifacts
-  if AUTO_CALIBRATE
-    debug(" ", 13, 10)
-    debug("****************************************", 13, 10)
-    debug("*         CALIBRATION MODE             *", 13, 10)
-    debug("*    REMOVE ALL MAGNETS FROM SENSOR    *", 13, 10)
-    debug("****************************************", 13, 10)
-    debug(" ", 13, 10)
-    debug("Calibrating in: 5...", 13, 10)
-    waitms(1000)
-    debug("Calibrating in: 4...", 13, 10)
-    waitms(1000)
-    debug("Calibrating in: 3...", 13, 10)
-    waitms(1000)
-    debug("Calibrating in: 2...", 13, 10)
-    waitms(1000)
-    debug("Calibrating in: 1...", 13, 10)
-    waitms(1000)
-    debug(">>> CAPTURING BASELINE NOW <<<", 13, 10)
-    if sensor.capture_baseline()
-      debug("Calibration SUCCESS", 13, 10)
-      ' Report stuck pixel summary
-      if sensor.get_stuck_count() > 0
-        debug(" ", 13, 10)
-        debug("*** STUCK PIXELS: ", udec(sensor.get_stuck_count()), " ***", 13, 10)
-        debug("*** These will display as MAGENTA ***", 13, 10)
-    else
-      debug("Calibration FAILED - using raw values", 13, 10)
-    debug(" ", 13, 10)
+      ' Start OLED single-COG driver (P16-P23) with orientation
+      debug("Starting OLED single-COG driver (ribbon LEFT)...", 13, 10)
+      if not oled.start(OLED_BASE_PIN, oled.ORIENTATION_90)
+        debug("ERROR: Failed to start OLED driver", 13, 10)
+      else
+        debug("  OLED driver ready (ORIENTATION_90, ribbon LEFT)", 13, 10)
 
-  debug("****************************************", 13, 10)
-  debug("*            SYSTEM LIVE               *", 13, 10)
-  debug("*     MAGNET CAN NOW BE PLACED         *", 13, 10)
-  debug("****************************************", 13, 10)
-  debug(" ", 13, 10)
+        ' Initialize decimation state (integrated into main COG)
+        debug("Initializing decimation in main COG...", 13, 10)
+        processing_mode := MODE_DECIMATION
+        frame_counter := 0
+        hdmi_counter := 0
+        oled_counter := 0
 
-  ' Main decimation loop (runs in main COG)
-  decimation_loop()
+        ' Configure decimation based on test mode
+        if TEST_MODE
+          hdmi_decimation := 1  ' Send EVERY frame to HDMI
+          oled_decimation := 1  ' Send EVERY frame to OLED
+          debug("  Decimation in TEST MODE - 1:1 (no decimation)", 13, 10)
+        elseif SLOW_SCAN_MODE
+          hdmi_decimation := 1  ' Send every captured frame to HDMI
+          oled_decimation := 1  ' Send every captured frame to OLED
+          debug("  SLOW SCAN MODE - one scan every ", udec(SLOW_SCAN_MS/MS_PER_SECOND), " seconds", 13, 10)
+        else
+          hdmi_decimation := DEFAULT_HDMI_DECIMATION
+          oled_decimation := DEFAULT_OLED_DECIMATION
+          debug("  Decimation in NORMAL mode - HDMI ", udec(hdmi_decimation), ":1, OLED ", udec(oled_decimation), ":1", 13, 10)
+
+        ' Start sensor interface (with ptra save/restore fix applied)
+        debug("Starting sensor interface (P8-P15)...", 13, 10)
+        if not sensor.start(SENSOR_BASE_PIN)  ' sensor only takes base_pin parameter
+          debug("ERROR: Failed to start sensor interface", 13, 10)
+        else
+          debug("  Sensor interface ready", 13, 10)
+
+          ' Set acquisition mode based on mode flags
+          ' ADC_VERIFY_MODE takes priority over other modes
+          if ADC_VERIFY_MODE
+            sensor.set_acquisition_mode(sensor.MODE_ADC_VERIFY)
+            debug("  Sensor set to ADC VERIFY mode (2 scans then stop)", 13, 10)
+          elseif TEST_MODE
+            sensor.set_acquisition_mode(sensor.MODE_TEST_PATTERN)
+            debug("  Sensor set to TEST PATTERN mode", 13, 10)
+          else
+            sensor.set_acquisition_mode(sensor.MODE_LIVE)
+            debug("  Sensor set to LIVE mode", 13, 10)
+
+          ' Perform per-sensor baseline calibration (optional)
+          ' This eliminates manufacturing variation between sensors that causes "banding" artifacts
+          if AUTO_CALIBRATE
+            debug(" ", 13, 10)
+            debug("****************************************", 13, 10)
+            debug("*         CALIBRATION MODE             *", 13, 10)
+            debug("*    REMOVE ALL MAGNETS FROM SENSOR    *", 13, 10)
+            debug("****************************************", 13, 10)
+            debug(" ", 13, 10)
+            debug("Calibrating in: 5...", 13, 10)
+            waitms(1000)
+            debug("Calibrating in: 4...", 13, 10)
+            waitms(1000)
+            debug("Calibrating in: 3...", 13, 10)
+            waitms(1000)
+            debug("Calibrating in: 2...", 13, 10)
+            waitms(1000)
+            debug("Calibrating in: 1...", 13, 10)
+            waitms(1000)
+            debug(">>> CAPTURING BASELINE NOW <<<", 13, 10)
+            if sensor.capture_baseline()
+              debug("Calibration SUCCESS", 13, 10)
+              ' Report stuck pixel summary
+              if sensor.get_stuck_count() > 0
+                debug(" ", 13, 10)
+                debug("*** STUCK PIXELS: ", udec(sensor.get_stuck_count()), " ***", 13, 10)
+                debug("*** These will display as MAGENTA ***", 13, 10)
+            else
+              debug("Calibration FAILED - using raw values", 13, 10)
+            debug(" ", 13, 10)
+
+          debug("****************************************", 13, 10)
+          debug("*            SYSTEM LIVE               *", 13, 10)
+          debug("*     MAGNET CAN NOW BE PLACED         *", 13, 10)
+          debug("****************************************", 13, 10)
+          debug(" ", 13, 10)
+
+          ' Main decimation loop (runs in main COG)
+          decimation_loop()
 
 PRI decimation_loop() | framePtr, sendHDMI, sendOLED, hdmiPtr, oledPtr, drained
-'' Main decimation loop running in main COG
-'' Dequeues frames from sensor FIFO, applies decimation, routes to display FIFOs
+' Main decimation loop running in main COG; dispatches to slow-scan or normal mode.
+'
+
+' Local Variables:
+' @local framePtr - Hub pointer to the frame buffer
+' @local sendHDMI - TRUE when this frame should be sent to HDMI
+' @local sendOLED - TRUE when this frame should be sent to OLED
+' @local hdmiPtr - Hub pointer to the HDMI-bound copy of a frame
+' @local oledPtr - Hub pointer to the OLED-bound copy of a frame
+' @local drained - Count of stale sensor frames drained
 
   debug("Main COG: Decimation loop started", 13, 10)
 
@@ -191,8 +217,15 @@ PRI decimation_loop() | framePtr, sendHDMI, sendOLED, hdmiPtr, oledPtr, drained
     normal_decimation_loop()
 
 PRI slow_scan_loop() | framePtr, hdmiPtr, oledPtr, drained, i
-'' Slow scan mode: One frame every SLOW_SCAN_MS milliseconds
-'' Used for sensor debugging - allows visual inspection of each reading
+' Slow scan mode: process one frame every SLOW_SCAN_MS for sensor debugging.
+'
+
+' Local Variables:
+' @local framePtr - Hub pointer to the frame buffer
+' @local hdmiPtr - Hub pointer to the HDMI-bound copy of a frame
+' @local oledPtr - Hub pointer to the OLED-bound copy of a frame
+' @local drained - Count of stale sensor frames drained this pass
+' @local i - Row index when logging sensor values
 
   debug("Main COG: SLOW SCAN MODE active", 13, 10)
 
@@ -211,16 +244,16 @@ PRI slow_scan_loop() | framePtr, hdmiPtr, oledPtr, drained, i
       ' Print sensor values for debugging (controlled by LOG_SENSOR_VALUES)
       if LOG_SENSOR_VALUES
         debug("Sensor data (calibrated 16-bit values):", 13, 10)
-        repeat i from 0 to 7
+        repeat i from 0 to sensor.SENSORS_PER_ROW - 1
           debug("  Row ", udec(i), ": ")
-          debug(udec(WORD[framePtr][i*8+0]), " ")
-          debug(udec(WORD[framePtr][i*8+1]), " ")
-          debug(udec(WORD[framePtr][i*8+2]), " ")
-          debug(udec(WORD[framePtr][i*8+3]), " ")
-          debug(udec(WORD[framePtr][i*8+4]), " ")
-          debug(udec(WORD[framePtr][i*8+5]), " ")
-          debug(udec(WORD[framePtr][i*8+6]), " ")
-          debug(udec(WORD[framePtr][i*8+7]), 13, 10)
+          debug(udec(WORD[framePtr][i*sensor.SENSORS_PER_ROW+0]), " ")
+          debug(udec(WORD[framePtr][i*sensor.SENSORS_PER_ROW+1]), " ")
+          debug(udec(WORD[framePtr][i*sensor.SENSORS_PER_ROW+2]), " ")
+          debug(udec(WORD[framePtr][i*sensor.SENSORS_PER_ROW+3]), " ")
+          debug(udec(WORD[framePtr][i*sensor.SENSORS_PER_ROW+4]), " ")
+          debug(udec(WORD[framePtr][i*sensor.SENSORS_PER_ROW+5]), " ")
+          debug(udec(WORD[framePtr][i*sensor.SENSORS_PER_ROW+6]), " ")
+          debug(udec(WORD[framePtr][i*sensor.SENSORS_PER_ROW+7]), 13, 10)
 
       ' Send to HDMI display
       hdmiPtr := fifo.getNextFrame()
@@ -228,7 +261,7 @@ PRI slow_scan_loop() | framePtr, hdmiPtr, oledPtr, drained, i
       if fifo.checkFreeListIntegrity() >= 0
         debug("*** CORRUPTION AFTER HDMI getNextFrame ***", 13, 10)
       if hdmiPtr
-        WORDMOVE(hdmiPtr, framePtr, 64)
+        WORDMOVE(hdmiPtr, framePtr, sensor.SENSORS_PER_FRAME)
         if fifo.commitFrame(fifo.FIFO_HDMI, hdmiPtr) < 0
           fifo.releaseFrame(hdmiPtr)
           ' WATCHPOINT: Check after HDMI releaseFrame (error path)
@@ -244,7 +277,7 @@ PRI slow_scan_loop() | framePtr, hdmiPtr, oledPtr, drained, i
       if fifo.checkFreeListIntegrity() >= 0
         debug("*** CORRUPTION AFTER OLED getNextFrame ***", 13, 10)
       if oledPtr
-        WORDMOVE(oledPtr, framePtr, 64)
+        WORDMOVE(oledPtr, framePtr, sensor.SENSORS_PER_FRAME)
         if fifo.commitFrame(fifo.FIFO_OLED, oledPtr) < 0
           fifo.releaseFrame(oledPtr)
           ' WATCHPOINT: Check after OLED releaseFrame (error path)
@@ -267,7 +300,7 @@ PRI slow_scan_loop() | framePtr, hdmiPtr, oledPtr, drained, i
       ' Drain any remaining frames from sensor FIFO (keep it fresh)
       ' Limit to 32 frames max to avoid infinite loop (sensor produces continuously)
       drained := 0
-      repeat 32
+      repeat MAX_DRAIN_FRAMES
         framePtr := fifo.dequeue(fifo.FIFO_SENSOR)
         if framePtr == 0
           quit
@@ -284,11 +317,19 @@ PRI slow_scan_loop() | framePtr, hdmiPtr, oledPtr, drained, i
         debug("*** CORRUPTION AFTER DRAIN COMPLETE ***", 13, 10)
 
       ' Wait before next scan
-      debug("Waiting ", udec(SLOW_SCAN_MS/1000), " seconds...", 13, 10)
+      debug("Waiting ", udec(SLOW_SCAN_MS/MS_PER_SECOND), " seconds...", 13, 10)
       WAITMS(SLOW_SCAN_MS)
 
 PRI normal_decimation_loop() | framePtr, sendHDMI, sendOLED, hdmiPtr, oledPtr
-'' Normal high-speed decimation loop
+' Normal high-speed decimation loop routing sensor frames to HDMI and OLED FIFOs.
+'
+
+' Local Variables:
+' @local framePtr - Hub pointer to the frame buffer
+' @local sendHDMI - TRUE when this frame should be sent to HDMI
+' @local sendOLED - TRUE when this frame should be sent to OLED
+' @local hdmiPtr - Hub pointer to the HDMI-bound copy of a frame
+' @local oledPtr - Hub pointer to the OLED-bound copy of a frame
 
   repeat
     ' Wait for frame from sensor FIFO
@@ -298,8 +339,8 @@ PRI normal_decimation_loop() | framePtr, sendHDMI, sendOLED, hdmiPtr, oledPtr
       ' Update frame counter
       frame_counter++
 
-      ' Debug every 30 frames (every 0.5 sec at 60fps)
-      if (frame_counter // 30) == 1
+      ' Debug every STATUS_FRAME_INTERVAL frames (every 0.5 sec at 60fps)
+      if (frame_counter // STATUS_FRAME_INTERVAL) == 1
         debug("MAIN: Frame ", udec(frame_counter), " depths S:", udec(fifo.getQueueDepth(fifo.FIFO_SENSOR)))
         debug(" H:", udec(fifo.getQueueDepth(fifo.FIFO_HDMI)))
         debug(" O:", udec(fifo.getQueueDepth(fifo.FIFO_OLED)))
@@ -336,7 +377,7 @@ PRI normal_decimation_loop() | framePtr, sendHDMI, sendOLED, hdmiPtr, oledPtr
       if sendHDMI
         hdmiPtr := fifo.getNextFrame()
         if hdmiPtr
-          WORDMOVE(hdmiPtr, framePtr, 64)  ' Copy 64 words (128 bytes)
+          WORDMOVE(hdmiPtr, framePtr, sensor.SENSORS_PER_FRAME)  ' Copy 64 words (128 bytes)
           if fifo.commitFrame(fifo.FIFO_HDMI, hdmiPtr) < 0
             ' HDMI FIFO full, release the copy
             fifo.releaseFrame(hdmiPtr)
@@ -344,7 +385,7 @@ PRI normal_decimation_loop() | framePtr, sendHDMI, sendOLED, hdmiPtr, oledPtr
       if sendOLED
         oledPtr := fifo.getNextFrame()
         if oledPtr
-          WORDMOVE(oledPtr, framePtr, 64)  ' Copy 64 words (128 bytes)
+          WORDMOVE(oledPtr, framePtr, sensor.SENSORS_PER_FRAME)  ' Copy 64 words (128 bytes)
           if fifo.commitFrame(fifo.FIFO_OLED, oledPtr) < 0
             ' OLED FIFO full, release the copy
             fifo.releaseFrame(oledPtr)

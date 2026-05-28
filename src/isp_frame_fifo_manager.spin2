@@ -1,12 +1,25 @@
-'' isp_frame_fifo_manager.spin2 - Multi-FIFO Frame Pool Manager
-'' Zero-copy architecture with three independent FIFOs sharing a common frame pool
+'' =================================================================================================
+''
+''   File....... isp_frame_fifo_manager.spin2
+''   Purpose.... Multi-FIFO frame pool manager with zero-copy architecture for sensor/HDMI/OLED routing
+''   Authors.... Stephen M Moraco
+''               -- Copyright (c) 2025 Iron Sheep Productions, LLC
+''               -- see below for terms of use
+''   E-mail..... stephen@ironsheep.biz
+''   Started.... Oct 2025
+''   Updated.... Dec 2025
+''
+'' =================================================================================================
+''
+'' Zero-copy architecture with three independent FIFOs sharing a common frame pool.
 ''
 '' FIFOs:
 ''   - FIFO_SENSOR: Sensor -> Frame Processor
 ''   - FIFO_HDMI:   Frame Processor -> HDMI Display Engine
 ''   - FIFO_OLED:   Frame Processor -> OLED Manager
 
-CON
+CON ' ---- FIFO Public API ----
+  {Spin2_Doc_CON}
   ' FIFO IDs
   FIFO_SENSOR = 0
   FIFO_HDMI   = 1
@@ -23,7 +36,7 @@ CON
   ERR_EMPTY   = -2
   ERR_INVALID = -3
 
-DAT
+DAT ' ---- Singleton Shared State ----
   ' Singleton shared state - DAT section is shared across ALL OBJ instances
   ' This enables zero-copy frame sharing across all subsystems
 
@@ -62,10 +75,16 @@ DAT
   oledConsumerCog     long  -1
 
 PUB null()
-  '' Not a top-level object
+'' Not a top-level object.
+''
 
 PUB start() : ok | i
-  '' Initialize the frame pool and all FIFOs
+'' Initialize the frame pool and all FIFOs.
+''
+'' @returns ok - TRUE on successful initialization
+
+' Local Variables:
+' @local i - Frame index used when seeding the free list
 
   debug("FIFO: Acquiring lock...", 13, 10)
   lock := locknew()
@@ -117,23 +136,21 @@ PUB start() : ok | i
   debug("  oledHead:    ", uhex_long(@oledHead), 13, 10)
   debug("  lock:        ", uhex_long(@lock), 13, 10)
 
-  return true
+  ok := TRUE
 
 PUB stop()
-  '' Clean shutdown
+'' Clean shutdown - release the lock held by the FIFO manager.
+''
 
   if lock >= 0
     lockrel(lock)
     lock := -1
 
 PUB registerConsumer(fifoID, consumerCogID)
-  '' Register a consumer COG for event-driven wake-ups
-  '' Call this from the consumer COG at startup
-  '' @param fifoID - which FIFO this consumer reads from (FIFO_SENSOR, FIFO_HDMI, FIFO_OLED)
-  '' @param consumerCogID - the COG ID of the consumer (use cogid() to get current COG)
-  ''
-  '' After registration, commitFrame() will automatically send COGATN to wake the consumer
-  '' Consumer should use WAITATN instead of polling for frames
+'' Register a consumer COG for event-driven wake-ups on the given FIFO.
+''
+'' @param fifoID - Frame FIFO identifier (FIFO_SENSOR/FIFO_HDMI/FIFO_OLED)
+'' @param consumerCogID - Cog identifier (0-7) of the consumer
 
   case fifoID
     FIFO_SENSOR: sensorConsumerCog := consumerCogID
@@ -143,14 +160,20 @@ PUB registerConsumer(fifoID, consumerCogID)
   debug("FIFO: Registered COG ", udec(consumerCogID), " as consumer for FIFO ", udec(fifoID), 13, 10)
 
 PUB getNextFrame() : framePtr | timeout, poolStart, poolEnd
-  '' Get next available frame from pool
-  '' Blocks until frame available
-  '' Returns pointer to frame buffer
+'' Get the next available frame from the pool, blocking up to ~1 second.
+''
+'' @returns framePtr - Hub pointer to the frame buffer, or 0 on timeout/corruption
+
+' Local Variables:
+' @local timeout - Millisecond-scale wait counter
+' @local poolStart - Lowest valid frame-pool hub address
+' @local poolEnd - Exclusive upper bound of the frame-pool hub region
 
   ' Calculate valid frame pool address range for validation
   poolStart := @framePool
   poolEnd := @framePool + (MAX_FRAMES * FRAME_SIZE)
 
+  framePtr := 0  ' Default: no frame (corruption or timeout)
   timeout := 0
   repeat
     repeat until locktry(lock)
@@ -162,7 +185,8 @@ PUB getNextFrame() : framePtr | timeout, poolStart, poolEnd
         debug("FIFO FATAL: freeHead=", udec(freeHead), " CORRUPTED! Resetting pool.", 13, 10)
         freeHead := 0
         lockrel(lock)
-        return 0
+        framePtr := 0
+        quit
       ' Get frame from free list
       framePtr := LONG[@freeList][freeHead]
       ' CRITICAL: Validate pointer is within frame pool range
@@ -172,23 +196,32 @@ PUB getNextFrame() : framePtr | timeout, poolStart, poolEnd
         freeHead := (freeHead + 1) // MAX_FRAMES
         freeCount--
         lockrel(lock)
-        return 0  ' Return 0 instead of garbage pointer
+        framePtr := 0  ' Return 0 instead of garbage pointer
+        quit
       freeHead := (freeHead + 1) // MAX_FRAMES
       freeCount--
       lockrel(lock)
-      return framePtr
+      quit  ' Got valid frame, exit loop
 
     lockrel(lock)
 
     ' No frames available, wait a bit
     waitms(1)
     if ++timeout > 1000
-      return 0  ' Timeout after 1 second
+      framePtr := 0  ' Timeout after 1 second
+      quit
 
-PUB commitFrame(fifoID, framePtr) : result | poolStart, poolEnd, consumerCog
-  '' Commit frame to specified FIFO
-  '' Makes frame visible to consumers
-  '' If a consumer is registered, sends COGATN to wake it
+PUB commitFrame(fifoID, framePtr) : status | poolStart, poolEnd, consumerCog
+'' Commit a frame to the specified FIFO and wake a registered consumer COG.
+''
+'' @param fifoID - Frame FIFO identifier (FIFO_SENSOR/FIFO_HDMI/FIFO_OLED)
+'' @param framePtr - Hub pointer to the frame buffer
+'' @returns status - SUCCESS, ERR_FULL, or ERR_INVALID
+
+' Local Variables:
+' @local poolStart - Lowest valid frame-pool hub address
+' @local poolEnd - Exclusive upper bound of the frame-pool hub region
+' @local consumerCog - Cog identifier (0-7) of the registered consumer (or -1)
 
   ' Calculate valid frame pool address range for validation
   poolStart := @framePool
@@ -197,76 +230,83 @@ PUB commitFrame(fifoID, framePtr) : result | poolStart, poolEnd, consumerCog
   ' CRITICAL: Validate frame pointer BEFORE acquiring lock
   if framePtr < poolStart or framePtr >= poolEnd
     debug("FIFO FATAL: commitFrame() ptr=", uhex_long(framePtr), " INVALID! Expected ", uhex_long(poolStart), "-", uhex_long(poolEnd), 13, 10)
-    return ERR_INVALID
+    status := ERR_INVALID
+  else
+    consumerCog := -1  ' No notification by default
 
-  consumerCog := -1  ' No notification by default
+    repeat until locktry(lock)
+      ' Spin waiting for lock
 
-  repeat until locktry(lock)
-    ' Spin waiting for lock
+    case fifoID
+      FIFO_SENSOR:
+        if sensorCount < FIFO_DEPTH
+          ' CRITICAL: Bounds check tail index before write to prevent memory corruption
+          if sensorTail >= FIFO_DEPTH
+            debug("FIFO FATAL: sensorTail=", udec(sensorTail), " OVERFLOW! Resetting.", 13, 10)
+            sensorTail := 0  ' Emergency reset
+          LONG[@sensorFIFO][sensorTail] := framePtr
+          sensorTail := (sensorTail + 1) // FIFO_DEPTH
+          sensorCount++
+          consumerCog := sensorConsumerCog
+          status := SUCCESS
+        else
+          status := ERR_FULL
 
-  case fifoID
-    FIFO_SENSOR:
-      if sensorCount < FIFO_DEPTH
-        ' CRITICAL: Bounds check tail index before write to prevent memory corruption
-        if sensorTail >= FIFO_DEPTH
-          debug("FIFO FATAL: sensorTail=", udec(sensorTail), " OVERFLOW! Resetting.", 13, 10)
-          sensorTail := 0  ' Emergency reset
-        LONG[@sensorFIFO][sensorTail] := framePtr
-        sensorTail := (sensorTail + 1) // FIFO_DEPTH
-        sensorCount++
-        consumerCog := sensorConsumerCog
-        result := SUCCESS
-      else
-        result := ERR_FULL
+      FIFO_HDMI:
+        if hdmiCount < FIFO_DEPTH
+          ' CRITICAL: Bounds check tail index before write to prevent memory corruption
+          if hdmiTail >= FIFO_DEPTH
+            debug("FIFO FATAL: hdmiTail=", udec(hdmiTail), " OVERFLOW! Resetting.", 13, 10)
+            hdmiTail := 0  ' Emergency reset
+          LONG[@hdmiFIFO][hdmiTail] := framePtr
+          hdmiTail := (hdmiTail + 1) // FIFO_DEPTH
+          hdmiCount++
+          consumerCog := hdmiConsumerCog
+          status := SUCCESS
+        else
+          status := ERR_FULL
 
-    FIFO_HDMI:
-      if hdmiCount < FIFO_DEPTH
-        ' CRITICAL: Bounds check tail index before write to prevent memory corruption
-        if hdmiTail >= FIFO_DEPTH
-          debug("FIFO FATAL: hdmiTail=", udec(hdmiTail), " OVERFLOW! Resetting.", 13, 10)
-          hdmiTail := 0  ' Emergency reset
-        LONG[@hdmiFIFO][hdmiTail] := framePtr
-        hdmiTail := (hdmiTail + 1) // FIFO_DEPTH
-        hdmiCount++
-        consumerCog := hdmiConsumerCog
-        result := SUCCESS
-      else
-        result := ERR_FULL
+      FIFO_OLED:
+        if oledCount < FIFO_DEPTH
+          ' CRITICAL: Bounds check tail index before write to prevent memory corruption
+          if oledTail >= FIFO_DEPTH
+            debug("FIFO FATAL: oledTail=", udec(oledTail), " OVERFLOW! Resetting.", 13, 10)
+            oledTail := 0  ' Emergency reset
+          LONG[@oledFIFO][oledTail] := framePtr
+          oledTail := (oledTail + 1) // FIFO_DEPTH
+          oledCount++
+          consumerCog := oledConsumerCog
+          status := SUCCESS
+        else
+          status := ERR_FULL
 
-    FIFO_OLED:
-      if oledCount < FIFO_DEPTH
-        ' CRITICAL: Bounds check tail index before write to prevent memory corruption
-        if oledTail >= FIFO_DEPTH
-          debug("FIFO FATAL: oledTail=", udec(oledTail), " OVERFLOW! Resetting.", 13, 10)
-          oledTail := 0  ' Emergency reset
-        LONG[@oledFIFO][oledTail] := framePtr
-        oledTail := (oledTail + 1) // FIFO_DEPTH
-        oledCount++
-        consumerCog := oledConsumerCog
-        result := SUCCESS
-      else
-        result := ERR_FULL
+      other:
+        status := ERR_INVALID
 
-    other:
-      result := ERR_INVALID
+    lockrel(lock)
 
-  lockrel(lock)
+    ' Notify consumer COG if registered (AFTER releasing lock)
+    if consumerCog >= 0 and status == SUCCESS
+      notifyConsumer(consumerCog)
 
-  ' Notify consumer COG if registered (AFTER releasing lock)
-  if consumerCog >= 0 and result == SUCCESS
-    notifyConsumer(consumerCog)
+PUB dequeue(fifoID) : framePtr | timeout, poolStart, poolEnd, bDone
+'' Dequeue a frame from the specified FIFO, blocking up to ~1 second.
+''
+'' @param fifoID - Frame FIFO identifier (FIFO_SENSOR/FIFO_HDMI/FIFO_OLED)
+'' @returns framePtr - Hub pointer to the frame buffer, or 0 on timeout/corruption
 
-  return result
-
-PUB dequeue(fifoID) : framePtr | timeout, poolStart, poolEnd
-  '' Dequeue frame from specified FIFO
-  '' Blocks until frame available
-  '' Returns pointer to frame (or 0 on timeout/error)
+' Local Variables:
+' @local timeout - Millisecond-scale wait counter
+' @local poolStart - Lowest valid frame-pool hub address
+' @local poolEnd - Exclusive upper bound of the frame-pool hub region
+' @local bDone - TRUE once the dequeue loop should exit
 
   ' Calculate valid frame pool address range for validation
   poolStart := @framePool
   poolEnd := @framePool + (MAX_FRAMES * FRAME_SIZE)
 
+  framePtr := 0
+  bDone := FALSE
   timeout := 0
   repeat
     repeat until locktry(lock)
@@ -283,19 +323,23 @@ PUB dequeue(fifoID) : framePtr | timeout, poolStart, poolEnd
             sensorTail := 0
             sensorCount := 0
             lockrel(lock)
-            return 0
-          framePtr := LONG[@sensorFIFO][sensorHead]
-          ' CRITICAL: Validate pointer before returning
-          if framePtr < poolStart or framePtr >= poolEnd
-            debug("FIFO ERROR: Sensor dequeue invalid ptr=", uhex_long(framePtr), " head=", udec(sensorHead), " count=", udec(sensorCount), 13, 10)
-            sensorHead := (sensorHead + 1) // FIFO_DEPTH
-            sensorCount--
-            lockrel(lock)
-            return 0  ' Return 0 instead of garbage
-          sensorHead := (sensorHead + 1) // FIFO_DEPTH
-          sensorCount--
-          lockrel(lock)
-          return framePtr
+            framePtr := 0
+            bDone := TRUE
+          else
+            framePtr := LONG[@sensorFIFO][sensorHead]
+            ' CRITICAL: Validate pointer before returning
+            if framePtr < poolStart or framePtr >= poolEnd
+              debug("FIFO ERROR: Sensor dequeue invalid ptr=", uhex_long(framePtr), " head=", udec(sensorHead), " count=", udec(sensorCount), 13, 10)
+              sensorHead := (sensorHead + 1) // FIFO_DEPTH
+              sensorCount--
+              lockrel(lock)
+              framePtr := 0  ' Return 0 instead of garbage
+              bDone := TRUE
+            else
+              sensorHead := (sensorHead + 1) // FIFO_DEPTH
+              sensorCount--
+              lockrel(lock)
+              bDone := TRUE
 
       FIFO_HDMI:
         if hdmiCount > 0
@@ -306,19 +350,23 @@ PUB dequeue(fifoID) : framePtr | timeout, poolStart, poolEnd
             hdmiTail := 0
             hdmiCount := 0
             lockrel(lock)
-            return 0
-          framePtr := LONG[@hdmiFIFO][hdmiHead]
-          ' CRITICAL: Validate pointer before returning
-          if framePtr < poolStart or framePtr >= poolEnd
-            debug("FIFO ERROR: HDMI dequeue invalid ptr=", uhex_long(framePtr), " head=", udec(hdmiHead), " count=", udec(hdmiCount), 13, 10)
-            hdmiHead := (hdmiHead + 1) // FIFO_DEPTH
-            hdmiCount--
-            lockrel(lock)
-            return 0  ' Return 0 instead of garbage
-          hdmiHead := (hdmiHead + 1) // FIFO_DEPTH
-          hdmiCount--
-          lockrel(lock)
-          return framePtr
+            framePtr := 0
+            bDone := TRUE
+          else
+            framePtr := LONG[@hdmiFIFO][hdmiHead]
+            ' CRITICAL: Validate pointer before returning
+            if framePtr < poolStart or framePtr >= poolEnd
+              debug("FIFO ERROR: HDMI dequeue invalid ptr=", uhex_long(framePtr), " head=", udec(hdmiHead), " count=", udec(hdmiCount), 13, 10)
+              hdmiHead := (hdmiHead + 1) // FIFO_DEPTH
+              hdmiCount--
+              lockrel(lock)
+              framePtr := 0  ' Return 0 instead of garbage
+              bDone := TRUE
+            else
+              hdmiHead := (hdmiHead + 1) // FIFO_DEPTH
+              hdmiCount--
+              lockrel(lock)
+              bDone := TRUE
 
       FIFO_OLED:
         if oledCount > 0
@@ -329,40 +377,50 @@ PUB dequeue(fifoID) : framePtr | timeout, poolStart, poolEnd
             oledTail := 0
             oledCount := 0
             lockrel(lock)
-            return 0
-          framePtr := LONG[@oledFIFO][oledHead]
-          ' CRITICAL: Validate pointer before returning
-          if framePtr < poolStart or framePtr >= poolEnd
-            debug("FIFO ERROR: OLED dequeue invalid ptr=", uhex_long(framePtr), " head=", udec(oledHead), " count=", udec(oledCount), 13, 10)
-            oledHead := (oledHead + 1) // FIFO_DEPTH
-            oledCount--
-            lockrel(lock)
-            return 0  ' Return 0 instead of garbage
-          oledHead := (oledHead + 1) // FIFO_DEPTH
-          oledCount--
-          lockrel(lock)
-          return framePtr
+            framePtr := 0
+            bDone := TRUE
+          else
+            framePtr := LONG[@oledFIFO][oledHead]
+            ' CRITICAL: Validate pointer before returning
+            if framePtr < poolStart or framePtr >= poolEnd
+              debug("FIFO ERROR: OLED dequeue invalid ptr=", uhex_long(framePtr), " head=", udec(oledHead), " count=", udec(oledCount), 13, 10)
+              oledHead := (oledHead + 1) // FIFO_DEPTH
+              oledCount--
+              lockrel(lock)
+              framePtr := 0  ' Return 0 instead of garbage
+              bDone := TRUE
+            else
+              oledHead := (oledHead + 1) // FIFO_DEPTH
+              oledCount--
+              lockrel(lock)
+              bDone := TRUE
 
       other:
         lockrel(lock)
-        return 0
+        framePtr := 0
+        bDone := TRUE
+
+    if bDone
+      quit
 
     lockrel(lock)
 
     ' No frames available, wait
     waitms(1)
     if ++timeout > 1000
-      return 0  ' Timeout
+      framePtr := 0  ' Timeout
+      quit
 
-PUB dequeueEventDriven(fifoID) : framePtr | poolStart, poolEnd
-  '' Event-driven dequeue - uses WAITATN instead of polling
-  '' Consumer must call registerConsumer() first!
-  '' This method:
-  ''   1. Waits for COGATN from producer (zero-power wait)
-  ''   2. Attempts to dequeue frame
-  ''   3. Returns frame pointer, or 0 if FIFO was empty (spurious wake)
-  ''
-  '' Caller should loop on this: framePtr := dequeueEventDriven(FIFO_HDMI)
+PUB dequeueEventDriven(fifoID) : framePtr | poolStart, poolEnd, bHandled
+'' Event-driven dequeue that blocks on WAITATN until a producer signals data.
+''
+'' @param fifoID - Frame FIFO identifier (FIFO_SENSOR/FIFO_HDMI/FIFO_OLED)
+'' @returns framePtr - Hub pointer to the frame buffer, or 0 on spurious wake / empty FIFO
+
+' Local Variables:
+' @local poolStart - Lowest valid frame-pool hub address
+' @local poolEnd - Exclusive upper bound of the frame-pool hub region
+' @local bHandled - TRUE once the lock has been released by a successful path
 
   ' Wait for producer to signal data available
   org
@@ -372,6 +430,9 @@ PUB dequeueEventDriven(fifoID) : framePtr | poolStart, poolEnd
   ' Calculate valid frame pool address range for validation
   poolStart := @framePool
   poolEnd := @framePool + (MAX_FRAMES * FRAME_SIZE)
+
+  framePtr := 0
+  bHandled := FALSE
 
   repeat until locktry(lock)
     ' Spin waiting for lock
@@ -384,17 +445,21 @@ PUB dequeueEventDriven(fifoID) : framePtr | poolStart, poolEnd
           hdmiTail := 0
           hdmiCount := 0
           lockrel(lock)
-          return 0
-        framePtr := LONG[@hdmiFIFO][hdmiHead]
-        if framePtr < poolStart or framePtr >= poolEnd
-          hdmiHead := (hdmiHead + 1) // FIFO_DEPTH
-          hdmiCount--
-          lockrel(lock)
-          return 0
-        hdmiHead := (hdmiHead + 1) // FIFO_DEPTH
-        hdmiCount--
-        lockrel(lock)
-        return framePtr
+          framePtr := 0
+          bHandled := TRUE
+        else
+          framePtr := LONG[@hdmiFIFO][hdmiHead]
+          if framePtr < poolStart or framePtr >= poolEnd
+            hdmiHead := (hdmiHead + 1) // FIFO_DEPTH
+            hdmiCount--
+            lockrel(lock)
+            framePtr := 0
+            bHandled := TRUE
+          else
+            hdmiHead := (hdmiHead + 1) // FIFO_DEPTH
+            hdmiCount--
+            lockrel(lock)
+            bHandled := TRUE
 
     FIFO_OLED:
       if oledCount > 0
@@ -403,17 +468,21 @@ PUB dequeueEventDriven(fifoID) : framePtr | poolStart, poolEnd
           oledTail := 0
           oledCount := 0
           lockrel(lock)
-          return 0
-        framePtr := LONG[@oledFIFO][oledHead]
-        if framePtr < poolStart or framePtr >= poolEnd
-          oledHead := (oledHead + 1) // FIFO_DEPTH
-          oledCount--
-          lockrel(lock)
-          return 0
-        oledHead := (oledHead + 1) // FIFO_DEPTH
-        oledCount--
-        lockrel(lock)
-        return framePtr
+          framePtr := 0
+          bHandled := TRUE
+        else
+          framePtr := LONG[@oledFIFO][oledHead]
+          if framePtr < poolStart or framePtr >= poolEnd
+            oledHead := (oledHead + 1) // FIFO_DEPTH
+            oledCount--
+            lockrel(lock)
+            framePtr := 0
+            bHandled := TRUE
+          else
+            oledHead := (oledHead + 1) // FIFO_DEPTH
+            oledCount--
+            lockrel(lock)
+            bHandled := TRUE
 
     FIFO_SENSOR:
       if sensorCount > 0
@@ -422,54 +491,64 @@ PUB dequeueEventDriven(fifoID) : framePtr | poolStart, poolEnd
           sensorTail := 0
           sensorCount := 0
           lockrel(lock)
-          return 0
-        framePtr := LONG[@sensorFIFO][sensorHead]
-        if framePtr < poolStart or framePtr >= poolEnd
-          sensorHead := (sensorHead + 1) // FIFO_DEPTH
-          sensorCount--
-          lockrel(lock)
-          return 0
-        sensorHead := (sensorHead + 1) // FIFO_DEPTH
-        sensorCount--
-        lockrel(lock)
-        return framePtr
+          framePtr := 0
+          bHandled := TRUE
+        else
+          framePtr := LONG[@sensorFIFO][sensorHead]
+          if framePtr < poolStart or framePtr >= poolEnd
+            sensorHead := (sensorHead + 1) // FIFO_DEPTH
+            sensorCount--
+            lockrel(lock)
+            framePtr := 0
+            bHandled := TRUE
+          else
+            sensorHead := (sensorHead + 1) // FIFO_DEPTH
+            sensorCount--
+            lockrel(lock)
+            bHandled := TRUE
 
-  ' FIFO empty (spurious wake or race condition)
-  lockrel(lock)
-  return 0
+  ' FIFO empty (spurious wake or race condition) - release lock only if not yet released
+  if not bHandled
+    lockrel(lock)
+    framePtr := 0
 
 PUB releaseFrame(framePtr) | poolStart, poolEnd
-  '' Return frame to free pool
-  '' Called by consumers when done with frame
+'' Return a frame to the free pool after a consumer is done with it.
+''
+'' @param framePtr - Hub pointer to the frame buffer
 
-  if framePtr == 0
-    return
+' Local Variables:
+' @local poolStart - Lowest valid frame-pool hub address
+' @local poolEnd - Exclusive upper bound of the frame-pool hub region
 
-  ' Calculate valid frame pool address range for validation
-  poolStart := @framePool
-  poolEnd := @framePool + (MAX_FRAMES * FRAME_SIZE)
+  if framePtr <> 0
+    ' Calculate valid frame pool address range for validation
+    poolStart := @framePool
+    poolEnd := @framePool + (MAX_FRAMES * FRAME_SIZE)
 
-  ' CRITICAL: Validate frame pointer BEFORE acquiring lock
-  if framePtr < poolStart or framePtr >= poolEnd
-    debug("FIFO FATAL: releaseFrame() ptr=", uhex_long(framePtr), " INVALID! Expected ", uhex_long(poolStart), "-", uhex_long(poolEnd), 13, 10)
-    return  ' Don't corrupt freeList with garbage pointer
+    ' CRITICAL: Validate frame pointer BEFORE acquiring lock
+    if framePtr < poolStart or framePtr >= poolEnd
+      debug("FIFO FATAL: releaseFrame() ptr=", uhex_long(framePtr), " INVALID! Expected ", uhex_long(poolStart), "-", uhex_long(poolEnd), 13, 10)
+    else
+      repeat until locktry(lock)
+        ' Spin waiting for lock
 
-  repeat until locktry(lock)
-    ' Spin waiting for lock
+      if freeCount < MAX_FRAMES
+        freeTail := (freeTail + 1) // MAX_FRAMES  ' Move tail first
+        ' CRITICAL: Bounds check before array write
+        if freeTail >= MAX_FRAMES
+          debug("FIFO FATAL: freeTail=", udec(freeTail), " CORRUPTED! Resetting.", 13, 10)
+          freeTail := 0
+        LONG[@freeList][freeTail] := framePtr       ' Then insert
+        freeCount++
 
-  if freeCount < MAX_FRAMES
-    freeTail := (freeTail + 1) // MAX_FRAMES  ' Move tail first
-    ' CRITICAL: Bounds check before array write
-    if freeTail >= MAX_FRAMES
-      debug("FIFO FATAL: freeTail=", udec(freeTail), " CORRUPTED! Resetting.", 13, 10)
-      freeTail := 0
-    LONG[@freeList][freeTail] := framePtr       ' Then insert
-    freeCount++
-
-  lockrel(lock)
+      lockrel(lock)
 
 PUB getQueueDepth(fifoID) : count
-  '' Get current number of frames in specified FIFO
+'' Get the current number of frames in the specified FIFO.
+''
+'' @param fifoID - Frame FIFO identifier (FIFO_SENSOR/FIFO_HDMI/FIFO_OLED)
+'' @returns count - Frame count, or -1 for an invalid FIFO id
 
   repeat until locktry(lock)
     ' Spin waiting for lock
@@ -483,7 +562,9 @@ PUB getQueueDepth(fifoID) : count
   lockrel(lock)
 
 PUB getFreeFrames() : count
-  '' Get number of available frames in pool
+'' Get the number of available frames in the pool.
+''
+'' @returns count - Count of free frames in the pool
 
   repeat until locktry(lock)
     ' Spin waiting for lock
@@ -492,34 +573,46 @@ PUB getFreeFrames() : count
   lockrel(lock)
 
 PUB getFreeListAddr() : addr
-  '' Get address of freeList array (for debugging/watchpoints)
-  return @freeList
+'' Get the hub address of the freeList array (for debug/watchpoint use).
+''
+'' @returns addr - Hub pointer to the freeList array
+
+  addr := @freeList
 
 PUB getFramePoolAddr() : addr
-  '' Get address of frame pool (for debugging/watchpoints)
-  return @framePool
+'' Get the hub address of the frame pool (for debug/watchpoint use).
+''
+'' @returns addr - Hub pointer to the frame pool base
+
+  addr := @framePool
 
 PUB checkFreeListIntegrity() : corrupted | i, ptr, poolStart, poolEnd
-  '' Check if any freeList entry has been corrupted
-  '' Call this periodically from main loop to detect corruption moment
-  '' Returns index of first corrupted entry, or -1 if all OK
+'' Walk the freeList and report the first entry whose pointer is out of range.
+''
+'' @returns corrupted - Index of first corrupted entry, or -1 if all entries are valid
+
+' Local Variables:
+' @local i - freeList scan index
+' @local ptr - Current freeList entry under inspection
+' @local poolStart - Lowest valid frame-pool hub address
+' @local poolEnd - Exclusive upper bound of the frame-pool hub region
 
   poolStart := @framePool
   poolEnd := @framePool + (MAX_FRAMES * FRAME_SIZE)
 
+  corrupted := -1  ' Default: all OK
   repeat i from 0 to MAX_FRAMES - 1
     ptr := LONG[@freeList][i]
     if ptr <> 0  ' 0 means slot is empty (already allocated)
       if ptr < poolStart or ptr >= poolEnd
         debug("WATCHPOINT: freeList[", udec(i), "] = ", uhex_long(ptr), " CORRUPTED!", 13, 10)
-        return i
-
-  return -1  ' All OK
+        corrupted := i
+        quit
 
 PRI notifyConsumer(targetCog)
-  '' Send COGATN to wake a specific consumer COG
-  '' Uses Spin2 built-in COGATN method
-  '' @param targetCog - COG to notify (0-7)
+' Send COGATN to wake a specific consumer COG via the Spin2 built-in.
+'
+' @param targetCog - Cog identifier (0-7) to notify
 
   ' Use Spin2 built-in COGATN with bitmask (bit N for COG N)
   COGATN(1 << targetCog)

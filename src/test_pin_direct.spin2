@@ -1,20 +1,36 @@
 '' =================================================================================================
+''
 ''   File....... test_pin_direct.spin2
-''   Purpose.... Direct pin test - check raw MISO state
-''   Author..... Stephen M Moraco
+''   Purpose.... Direct pin read test that samples the raw MISO state without ADC framing
+''   Authors.... Stephen M Moraco
+''               -- Copyright (c) 2025 Iron Sheep Productions, LLC
+''               -- see below for terms of use
+''   E-mail..... stephen@ironsheep.biz
 ''   Started.... Jan 2025
+''   Updated.... Oct 2025
+''
 '' =================================================================================================
 
-CON
+CON ' ---- Pin Assignments ----
     _clkfreq = 200_000_000
 
     TILE_PIN_GROUP = 8
     PIN_MISO = 2
 
-VAR
+    ' Sampling loop
+    SAMPLE_COUNT  = 20      ' Number of MISO reads
+    SAMPLE_HOLD_MS = 100    ' Pause between reads
+
+VAR ' ---- Test State ----
     LONG abs_pin_miso
 
 PUB main() | i, pin_state
+'' Direct pin read test that samples the raw MISO state without ADC framing.
+''
+
+' Local Variables:
+' @local i - Sample index
+' @local pin_state - Most recent raw pin read
 
     debug("================================================================================")
     debug("Direct Pin Test - Raw MISO Reading")
@@ -32,10 +48,10 @@ PUB main() | i, pin_state
     debug("Reading raw pin state 20 times...")
     debug(" ")
 
-    repeat i from 0 to 19
+    repeat i from 0 to SAMPLE_COUNT - 1
         pin_state := pinr(abs_pin_miso)
         debug("  Read ", udec_(i), ": ", udec(pin_state))
-        waitms(100)
+        waitms(SAMPLE_HOLD_MS)
 
     debug(" ")
     debug("If pin always reads 1, it's floating high or pulled high")

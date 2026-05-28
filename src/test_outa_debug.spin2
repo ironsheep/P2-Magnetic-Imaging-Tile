@@ -1,17 +1,35 @@
 '' =================================================================================================
+''
 ''   File....... test_outa_debug.spin2
-''   Purpose.... Debug OUTA register operations for P8-P12
-''   Author..... Stephen M Moraco
+''   Purpose.... Diagnostic probe of OUTA register operations on pins P8-P12 to validate writes
+''   Authors.... Stephen M Moraco
+''               -- Copyright (c) 2025 Iron Sheep Productions, LLC
+''               -- see below for terms of use
+''   E-mail..... stephen@ironsheep.biz
 ''   Started.... Jan 2025
+''   Updated.... Oct 2025
+''
 '' =================================================================================================
 
-CON
+CON ' ---- Test Configuration ----
     _clkfreq = 200_000_000
 
     PIN_BASE = 8
-    PIN_MASK = %11111 << PIN_BASE   ' Bits 8-12
+    PIN_COUNT = 5                       ' Number of pins under test (P8..P12)
+    PIN_MASK = %11111 << PIN_BASE       ' Bits 8-12
+    TEST_VALUE_MASK = $1F               ' 5-bit value mask for test pattern
+    COUNT_VALUE_MAX = 7                 ' Highest count value exercised in TEST 3
+    STEP_HOLD_MS    = 500               ' Per-step display hold time
+    SMARTPIN_DISABLE_MS = 10            ' Settle pause after disabling smart-pin modes
 
 PUB main() | count, test_value, shifted_value
+'' Diagnostic probe of OUTA register operations on pins P8-P12 to validate writes.
+''
+
+' Local Variables:
+' @local count - Loop index over pins/count steps
+' @local test_value - 5-bit pattern under test
+' @local shifted_value - test_value shifted to PIN_BASE position
 
     debug("================================================================================")
     debug("OUTA Register Debug Test")
@@ -22,10 +40,10 @@ PUB main() | count, test_value, shifted_value
     debug(" ")
 
     ' Disable smart pin modes
-    repeat count from 0 to 4
+    repeat count from 0 to PIN_COUNT - 1
         pinf(PIN_BASE + count)
 
-    waitms(10)
+    waitms(SMARTPIN_DISABLE_MS)
 
     ' Set direction to output
     DIRA |= PIN_MASK
@@ -34,19 +52,19 @@ PUB main() | count, test_value, shifted_value
     debug("TEST 1: Setting all pins LOW")
     OUTA &= !PIN_MASK
     debug("  OUTA = %", ubin_long(OUTA))
-    waitms(500)
+    waitms(STEP_HOLD_MS)
 
     ' Test 2: Set all high
     debug("TEST 2: Setting all pins HIGH")
     OUTA |= PIN_MASK
     debug("  OUTA = %", ubin_long(OUTA))
-    waitms(500)
+    waitms(STEP_HOLD_MS)
 
     ' Test 3: Test individual count values
     debug(" ")
     debug("TEST 3: Writing count values 0-7")
-    repeat count from 0 to 7
-        test_value := count & $1F
+    repeat count from 0 to COUNT_VALUE_MAX
+        test_value := count & TEST_VALUE_MASK
         shifted_value := test_value << PIN_BASE
 
         debug("  count=", udec(count), " test_value=", udec(test_value), " shifted=%", ubin_long(shifted_value))
@@ -57,7 +75,7 @@ PUB main() | count, test_value, shifted_value
         debug("    OUTA after write = %", ubin_long(OUTA))
         debug("    Expected P8=", udec(test_value & 1), " P9=", udec((test_value >> 1) & 1), " P10=", udec((test_value >> 2) & 1))
 
-        waitms(500)
+        waitms(STEP_HOLD_MS)
 
     debug(" ")
     debug("END_SESSION")

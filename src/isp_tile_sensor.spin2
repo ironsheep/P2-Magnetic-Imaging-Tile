@@ -1,19 +1,21 @@
 '' =================================================================================================
+''
 ''   File....... isp_tile_sensor.spin2
-''   Purpose.... Magnetic Imaging Tile sensor interface - Single COG architecture
-''   Author..... Stephen M Moraco
+''   Purpose.... Magnetic Imaging Tile sensor interface - single-COG architecture with inline PASM
+''   Authors.... Stephen M Moraco
 ''               -- Copyright (c) 2025 Iron Sheep Productions, LLC
 ''               -- see below for terms of use
 ''   E-mail..... stephen@ironsheep.biz
 ''   Started.... Jan 2025
 ''   Updated.... Nov 2025
 ''
+'' =================================================================================================
+''
 ''   Architecture: Single COG with inline PASM for sensor acquisition
 ''                Similar to isp_oled_single_cog.spin2 pattern
-''
-'' =================================================================================================
 
-CON { tile sensor constants }
+CON ' ---- Tile Sensor Constants ----
+    {Spin2_Doc_CON}
 
     ' Hardware pin group assignment (fixed for this project)
     TILE_PIN_GROUP  = 8                 ' Magnetic tile on P8-P15
@@ -39,8 +41,12 @@ CON { tile sensor constants }
 
     ' Sensor array configuration
     SENSORS_PER_FRAME = 64              ' 8x8 sensor array
+    SENSORS_PER_ROW   = 8               ' 8 sensors per row (8x8 grid)
     SUBTILES = 4                        ' 4 quadrants
     SENSORS_PER_SUBTILE = 16            ' 4x4 per subtile
+
+    ' Verify mode scan configuration
+    VERIFY_SCAN_COUNT = 2               ' Number of verification scans
 
     ' ADC configuration - AD7680 (16-bit ADC, 24-bit SPI frame)
     ' Frame format: 4 leading zeros + 16-bit data + 4 trailing zeros = 24 bits total
@@ -64,15 +70,15 @@ CON { tile sensor constants }
     ' SENSOR_MID is the nominal baseline value; calibration normalizes all sensors to this.
     SENSOR_MID = 20500                  ' Nominal zero-field baseline (observed average)
 
-OBJ
+OBJ ' ---- Subsystem Objects ----
     fifo : "isp_frame_fifo_manager"    ' Multi-FIFO frame pool manager (shared singleton)
     stack_check : "isp_stack_check"    ' Stack overflow detection utility
 
-CON { stack configuration }
+CON ' ---- Stack Configuration ----
 
     SENSOR_STACK_SIZE_LONGS = 128       ' Stack size for sensor COG (increased from 64 - was causing overflow)
 
-VAR { tile sensor variables }
+VAR ' ---- Sensor State ----
 
     LONG    cog_id                      ' Sensor COG ID (-1 = stopped, >=0 = running)
     LONG    frame_count                 ' Total frames captured
@@ -93,7 +99,8 @@ VAR { tile sensor variables }
     LONG    status_counter              ' Counter for periodic status output
     LONG    decimated_count             ' Count of frames dropped due to full FIFO
 
-CON { acquisition modes }
+CON ' ---- Acquisition Modes ----
+    {Spin2_Doc_CON}
 
     #0                              ' Start enumeration at 0
     MODE_STOPPED                    ' = 0
@@ -103,13 +110,13 @@ CON { acquisition modes }
     MODE_TEST_PATTERN               ' = 4
     MODE_ADC_VERIFY                 ' = 5 - Two scans with full logging for logic analyzer comparison
 
-DAT { sensor COG stack with overflow detection }
+DAT ' ---- COG Stack ----
 
     ' Stack for sensor COG - placed in DAT with sentinel mark for overflow detection
     sensor_cog_stack    LONG    0[SENSOR_STACK_SIZE_LONGS]
     sensor_stack_mark   LONG    stack_check.DO_NOT_WRITE_MARK   ' Sentinel - overflow if overwritten
 
-DAT { sensor mapping arrays }
+DAT ' ---- Sensor Mapping Arrays ----
 
 '------------------------------------------------------------------------------
     ' UNIFIED SENSOR MAPPING TABLE - v3 VERIFIED (2025-12-23)
@@ -145,89 +152,93 @@ DAT { sensor mapping arrays }
                         BYTE    20, 28, 21, 29, 22, 30, 23, 31    ' Counter 56-63 (EN4 → UR)
 
 PUB null()
-'' This is not a top-level object
-'' @returns nothing - placeholder method for non-top-level object
+'' This is not a top-level object.
+''
+
     cog_id := -1
 
-PUB start(sensor_base_pin) : success
-'' Start the tile sensor single-COG driver
-'' @param sensor_base_pin - base pin for sensor interface
-'' @returns TRUE if successful, FALSE if failed to start
+PUB start(sensor_base_pin) : status
+'' Start the tile sensor single-COG driver on the given base pin.
+''
+'' @param sensor_base_pin - Base pin for sensor interface
+'' @returns status - TRUE if successful, FALSE if failed to start
 
     ' Initialize COG ID FIRST (critical - must be set before any checks!)
     if cog_id == 0
         cog_id := -1
 
     if cog_id >= 0
-        return TRUE                     ' Already running
+        status := TRUE                  ' Already running
+    else
+        ' Save pin configuration
+        base_pin := sensor_base_pin
 
-    ' Save pin configuration
-    base_pin := sensor_base_pin
+        ' Initialize variables
+        frame_count := 0
+        error_count := 0
+        acquisition_mode := MODE_LIVE       ' Start in live mode
+        baseline_valid := FALSE             ' No baseline until calibrated
+        test_frame_counter := 0
 
-    ' Initialize variables
-    frame_count := 0
-    error_count := 0
-    acquisition_mode := MODE_LIVE       ' Start in live mode
-    baseline_valid := FALSE             ' No baseline until calibrated
-    test_frame_counter := 0
+        ' Prepare stack for overflow detection
+        stack_check.prepStackForCheck(@sensor_cog_stack, SENSOR_STACK_SIZE_LONGS)
 
-    ' Prepare stack for overflow detection
-    stack_check.prepStackForCheck(@sensor_cog_stack, SENSOR_STACK_SIZE_LONGS)
+        ' Launch sensor COG
+        debug("Sensor: Launching single-COG driver...", 13, 10)
+        cog_id := cogspin(NEWCOG, sensor_loop(), @sensor_cog_stack)
 
-    ' Launch sensor COG
-    debug("Sensor: Launching single-COG driver...", 13, 10)
-    cog_id := cogspin(NEWCOG, sensor_loop(), @sensor_cog_stack)
-
-    if cog_id < 0
-        debug("Sensor: ERROR - COG launch failed!", 13, 10)
-        return FALSE
-
-    debug("Sensor: COG ", udec(cog_id), " launched successfully", 13, 10)
-    return TRUE
+        if cog_id < 0
+            debug("Sensor: ERROR - COG launch failed!", 13, 10)
+            status := FALSE
+        else
+            debug("Sensor: COG ", udec(cog_id), " launched successfully", 13, 10)
+            status := TRUE
 
 PUB stop()
-'' Stop the tile sensor and terminate COG operation
+'' Stop the tile sensor and terminate COG operation.
+''
 
     if cog_id >= 0 and cog_id <= 7
         cogstop(cog_id)
     cog_id := -1
 
 PUB set_acquisition_mode(mode)
-'' Set the sensor acquisition mode
-'' @param mode - acquisition mode: MODE_STOPPED, MODE_LIVE, MODE_TEST_PATTERN, etc.
+'' Set the sensor acquisition mode.
+''
+'' @param mode - Acquisition mode (MODE_STOPPED, MODE_LIVE, MODE_TEST_PATTERN, etc.)
 
     acquisition_mode := mode
 
 PUB get_frame_count() : count
-'' Get total number of frames captured since start
-'' @returns total frame count as LONG
+'' Get the total number of frames captured since start.
+''
+'' @returns count - Total frame count
 
-    return frame_count
+    count := frame_count
 
 PUB get_error_count() : count
-'' Get total number of SPI/sensor errors encountered
-'' @returns error count as LONG
+'' Get the total number of SPI/sensor errors encountered.
+''
+'' @returns count - Error count
 
-    return error_count
+    count := error_count
 
 PUB is_running() : state
-'' Check if sensor background cog is currently running
-'' @returns TRUE if running, FALSE if stopped
-
-    return (cog_id >= 0)
-
-PUB capture_baseline() : success | framePtr, i, retries
-'' Capture current sensor readings as per-sensor baseline for calibration
-'' IMPORTANT: Call this with NO MAGNET present to capture zero-field baselines!
-'' After calling this, all subsequent sensor readings will be normalized to SENSOR_MID.
-'' @returns TRUE if baseline captured successfully, FALSE if acquisition failed
+'' Check if the sensor background cog is currently running.
 ''
-'' This eliminates per-sensor variation that causes visible "banding" artifacts
-'' in the display. Each Hall effect sensor has a slightly different zero-field
-'' reading due to manufacturing tolerances; this calibration normalizes them.
+'' @returns state - TRUE if running, FALSE if stopped
+
+    state := (cog_id >= 0)
+
+PUB capture_baseline() : status | framePtr, i, retries
+'' Capture current sensor readings as per-sensor baseline for calibration.
 ''
-'' NOTE: This function dequeues a frame from the sensor FIFO rather than reading
-'' sensors directly, to avoid race conditions with the sensor COG.
+'' @returns status - TRUE if baseline captured successfully, FALSE if acquisition failed
+
+' Local Variables:
+' @local framePtr - Hub pointer to the frame buffer
+' @local i - Cell index 0..SENSORS_PER_FRAME-1
+' @local retries - Remaining attempts to dequeue a frame
 
     debug("Sensor: Capturing baseline (remove all magnets!)...", 13, 10)
 
@@ -247,83 +258,85 @@ PUB capture_baseline() : success | framePtr, i, retries
 
     if framePtr == 0
       debug("Sensor: ERROR - No frame available for baseline capture", 13, 10)
-      return FALSE
+      status := FALSE
+    else
+      ' Copy frame data to baseline array and detect stuck pixels
+      ' Frame was already acquired with correct mapping by sensor COG
+      ' Stuck pixels are those reading 0 (stuck low) or 65535 (stuck high)
+      stuck_count := 0
+      repeat i from 0 to SENSORS_PER_FRAME - 1
+        baseline[i] := WORD[framePtr][i]
+        ' Detect stuck pixels (at ADC limits)
+        if baseline[i] == 0 or baseline[i] == ADC_MAX_VALUE
+          stuck_pixel[i] := 1
+          stuck_count++
+          ' Use SENSOR_MID as baseline for stuck pixels so they don't cause weird colors
+          baseline[i] := SENSOR_MID
+        else
+          stuck_pixel[i] := 0
 
-    ' Copy frame data to baseline array and detect stuck pixels
-    ' Frame was already acquired with correct mapping by sensor COG
-    ' Stuck pixels are those reading 0 (stuck low) or 65535 (stuck high)
-    stuck_count := 0
-    repeat i from 0 to 63
-      baseline[i] := WORD[framePtr][i]
-      ' Detect stuck pixels (at ADC limits)
-      if baseline[i] == 0 or baseline[i] == 65535
-        stuck_pixel[i] := 1
-        stuck_count++
-        ' Use SENSOR_MID as baseline for stuck pixels so they don't cause weird colors
-        baseline[i] := SENSOR_MID
-      else
-        stuck_pixel[i] := 0
+      ' Release frame back to pool
+      fifo.releaseFrame(framePtr)
 
-    ' Release frame back to pool
-    fifo.releaseFrame(framePtr)
+      ' Enable calibration
+      baseline_valid := TRUE
 
-    ' Enable calibration
-    baseline_valid := TRUE
+      debug("Sensor: Baseline captured successfully:", 13, 10)
+      ' Report stuck pixels if any found
+      if stuck_count > 0
+        debug("  WARNING: ", udec(stuck_count), " STUCK PIXEL(S) DETECTED!", 13, 10)
+        repeat i from 0 to SENSORS_PER_FRAME - 1
+          if stuck_pixel[i]
+            debug("    Stuck pixel at row ", udec(i / SENSORS_PER_ROW), ", col ", udec(i // SENSORS_PER_ROW), 13, 10)
 
-    debug("Sensor: Baseline captured successfully:", 13, 10)
-    ' Report stuck pixels if any found
-    if stuck_count > 0
-      debug("  WARNING: ", udec(stuck_count), " STUCK PIXEL(S) DETECTED!", 13, 10)
-      repeat i from 0 to 63
-        if stuck_pixel[i]
-          debug("    Stuck pixel at row ", udec(i / 8), ", col ", udec(i // 8), 13, 10)
+      ' Log all baseline values by row so we can spot anomalies
+      repeat i from 0 to SENSORS_PER_ROW - 1
+        debug("  Row ", udec(i), ": ")
+        debug(udec(baseline[i*SENSORS_PER_ROW+0]), " ")
+        debug(udec(baseline[i*SENSORS_PER_ROW+1]), " ")
+        debug(udec(baseline[i*SENSORS_PER_ROW+2]), " ")
+        debug(udec(baseline[i*SENSORS_PER_ROW+3]), " ")
+        debug(udec(baseline[i*SENSORS_PER_ROW+4]), " ")
+        debug(udec(baseline[i*SENSORS_PER_ROW+5]), " ")
+        debug(udec(baseline[i*SENSORS_PER_ROW+6]), " ")
+        debug(udec(baseline[i*SENSORS_PER_ROW+7]), 13, 10)
 
-    ' Log all baseline values by row so we can spot anomalies
-    repeat i from 0 to 7
-      debug("  Row ", udec(i), ": ")
-      debug(udec(baseline[i*8+0]), " ")
-      debug(udec(baseline[i*8+1]), " ")
-      debug(udec(baseline[i*8+2]), " ")
-      debug(udec(baseline[i*8+3]), " ")
-      debug(udec(baseline[i*8+4]), " ")
-      debug(udec(baseline[i*8+5]), " ")
-      debug(udec(baseline[i*8+6]), " ")
-      debug(udec(baseline[i*8+7]), 13, 10)
-
-    return TRUE
+      status := TRUE
 
 PUB is_calibrated() : state
-'' Check if per-sensor baseline calibration has been performed
-'' @returns TRUE if calibrated, FALSE if not
+'' Check if per-sensor baseline calibration has been performed.
+''
+'' @returns state - TRUE if calibrated, FALSE if not
 
-    return baseline_valid
+    state := baseline_valid
 
 PUB is_stuck(index) : stuck
-'' Check if a specific sensor is stuck (detected during calibration)
-'' @param index - sensor index (0-63)
-'' @returns TRUE if sensor is stuck, FALSE if operational
+'' Check if a specific sensor is stuck (detected during calibration).
+''
+'' @param index - Sensor index (0..63)
+'' @returns stuck - TRUE if sensor is stuck, FALSE if operational
 
-    if index < 0 or index > 63
-      return FALSE
-    return stuck_pixel[index] <> 0
+    stuck := FALSE
+    if index >= 0 and index <= 63
+      stuck := stuck_pixel[index] <> 0
 
 PUB get_stuck_count() : count
-'' Get the number of stuck pixels detected during calibration
-'' @returns number of stuck pixels (0-64)
+'' Get the number of stuck pixels detected during calibration.
+''
+'' @returns count - Number of stuck pixels (0..64)
 
-    return stuck_count
+    count := stuck_count
 
 PUB clear_calibration()
-'' Clear per-sensor calibration, returning to raw sensor output
-'' Useful for debugging or when re-calibration is needed
+'' Clear per-sensor calibration, returning to raw sensor output.
+''
 
     baseline_valid := FALSE
     debug("Sensor: Calibration cleared, using raw sensor values", 13, 10)
 
 PUB reset_counter_test()
-'' TEST METHOD: Reset hardware counter to sensor 0
-'' Pulses CLRb low to reset multiplexer counter
-'' @note For regression testing only - validates counter control
+'' TEST METHOD: Reset the hardware counter to sensor 0 by pulsing CLRb low.
+''
 
     debug("TEST: reset_counter_test() called", 13, 10)
     org
@@ -335,9 +348,8 @@ PUB reset_counter_test()
     debug("TEST: reset_counter_test() completed", 13, 10)
 
 PUB advance_counter_test()
-'' TEST METHOD: Advance hardware counter to next sensor
-'' Pulses CCLK high to increment multiplexer counter
-'' @note For regression testing only - validates counter control
+'' TEST METHOD: Advance the hardware counter to the next sensor by pulsing CCLK.
+''
 
     org
         drvl    #ABS_PIN_CCLK
@@ -349,12 +361,13 @@ PUB advance_counter_test()
     end
 
 PUB read_single_sensor() : sensor_value | raw_value, event_config
-'' TEST METHOD: Read current sensor using smart pin SPI interface
-'' Uses P_PULSE clock mode for reliable operation
-'' OPTIMIZED (Nov 2025): No per-transfer reset, uses waitse1 instead of polling
-'' @returns 16-bit sensor value (0-65535)
-'' @note For regression testing only - tests smart pin sync RX/clock generation
-'' @note configure_smart_pins() must be called first!
+'' TEST METHOD: Read the current sensor using the smart-pin SPI interface.
+''
+'' @returns sensor_value - 16-bit sensor value (0..65535)
+
+' Local Variables:
+' @local raw_value - Raw SPI shift register contents before processing
+' @local event_config - SE1 event-configuration value for waitse1
 
     ' Build event configuration (needed for inline PASM in Spin2 context)
     event_config := %01_000000 | ABS_PIN_SCLK
@@ -389,14 +402,12 @@ PUB read_single_sensor() : sensor_value | raw_value, event_config
     end
 
 PUB configure_smart_pins() | sclk_x, event_config
-'' Configure smart pins for SPI communication with AD7680
-'' Uses P_PULSE mode for clock (like jm_ez_spi) - more reliable than P_TRANSITION
-'' Called ONCE before using test methods or by sensor COG at startup
-'' @note Public to allow test code to configure pins explicitly
+'' Configure smart pins for SPI communication with the AD7680 ADC.
 ''
-'' OPTIMIZATION (Nov 2025): Smart pins are configured ONCE here and maintain
-'' their settings across transfers. No need to reset/reconfigure per-transfer.
-'' Also configures event SE1 for efficient waitse1-based waiting.
+
+' Local Variables:
+' @local sclk_x - Packed X-register value for the SCLK pulse generator
+' @local event_config - SE1 event-configuration value for waitse1
 
     debug("Sensor: Configuring smart pins for SPI (P_PULSE mode + events)...", 13, 10)
 
@@ -436,8 +447,18 @@ PUB configure_smart_pins() | sclk_x, event_config
     debug("Sensor: Smart pins configured (MISO stays enabled, SE1 event ready)", 13, 10)
 
 PRI sensor_loop() | framePtr, patternPtr, sensor_idx, sensor_val, fps_start_time, fps_frame_count, elapsed_ms, fps
-'' Main sensor loop running in dedicated COG
-'' Handles both test pattern generation and live sensor acquisition
+' Main sensor loop running in the dedicated sensor COG.
+'
+
+' Local Variables:
+' @local framePtr - Hub pointer to the frame buffer
+' @local patternPtr - Hub pointer to the currently selected test pattern
+' @local sensor_idx - Reserved sensor index (unused in current implementation)
+' @local sensor_val - Reserved sensor value (unused in current implementation)
+' @local fps_start_time - CT timer value at start of fps measurement window
+' @local fps_frame_count - Frames captured in the current fps window
+' @local elapsed_ms - Milliseconds elapsed in the fps window
+' @local fps - Computed frames-per-second
 
     debug("Sensor: COG loop started", 13, 10)
 
@@ -494,74 +515,76 @@ PRI sensor_loop() | framePtr, patternPtr, sensor_idx, sensor_val, fps_start_time
                 waitms(10)
 
 PRI generate_test_frame() | framePtr, patternPtr
-'' Generate test pattern frame (digits 0-5)
+' Generate a test-pattern frame cycling through digits 0..5.
+'
+
+' Local Variables:
+' @local framePtr - Hub pointer to the frame buffer
+' @local patternPtr - Hub pointer to the selected digit pattern
 
     ' Get frame buffer from FIFO
     framePtr := fifo.getNextFrame()
     if framePtr == 0
         waitms(1)
-        return
-
-    ' Select pattern based on counter
-    case test_frame_counter
-        0: patternPtr := @digit_0_pattern
-        1: patternPtr := @digit_1_pattern
-        2: patternPtr := @digit_2_pattern
-        3: patternPtr := @digit_3_pattern
-        4: patternPtr := @digit_4_pattern
-        5: patternPtr := @digit_5_pattern
-
-    ' Copy pattern to frame buffer (64 WORDs = 128 bytes)
-    WORDMOVE(framePtr, patternPtr, 64)
-
-    ' Commit frame to sensor FIFO
-    if fifo.commitFrame(fifo.FIFO_SENSOR, framePtr) < 0
-        fifo.releaseFrame(framePtr)
     else
-        frame_count++
+        ' Select pattern based on counter
+        case test_frame_counter
+            0: patternPtr := @digit_0_pattern
+            1: patternPtr := @digit_1_pattern
+            2: patternPtr := @digit_2_pattern
+            3: patternPtr := @digit_3_pattern
+            4: patternPtr := @digit_4_pattern
+            5: patternPtr := @digit_5_pattern
 
-    ' Increment test counter
-    test_frame_counter++
-    if test_frame_counter >= 6
-        test_frame_counter := 0
-        waitms(1000)  ' 1 second between test pattern cycles
-    else
-        waitms(100)   ' 100ms between individual patterns
+        ' Copy pattern to frame buffer (64 WORDs = 128 bytes)
+        WORDMOVE(framePtr, patternPtr, 64)
+
+        ' Commit frame to sensor FIFO
+        if fifo.commitFrame(fifo.FIFO_SENSOR, framePtr) < 0
+            fifo.releaseFrame(framePtr)
+        else
+            frame_count++
+
+        ' Increment test counter
+        test_frame_counter++
+        if test_frame_counter >= 6
+            test_frame_counter := 0
+            waitms(1000)  ' 1 second between test pattern cycles
+        else
+            waitms(100)   ' 100ms between individual patterns
 
 PRI acquire_sensor_frame() | framePtr, sensor_val, buf_ptr, total_sensor_count, lut_unified, baseline_ptr, baseline_val
-'' Acquire live sensor frame using inline PASM for timing-critical operations
-'' OPTIMIZED (Nov 2025): Pipelined counter advance during SPI transfer
-'' SIMPLIFIED (Dec 2025): Single unified lookup table replaces 4 separate tables
-'' OPTIMIZED (Dec 2025): Inline calibration in PASM eliminates Spin2 loop (~800µs saved)
-''
-'' Pipeline strategy:
-''   - First sensor: Full settle wait, then start SPI
-''   - During SPI: Advance counter to NEXT sensor (overlaps with SPI time)
-''   - After SPI: Small residual settle, read data, store
-''   - Subsequent sensors: Already settled from previous iteration
-''
-'' This hides ~2.75µs of counter/settle time inside the 9.6µs SPI transfer
+' Acquire one live sensor frame using inline PASM and pipelined counter advance.
+'
+
+' Local Variables:
+' @local framePtr - Hub pointer to the frame buffer
+' @local sensor_val - Per-sensor working value (raw then calibrated)
+' @local buf_ptr - Hub byte offset/pointer for the mapped destination word
+' @local total_sensor_count - Sensor counter index 0..63
+' @local lut_unified - Hub pointer to the unified sensor-mapping lookup table
+' @local baseline_ptr - Hub pointer to the baseline array, or 0 if not calibrated
+' @local baseline_val - Per-sensor baseline value read from the array
 
     ' Get frame buffer from FIFO
     framePtr := fifo.getNextFrame()
     if framePtr == 0
         ' No free frames - micro-backoff, not 1ms
         waitus(10)
-        return
+    else
+      ' CRITICAL: Pre-load lookup table addresses BEFORE inline PASM
+      ' This avoids modifying ptra inside PASM which corrupts stack access
+      lut_unified := @unified_sensor_map
 
-    ' CRITICAL: Pre-load lookup table addresses BEFORE inline PASM
-    ' This avoids modifying ptra inside PASM which corrupts stack access
-    lut_unified := @unified_sensor_map
+      ' Pre-load baseline array pointer (or 0 if calibration not valid)
+      ' This allows PASM to apply calibration inline during sensor write
+      baseline_ptr := baseline_valid ? @baseline : 0
 
-    ' Pre-load baseline array pointer (or 0 if calibration not valid)
-    ' This allows PASM to apply calibration inline during sensor write
-    baseline_ptr := baseline_valid ? @baseline : 0
-
-    ' Use inline PASM to read all 64 sensors with pipelined counter advance
-    ' NOTE: We use pa, pb for temporary pointers instead of ptra to avoid
-    ' corrupting Spin2's stack pointer
-    ' OPTIMIZED (Dec 2025): Calibration now applied inline, eliminating Spin2 loop
-    ORG
+      ' Use inline PASM to read all 64 sensors with pipelined counter advance
+      ' NOTE: We use pa, pb for temporary pointers instead of ptra to avoid
+      ' corrupting Spin2's stack pointer
+      ' OPTIMIZED (Dec 2025): Calibration now applied inline, eliminating Spin2 loop
+      ORG
         ' Jump to main code (subroutines placed first for backward reference only)
         jmp     #.main_start
 
@@ -743,36 +766,33 @@ PRI acquire_sensor_frame() | framePtr, sensor_val, buf_ptr, total_sensor_count, 
         ' NOTE: We no longer need to restore ptra because we never modified it!
         ' Using pa instead of ptra for lookup pointers preserves Spin2 stack access
 
-    END
+      END
 
-    ' NOTE: Calibration is now applied inline in PASM (Dec 2025 optimization)
-    ' The apply_calibration() Spin2 loop has been eliminated, saving ~800µs per frame
-    ' Calibration is performed in .store_sensor_value if baseline_ptr != 0
+      ' NOTE: Calibration is now applied inline in PASM (Dec 2025 optimization)
+      ' The apply_calibration() Spin2 loop has been eliminated, saving ~800µs per frame
+      ' Calibration is performed in .store_sensor_value if baseline_ptr != 0
 
-    ' Commit completed frame to sensor FIFO
-    if fifo.commitFrame(fifo.FIFO_SENSOR, framePtr) < 0
-        ' FIFO full - release frame back to pool (decimation)
-        fifo.releaseFrame(framePtr)
-    else
-        ' Frame committed successfully
-        frame_count++
+      ' Commit completed frame to sensor FIFO
+      if fifo.commitFrame(fifo.FIFO_SENSOR, framePtr) < 0
+          ' FIFO full - release frame back to pool (decimation)
+          fifo.releaseFrame(framePtr)
+      else
+          ' Frame committed successfully
+          frame_count++
 
-    ' FULL SPEED: No artificial delay - natural timing is:
-    '   SPI: 24 bits × 64 sensors × (1/2.5MHz) = ~614µs per frame
-    '   Plus pipeline overhead: ~750µs total = ~1,330 fps theoretical max
+      ' FULL SPEED: No artificial delay - natural timing is:
+      '   SPI: 24 bits x 64 sensors x (1/2.5MHz) = ~614us per frame
+      '   Plus pipeline overhead: ~750us total = ~1,330 fps theoretical max
 
 PRI apply_calibration(framePtr) | i, raw, calibrated
-'' LEGACY: This function is no longer used in the acquisition hot path (Dec 2025)
-'' Calibration is now applied inline in PASM within .store_sensor_value
-'' This eliminates ~800µs of Spin2 overhead per frame
-''
-'' Kept for debugging/testing purposes only.
-''
-'' Apply per-sensor baseline calibration to a frame buffer
-'' @param framePtr - pointer to 64-word frame buffer
-''
-'' For each sensor: calibrated = raw - baseline[i] + SENSOR_MID
-'' This normalizes all sensors to the same zero-field baseline.
+' Legacy per-sensor baseline calibration kept for debugging (no longer on hot path).
+'
+' @param framePtr - Hub pointer to the frame buffer
+
+' Local Variables:
+' @local i - Cell index 0..SENSORS_PER_FRAME-1
+' @local raw - Raw sensor value before calibration
+' @local calibrated - Calibrated, clamped 16-bit value
 
     repeat i from 0 to SENSORS_PER_FRAME - 1
       raw := WORD[framePtr][i]
@@ -784,17 +804,15 @@ PRI apply_calibration(framePtr) | i, raw, calibrated
       WORD[framePtr][i] := calibrated
 
 PRI adc_verify_scan() | scan_num, sensor_num, raw_value, processed_value, event_config
-'' ADC Verification Mode: Perform exactly 2 full scans with detailed logging
-'' Reads all 64 sensors twice, logging raw and processed values for each
-'' Used to compare against logic analyzer captures for bit extraction validation
-''
-'' Output format per sensor:
-''   "VERIFY: Scan N Sensor NN: raw=XXXX proc=DDDD"
-'' Where:
-''   N = scan number (1 or 2)
-''   NN = sensor number (0-63, in hardware read order)
-''   XXXX = raw 16-bit value from SPI (before processing)
-''   DDDD = processed 14-bit value (after REV, shift, mask)
+' Perform two full ADC verification scans with detailed per-sensor logging.
+'
+
+' Local Variables:
+' @local scan_num - 1-based scan index
+' @local sensor_num - Sensor index 0..SENSORS_PER_FRAME-1
+' @local raw_value - Raw SPI shift register contents before processing
+' @local processed_value - Processed 16-bit value after REV/shift/mask
+' @local event_config - SE1 event-configuration value for waitse1
 
   debug("=== ADC VERIFY MODE START ===", 13, 10)
   debug("Performing 2 scans of 64 sensors each", 13, 10)
@@ -804,7 +822,7 @@ PRI adc_verify_scan() | scan_num, sensor_num, raw_value, processed_value, event_
   ' Build event configuration for waitse1
   event_config := %01_000000 | ABS_PIN_SCLK
 
-  repeat scan_num from 1 to 2
+  repeat scan_num from 1 to VERIFY_SCAN_COUNT
     debug("--- SCAN ", udec(scan_num), " ---", 13, 10)
 
     ' Reset counter to sensor 0
@@ -824,7 +842,7 @@ PRI adc_verify_scan() | scan_num, sensor_num, raw_value, processed_value, event_
     end
 
     ' Read all 64 sensors
-    repeat sensor_num from 0 to 63
+    repeat sensor_num from 0 to SENSORS_PER_FRAME - 1
       ' Configure event for this read
       org
         setse1  event_config
@@ -878,7 +896,7 @@ PRI adc_verify_scan() | scan_num, sensor_num, raw_value, processed_value, event_
   debug("=== ADC VERIFY MODE COMPLETE ===", 13, 10)
   debug("Sensor driver now STOPPED", 13, 10)
 
-DAT { test pattern digit data - 8x8 WORD arrays in HUB memory }
+DAT ' ---- Test Pattern Digits ----
 
 ' Each digit is 64 WORDs (128 bytes) representing an 8x8 grid
 ' Background: $0100, Digit pixels use unique values for color differentiation
@@ -943,7 +961,7 @@ digit_5_pattern         ' Digit "5" - 0x6000
         WORD    $6000, $6000, $0100, $0100, $0100, $6000, $6000, $0100
         WORD    $0100, $6000, $6000, $6000, $6000, $6000, $0100, $0100
 
-CON { license }
+CON ' ---- License ----
 {{
 
  -------------------------------------------------------------------------------------------------

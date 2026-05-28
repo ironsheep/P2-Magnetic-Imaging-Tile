@@ -1,12 +1,23 @@
-'' isp_oled_manager.spin2 - OLED Display Manager
-'' Consumes frames from OLED FIFO and displays via OLED driver
+'' =================================================================================================
+''
+''   File....... isp_oled_manager.spin2
+''   Purpose.... OLED display manager that consumes frames from the OLED FIFO and drives the OLED hardware
+''   Authors.... Stephen M Moraco
+''               -- Copyright (c) 2025 Iron Sheep Productions, LLC
+''               -- see below for terms of use
+''   E-mail..... stephen@ironsheep.biz
+''   Started.... Oct 2025
+''   Updated.... Dec 2025
+''
+'' =================================================================================================
 ''
 '' This COG:
 ''   - Dequeues frames from OLED FIFO
 ''   - Converts sensor data to OLED format
 ''   - Manages OLED display updates
 
-CON
+CON ' ---- OLED Manager Public API ----
+  {Spin2_Doc_CON}
   ' Test mode configuration
   TEST_MODE   = false     ' true = show test pattern, false = process FIFO
 
@@ -15,7 +26,8 @@ CON
   OLED_HEIGHT = 128
 
   ' Sensor display configuration
-  SENSOR_GRID_SIZE = 8
+  SENSOR_GRID_SIZE  = 8
+  SENSORS_PER_FRAME = SENSOR_GRID_SIZE * SENSOR_GRID_SIZE  ' 64 cells
   CELL_WIDTH  = OLED_WIDTH / SENSOR_GRID_SIZE    ' 16 pixels per cell
   CELL_HEIGHT = OLED_HEIGHT / SENSOR_GRID_SIZE   ' 16 pixels per cell
 
@@ -23,43 +35,43 @@ CON
   MODE_FULL_UPDATE = 0
   MODE_DIFFERENTIAL = 1
 
-  ' FIFO IDs (must match isp_frame_fifo_manager)
-  FIFO_OLED   = 2
+  ' FIFO IDs owned by fifo (isp_frame_fifo_manager) - reference via fifo.fifo.FIFO_OLED
 
   ' Color mapping ranges
   MIN_FIELD   = 0         ' Minimum field value
   MAX_FIELD   = 4095      ' Maximum field value (12-bit from sensor)
   MID_FIELD   = 2048      ' Neutral field value (12-bit midpoint)
 
-  ' Display orientation constants (pass-through to driver)
-  ' Use these when mounting OLED in different orientations
-  ORIENTATION_0   = 0  ' Ribbon at BOTTOM (standard/default)
-  ORIENTATION_90  = 1  ' Ribbon at RIGHT (rotated 90° clockwise)
-  ORIENTATION_180 = 2  ' Ribbon at TOP (upside down)
-  ORIENTATION_270 = 3  ' Ribbon at LEFT (rotated 90° counter-clockwise)
+  ' Debug status interval
+  STATUS_FRAME_INTERVAL = 60   ' Log status every N frames (~1s @ 60 fps)
 
-OBJ
+  ' Display orientation constants owned by oled (isp_oled_driver)
+  ' Reference via oled.ORIENTATION_0, oled.ORIENTATION_90, oled.ORIENTATION_180, oled.ORIENTATION_270
+
+OBJ ' ---- Subsystem Objects ----
   fifo : "isp_frame_fifo_manager"
   oled : "isp_oled_driver"
 
-VAR
+VAR ' ---- Manager State ----
   long  cog_id
   long  frame_count
   long  update_mode
   long  base_pin
-  word  last_frame[64]    ' Previous frame for differential updates
+  word  last_frame[SENSORS_PER_FRAME]    ' Previous frame for differential updates
   byte  frame_buffer[OLED_WIDTH * OLED_HEIGHT * 2]  ' OLED display buffer (RGB565)
 
   ' COG stack (64 longs per P2KB recommendations)
   long  oled_cog_stack[64]
 
 PUB null()
-  '' Not a top-level object
+'' Not a top-level object.
+''
 
 PUB start(oled_base_pin) : ok
-  '' Start the OLED manager
-  '' @param oled_base_pin - base pin for OLED SPI interface
-  '' @returns cog_id if successful, -1 if failed
+'' Start the OLED manager on the given OLED SPI base pin.
+''
+'' @param oled_base_pin - Base pin for the OLED SPI interface
+'' @returns ok - Cog id (0..7) if successful, -1 if failed
 
   debug("OLED Manager: Starting...", 13, 10)
 
@@ -71,34 +83,37 @@ PUB start(oled_base_pin) : ok
   ' Save pin configuration
   base_pin := oled_base_pin
 
+  ' Default: driver failure returns -1
+  ok := -1
+
   ' Initialize OLED driver
   debug("OLED Manager: Calling driver start()...", 13, 10)
   if not oled.start(base_pin)
     debug("OLED Manager: ERROR - Driver start() failed!", 13, 10)
-    return -1
-
-  debug("OLED Manager: Driver initialized successfully", 13, 10)
-
-  ' Clear last frame buffer
-  wordfill(@last_frame, 0, 64)
-
-  ' Initialize variables
-  frame_count := 0
-  update_mode := MODE_FULL_UPDATE
-
-  debug("OLED Manager: Starting display COG...", 13, 10)
-  ' Start display COG
-  cog_id := cogspin(NEWCOG, oled_loop(), @oled_cog_stack)
-
-  if cog_id < 0
-    debug("OLED Manager: ERROR - Failed to start COG!", 13, 10)
   else
-    debug("OLED Manager: COG ", udec(cog_id), " started successfully", 13, 10)
+    debug("OLED Manager: Driver initialized successfully", 13, 10)
 
-  return cog_id
+    ' Clear last frame buffer
+    wordfill(@last_frame, 0, SENSORS_PER_FRAME)
+
+    ' Initialize variables
+    frame_count := 0
+    update_mode := MODE_FULL_UPDATE
+
+    debug("OLED Manager: Starting display COG...", 13, 10)
+    ' Start display COG
+    cog_id := cogspin(NEWCOG, oled_loop(), @oled_cog_stack)
+
+    if cog_id < 0
+      debug("OLED Manager: ERROR - Failed to start COG!", 13, 10)
+    else
+      debug("OLED Manager: COG ", udec(cog_id), " started successfully", 13, 10)
+
+    ok := cog_id
 
 PUB stop()
-  '' Stop the OLED manager
+'' Stop the OLED manager COG and its driver, clearing the cog id.
+''
 
   ' Validate COG ID is in valid range (0-7) before stopping
   if cog_id >= 0 and cog_id <= 7
@@ -107,43 +122,53 @@ PUB stop()
   cog_id := -1
 
 PUB set_update_mode(mode)
-  '' Set display update mode
-  '' @param mode - MODE_FULL_UPDATE or MODE_DIFFERENTIAL
+'' Set the display update mode (full or differential).
+''
+'' @param mode - MODE_FULL_UPDATE or MODE_DIFFERENTIAL
 
   update_mode := mode
 
 PUB get_frame_count() : count
-  '' Get number of frames displayed
+'' Get the count of frames pushed to the OLED since start.
+''
+'' @returns count - Frame count
 
-  return frame_count
+  count := frame_count
 
 PUB set_orientation(new_orientation)
-  '' Set display orientation (pass-through to driver)
-  '' @param new_orientation - ORIENTATION_0, ORIENTATION_90, ORIENTATION_180, or ORIENTATION_270
-  '' Call this after start() to configure orientation for panel mounting
+'' Set the display orientation (pass-through to the OLED driver).
+''
+'' @param new_orientation - One of oled.ORIENTATION_0/90/180/270
 
   oled.set_orientation(new_orientation)
 
 PUB get_orientation() : current
-  '' Get current display orientation (pass-through to driver)
-  '' @returns current orientation (0-3)
+'' Get the current display orientation (pass-through to the OLED driver).
+''
+'' @returns current - Current orientation index (0..3)
 
-  return oled.get_orientation()
+  current := oled.get_orientation()
 
 PUB show_test_pattern() | row, col, sensorVal, pattern
-  '' Display a test pattern directly (bypasses FIFO)
-  '' Useful for initial testing without full pipeline
+'' Display a checkerboard test pattern directly, bypassing the FIFO.
+''
+
+' Local Variables:
+' @local row - Row coordinate within the 8x8 sensor grid
+' @local col - Column coordinate within the 8x8 sensor grid
+' @local sensorVal - Reserved sensor value (unused)
+' @local pattern - Computed gradient pattern value for the current cell
 
   debug("OLED Test Pattern: Building checkerboard pattern...", 13, 10)
 
   ' Create a checkerboard pattern with gradient (12-bit values)
-  repeat row from 0 to 7
-    repeat col from 0 to 7
+  repeat row from 0 to SENSOR_GRID_SIZE - 1
+    repeat col from 0 to SENSOR_GRID_SIZE - 1
       ' Create alternating pattern with gradient
       if (row + col) & 1
         pattern := (row * 512) + (col * 256)  ' Diagonal gradient (12-bit)
       else
-        pattern := 4095 - ((row * 512) + (col * 256))  ' Inverse gradient (12-bit)
+        pattern := MAX_FIELD - ((row * 512) + (col * 256))  ' Inverse gradient (12-bit)
 
       ' Build display buffer with test pattern
       build_test_cell(row, col, pattern)
@@ -157,13 +182,21 @@ PUB show_test_pattern() | row, col, sensorVal, pattern
 
   debug("OLED Test Pattern: Display complete!", 13, 10)
 
-PRI build_test_cell(row, col, value) | color, x, y, pixelIdx
-  '' Build a single cell in the frame buffer for test pattern
-  '' @param row, col - cell position (0-7)
-  '' @param value - test value to display
+PRI build_test_cell(row, col, sensorVal) | color, x, y, pixelIdx
+' Build a single cell in the frame buffer for the test pattern.
+'
+' @param row - Row coordinate (0..7)
+' @param col - Column coordinate (0..7)
+' @param sensorVal - Test value to render for this cell
+
+' Local Variables:
+' @local color - RGB565 cell color
+' @local x - X pixel offset within the cell
+' @local y - Y pixel offset within the cell
+' @local pixelIdx - Byte index into the frame buffer for this pixel
 
   ' Convert to RGB565 color
-  color := field_to_rgb565(value)
+  color := field_to_rgb565(sensorVal)
 
   ' Fill the cell in display buffer
   repeat y from 0 to CELL_HEIGHT - 1
@@ -173,7 +206,17 @@ PRI build_test_cell(row, col, value) | color, x, y, pixelIdx
       frame_buffer[pixelIdx + 1] := color >> 8
 
 PRI oled_loop() | framePtr, row, col, sensorVal, color, idx, changed
-  '' Main OLED display loop running in dedicated COG
+' Main OLED display loop running in the dedicated OLED manager COG.
+'
+
+' Local Variables:
+' @local framePtr - Hub pointer to the frame buffer
+' @local row - Reserved row index (unused at this level)
+' @local col - Reserved col index (unused at this level)
+' @local sensorVal - Reserved sensor value (unused at this level)
+' @local color - Reserved color value (unused at this level)
+' @local idx - Cell index used during change detection
+' @local changed - TRUE when current frame differs from the last frame
 
   debug("OLED Loop: COG started, TEST_MODE=", udec(TEST_MODE), 13, 10)
 
@@ -189,7 +232,7 @@ PRI oled_loop() | framePtr, row, col, sensorVal, color, idx, changed
     debug("OLED Loop: FIFO processing mode active", 13, 10)
 
     ' Register this COG as OLED FIFO consumer for event-driven wake-ups
-    fifo.registerConsumer(FIFO_OLED, cogid())
+    fifo.registerConsumer(fifo.FIFO_OLED, cogid())
     debug("OLED Loop: Registered COG ", udec(cogid()), " for event-driven dequeue", 13, 10)
 
     ' Clear display initially
@@ -198,7 +241,7 @@ PRI oled_loop() | framePtr, row, col, sensorVal, color, idx, changed
     repeat
       ' Event-driven dequeue: sleeps until producer sends COGATN
       ' Zero jitter, zero power while waiting
-      framePtr := fifo.dequeueEventDriven(FIFO_OLED)
+      framePtr := fifo.dequeueEventDriven(fifo.FIFO_OLED)
 
       if framePtr <> 0
         ' Log first frame received
@@ -208,7 +251,7 @@ PRI oled_loop() | framePtr, row, col, sensorVal, color, idx, changed
         ' Check if frame has changed (for differential mode)
         changed := false
         if update_mode == MODE_DIFFERENTIAL
-          repeat idx from 0 to 63
+          repeat idx from 0 to SENSORS_PER_FRAME - 1
             if word[framePtr][idx] <> last_frame[idx]
               changed := true
               quit
@@ -216,8 +259,8 @@ PRI oled_loop() | framePtr, row, col, sensorVal, color, idx, changed
         ' Increment frame counter
         frame_count++
 
-        ' Debug output every 60 frames (~1 second at 60 fps)
-        if (frame_count // 60) == 0
+        ' Debug output every STATUS_FRAME_INTERVAL frames (~1 second at 60 fps)
+        if (frame_count // STATUS_FRAME_INTERVAL) == 0
           debug("OLED Manager: Processed ", udec(frame_count), " frames", 13, 10)
           debug("  Corner values: TL=", udec(word[framePtr][0]), " TR=", udec(word[framePtr][7]), " BL=", udec(word[framePtr][56]), " BR=", udec(word[framePtr][63]), 13, 10)
 
@@ -227,7 +270,7 @@ PRI oled_loop() | framePtr, row, col, sensorVal, color, idx, changed
           draw_sensor_grid(framePtr)
 
           ' Save frame for differential comparison
-          wordmove(@last_frame, framePtr, 64)
+          wordmove(@last_frame, framePtr, SENSORS_PER_FRAME)
 
         ' Release frame back to pool
         fifo.releaseFrame(framePtr)
@@ -237,14 +280,24 @@ PRI oled_loop() | framePtr, row, col, sensorVal, color, idx, changed
         waitms(10)
 
 PRI draw_sensor_grid(framePtr) | row, col, sensorIdx, sensorVal, color, x_pos, y_pos
-  '' Draw sensor grid directly to OLED using draw_rect() (avoids streaming COG hang)
-  '' @param framePtr - pointer to sensor frame data
+' Draw the 8x8 sensor grid directly to the OLED using draw_rect() per cell.
+'
+' @param framePtr - Hub pointer to the frame buffer
+
+' Local Variables:
+' @local row - Row coordinate within the 8x8 sensor grid
+' @local col - Column coordinate within the 8x8 sensor grid
+' @local sensorIdx - Linear cell index into the frame buffer
+' @local sensorVal - Raw sensor reading for the current cell
+' @local color - RGB565 cell color
+' @local x_pos - X pixel coordinate of the current cell
+' @local y_pos - Y pixel coordinate of the current cell
 
   ' Process each sensor cell and draw directly
-  repeat row from 0 to 7
-    repeat col from 0 to 7
+  repeat row from 0 to SENSOR_GRID_SIZE - 1
+    repeat col from 0 to SENSOR_GRID_SIZE - 1
       ' Get sensor value
-      sensorIdx := row * 8 + col
+      sensorIdx := row * SENSOR_GRID_SIZE + col
       sensorVal := word[framePtr][sensorIdx]
 
       ' Convert to RGB565 color
@@ -258,15 +311,25 @@ PRI draw_sensor_grid(framePtr) | row, col, sensorIdx, sensorVal, color, x_pos, y
       oled.draw_rect(x_pos, y_pos, CELL_WIDTH, CELL_HEIGHT, color)
 
 PRI build_display_buffer(framePtr) | row, col, sensorIdx, sensorVal, color, x, y, pixelIdx
-  '' Convert sensor frame to OLED display buffer (LEGACY - for test pattern only)
-  '' @param framePtr - pointer to sensor frame data
-  '' NOTE: This builds a buffer for draw_bitmap() which hangs. Use draw_sensor_grid() instead.
+' Legacy frame-to-bitmap converter retained for the test pattern path.
+'
+' @param framePtr - Hub pointer to the frame buffer
+
+' Local Variables:
+' @local row - Row coordinate within the 8x8 sensor grid
+' @local col - Column coordinate within the 8x8 sensor grid
+' @local sensorIdx - Linear cell index into the frame buffer
+' @local sensorVal - Raw sensor reading for the current cell
+' @local color - RGB565 cell color
+' @local x - X pixel offset within the cell
+' @local y - Y pixel offset within the cell
+' @local pixelIdx - Byte index into the frame buffer for this pixel
 
   ' Process each sensor
-  repeat row from 0 to 7
-    repeat col from 0 to 7
+  repeat row from 0 to SENSOR_GRID_SIZE - 1
+    repeat col from 0 to SENSOR_GRID_SIZE - 1
       ' Get sensor value
-      sensorIdx := row * 8 + col
+      sensorIdx := row * SENSOR_GRID_SIZE + col
       sensorVal := word[framePtr][sensorIdx]
 
       ' Convert to RGB565 color
@@ -280,32 +343,36 @@ PRI build_display_buffer(framePtr) | row, col, sensorIdx, sensorVal, color, x, y
           frame_buffer[pixelIdx] := color & $FF
           frame_buffer[pixelIdx + 1] := color >> 8
 
-PRI field_to_rgb565(fieldVal) : color | r, g, b
-  '' Convert magnetic field value to RGB565 color
-  '' @param fieldVal - 12-bit sensor reading (0-4095)
-  '' @returns RGB565 color value
+PRI field_to_rgb565(fieldVal) : color | redCh, greenCh, blueCh
+' Convert a magnetic field value to an RGB565 color (blue->green->red gradient).
+'
+' @param fieldVal - 12-bit sensor reading (0..4095)
+' @returns color - RGB565 color value
+
+' Local Variables:
+' @local redCh - Red channel value 0..31
+' @local greenCh - Green channel value 0..63
+' @local blueCh - Blue channel value 0..31
 
   ' Color mapping for 12-bit range: Blue (low) -> Green (mid) -> Red (high)
   ' Thresholds: 1024 (1/4), 2048 (mid), 3072 (3/4)
 
   if fieldVal < 1024  ' Lower quarter - blue dominant
-    b := 31
-    g := fieldVal >> 4  ' 0-31 range (divide by 32)
-    r := 0
+    blueCh := 31
+    greenCh := fieldVal >> 4  ' 0-31 range (divide by 32)
+    redCh := 0
   elseif fieldVal < 2048  ' Mid-low - cyan to green
-    b := 31 - ((fieldVal - 1024) >> 4)
-    g := 31
-    r := 0
+    blueCh := 31 - ((fieldVal - 1024) >> 4)
+    greenCh := 31
+    redCh := 0
   elseif fieldVal < 3072  ' Mid-high - green to yellow
-    b := 0
-    g := 31
-    r := (fieldVal - 2048) >> 5  ' 0-31 range (divide by 32)
+    blueCh := 0
+    greenCh := 31
+    redCh := (fieldVal - 2048) >> 5  ' 0-31 range (divide by 32)
   else  ' Upper quarter - red dominant
-    b := 0
-    g := 31 - ((fieldVal - 3072) >> 4)
-    r := 31
+    blueCh := 0
+    greenCh := 31 - ((fieldVal - 3072) >> 4)
+    redCh := 31
 
   ' Convert to RGB565 format: RRRRRGGG GGGBBBBB
-  color := (r << 11) | (g << 6) | b
-
-  return color
+  color := (redCh << 11) | (greenCh << 6) | blueCh

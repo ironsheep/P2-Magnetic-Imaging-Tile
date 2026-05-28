@@ -1,14 +1,28 @@
-'' isp_hdmi_display_engine.spin2 - HDMI Display Engine
-'' Consumes frames from HDMI FIFO and displays via psram_graphics
+'' =================================================================================================
+''
+''   File....... isp_hdmi_display_engine.spin2
+''   Purpose.... HDMI display engine that consumes frames from the HDMI FIFO and renders via psram_graphics
+''   Authors.... Stephen M Moraco
+''               -- Copyright (c) 2025 Iron Sheep Productions, LLC
+''               -- see below for terms of use
+''   E-mail..... stephen@ironsheep.biz
+''   Started.... Oct 2025
+''   Updated.... Dec 2025
+''
+'' =================================================================================================
 ''
 '' This COG:
 ''   - Dequeues frames from HDMI FIFO
 ''   - Converts sensor data to visual representation
 ''   - Uses psram_graphics API for display
 
-CON
+CON ' ---- Display Configuration ----
   ' Test mode configuration
   TEST_MODE   = false     ' true = show test pattern, false = process FIFO
+
+  ' Sensor grid (8x8 magnetic Hall-effect array)
+  SENSOR_GRID_SIZE  = 8
+  SENSORS_PER_FRAME = SENSOR_GRID_SIZE * SENSOR_GRID_SIZE   ' 64 cells per frame
 
   ' Display configuration
   GRID_X      = 200       ' Grid top-left X position
@@ -28,8 +42,8 @@ CON
   ' Color mapping ranges - symmetric scaling for equal red/green intensity
   ' See DOCs/MagSensor-Color-Mapping-Specification.md for details
   ' Full ADC range is 0-65535, but we use symmetric color range for balanced display
+  ' sensor.SENSOR_MID is owned by sensor (isp_tile_sensor) - reference via sensor.sensor.SENSOR_MID
   SENSOR_MIN = 0          ' ADC minimum (theoretical full negative saturation)
-  SENSOR_MID = 20500      ' Zero field baseline (observed neutral point)
   SENSOR_MAX = 65535      ' ADC maximum (theoretical full positive saturation)
   ' Use symmetric color range: same scaling for both red and green
   ' Values beyond this range saturate to max intensity (which is fine)
@@ -40,26 +54,25 @@ CON
   ' Distinct from red/green field colors, clearly indicates non-operational sensor
   STUCK_PIXEL_COLOR = $FF_00_FF_FF  ' Magenta: R=255, G=0, B=255, A=255
 
-  ' FIFO IDs (must match isp_frame_fifo_manager)
-  FIFO_HDMI   = 1
+  ' FIFO IDs owned by fifo (isp_frame_fifo_manager) - reference via fifo.fifo.FIFO_HDMI
 
-OBJ
+OBJ ' ---- Subsystem Objects ----
   fifo : "isp_frame_fifo_manager"
   gfx  : "isp_psram_graphics"      ' HDMI graphics system
   stack_check : "isp_stack_check"  ' Stack overflow detection utility
   sensor : "isp_tile_sensor"       ' Sensor interface (for stuck pixel detection)
 
-CON { stack configuration }
+CON ' ---- Stack Configuration ----
   HDMI_STACK_SIZE_LONGS = 128      ' Stack size for HDMI display COG (increased from 64 - deep call chains)
 
-VAR
+VAR ' ---- Engine State ----
   long  cog_id
   long  frame_count
   long  display_mode
   long  current_frame_ptr
   long  base_pin
   long  grid_drawn              ' Flag: 0=not drawn, 1=drawn
-  word  frame_buffer[64]
+  word  frame_buffer[SENSORS_PER_FRAME]
 
   ' Dynamic statistics (updated per frame)
   word  stat_min                ' Minimum sensor value in frame
@@ -67,18 +80,20 @@ VAR
   long  stat_avg                ' Average sensor value in frame
   byte  text_buf[16]            ' Buffer for number-to-string conversion
 
-DAT { HDMI display COG stack with overflow detection }
+DAT ' ---- COG Stack ----
   ' Stack for HDMI COG - placed in DAT with sentinel mark for overflow detection
   display_cog_stack   LONG    0[HDMI_STACK_SIZE_LONGS]
   display_stack_mark  LONG    stack_check.DO_NOT_WRITE_MARK   ' Sentinel - overflow if overwritten
 
 PUB null()
-  '' Not a top-level object
+'' Not a top-level object.
+''
 
 PUB start(hdmi_base_pin) : ok
-  '' Start the HDMI display engine
-  '' @param hdmi_base_pin - base pin for HDMI output
-  '' @returns cog_id if successful, -1 if failed
+'' Start the HDMI display engine on the given base pin.
+''
+'' @param hdmi_base_pin - Base pin for HDMI output
+'' @returns ok - Cog id (0..7) if successful, -1 if failed
 
   debug("HDMI Engine: Starting...", 13, 10)
 
@@ -116,10 +131,11 @@ PUB start(hdmi_base_pin) : ok
   else
     debug("HDMI Engine: COG ", udec(cog_id), " started successfully", 13, 10)
 
-  return cog_id
+  ok := cog_id
 
 PUB stop()
-  '' Stop the HDMI display engine
+'' Stop the HDMI display engine COG and clear its cog id.
+''
 
   ' Validate COG ID is in valid range (0-7) before stopping
   if cog_id >= 0 and cog_id <= 7
@@ -127,28 +143,41 @@ PUB stop()
   cog_id := -1
 
 PUB set_display_mode(mode)
-  '' Set display visualization mode
-  '' @param mode - display mode (0=normal, 1=enhanced contrast, etc.)
+'' Set the display visualization mode.
+''
+'' @param mode - Display mode (0=normal, 1=enhanced contrast, etc.)
 
   display_mode := mode
 
 PUB get_frame_count() : count
-  '' Get number of frames displayed
+'' Get the count of frames rendered to HDMI since start.
+''
+'' @returns count - Total frames rendered
 
-  return frame_count
+  count := frame_count
 
 PUB get_current_frame() : ptr
-  '' Get pointer to current frame buffer (64 WORDs)
-  '' @returns pointer to frame_buffer array, or 0 if no frame available
+'' Get the pointer to the most recently received frame (64 WORDs).
+''
+'' @returns ptr - Hub pointer to the frame_buffer array, or 0 if no frame available
 
-  return current_frame_ptr
+  ptr := current_frame_ptr
 
 ' PUB show_test_pattern() | row, col, value
 '   '' Display a test pattern directly (bypasses FIFO)
 '   '' Removed - graphics drawing now handled in main()
 
 PRI display_loop() | framePtr, row, col, sensorIdx, sensorVal, cellColor
-  '' Main display loop running in dedicated COG
+' Main HDMI display loop running in the dedicated COG.
+'
+
+' Local Variables:
+' @local framePtr - Hub pointer to the frame buffer
+' @local row - Row coordinate within the 8x8 sensor grid
+' @local col - Column coordinate within the 8x8 sensor grid
+' @local sensorIdx - Linear cell index into the frame buffer
+' @local sensorVal - Raw 16-bit sensor reading for the current cell
+' @local cellColor - Computed RRGGBBAA cell color
 
   debug("HDMI Engine Loop: COG started, TEST_MODE=", udec(TEST_MODE), 13, 10)
 
@@ -176,7 +205,7 @@ PRI display_loop() | framePtr, row, col, sensorIdx, sensorVal, cellColor
     debug("HDMI Engine Loop: FIFO processing mode active", 13, 10)
 
     ' Register this COG as HDMI FIFO consumer for event-driven wake-ups
-    fifo.registerConsumer(FIFO_HDMI, cogid())
+    fifo.registerConsumer(fifo.FIFO_HDMI, cogid())
     debug("HDMI Engine Loop: Registered COG ", udec(cogid()), " for event-driven dequeue", 13, 10)
 
     ' Clear screen and draw grid on startup
@@ -201,14 +230,14 @@ PRI display_loop() | framePtr, row, col, sensorIdx, sensorVal, cellColor
 
       ' Event-driven dequeue: sleeps until producer sends COGATN
       ' Zero jitter, zero power while waiting
-      framePtr := fifo.dequeueEventDriven(FIFO_HDMI)
+      framePtr := fifo.dequeueEventDriven(fifo.FIFO_HDMI)
 
       if framePtr <> 0
         ' Render all 64 sensor cells to display
-        repeat row from 0 to 7
-          repeat col from 0 to 7
+        repeat row from 0 to SENSOR_GRID_SIZE - 1
+          repeat col from 0 to SENSOR_GRID_SIZE - 1
             ' Get sensor value from frame
-            sensorIdx := row * 8 + col
+            sensorIdx := row * SENSOR_GRID_SIZE + col
             sensorVal := WORD[framePtr][sensorIdx]
 
             ' Check if this sensor is stuck (detected during calibration)
@@ -234,22 +263,27 @@ PRI display_loop() | framePtr, row, col, sensorIdx, sensorVal, cellColor
       ' else: spurious wake (race condition) - just loop back
 
 PRI DrawStaticLabels() | row, col, labelX, labelY
-  '' Draw static text labels around the sensor grid display
-  '' Includes title, row/column labels, and static label prefixes
-  '' Dynamic values (min/max/avg/frame) are drawn by DrawDynamicStats()
+' Draw static text labels (title, row/col indices, statistic prefixes) around the grid.
+'
+
+' Local Variables:
+' @local row - Row index for row labels
+' @local col - Column index for column labels
+' @local labelX - X position for the current label glyph
+' @local labelY - Y position for the current label glyph
 
   ' Title at top center
   gfx.DrawTextCentered(320, 10, @"Magnetic Imaging Tile Display", $FFFFFFFF)  ' White
 
   ' Row labels (0-7) down left side
   labelX := GRID_X - 20
-  repeat row from 0 to 7
+  repeat row from 0 to SENSOR_GRID_SIZE - 1
     labelY := GRID_Y + row * (CELL_SIZE + CELL_GAP) + 12  ' Centered in cell
     gfx.DrawChar(labelX, labelY, "0" + row, $FFFF00FF)  ' Yellow
 
   ' Column labels (0-7) across top
   labelY := GRID_Y - 15
-  repeat col from 0 to 7
+  repeat col from 0 to SENSOR_GRID_SIZE - 1
     labelX := GRID_X + col * (CELL_SIZE + CELL_GAP) + 12  ' Centered in cell
     gfx.DrawChar(labelX, labelY, "0" + col, $FFFF00FF)  ' Yellow
 
@@ -263,15 +297,20 @@ PRI DrawStaticLabels() | row, col, labelX, labelY
   gfx.DrawText(10, 460, @"Mode: LIVE", $FFFF00FF)  ' Yellow
 
 PRI CalculateFrameStats(framePtr) | i, val, sum
-  '' Calculate min, max, and average from frame data
-  '' @param framePtr - pointer to 64-word frame buffer
-  '' Results stored in stat_min, stat_max, stat_avg
+' Calculate min, max, and average for a frame (results stored in stat_min/max/avg).
+'
+' @param framePtr - Hub pointer to the frame buffer
 
-  stat_min := 65535
+' Local Variables:
+' @local i - Cell index 0..SENSORS_PER_FRAME-1
+' @local val - Sensor value for the current cell
+' @local sum - Running sum for average computation
+
+  stat_min := SENSOR_MAX
   stat_max := 0
   sum := 0
 
-  repeat i from 0 to 63
+  repeat i from 0 to SENSORS_PER_FRAME - 1
     val := WORD[framePtr][i]
 
     ' Skip stuck pixels in statistics
@@ -283,11 +322,11 @@ PRI CalculateFrameStats(framePtr) | i, val, sum
       sum += val
 
   ' Calculate average (avoid divide by zero)
-  stat_avg := sum / 64
+  stat_avg := sum / SENSORS_PER_FRAME
 
 PRI DrawDynamicStats()
-  '' Update dynamic statistics display
-  '' Call after CalculateFrameStats() to show current values
+' Update the per-frame statistics displayed beside the grid.
+'
 
   ' Clear previous values by drawing black rectangles
   gfx.FillRect(STATS_VALUE_X, STATS_MIN_Y, STATS_VALUE_X + STATS_CLEAR_W, STATS_MIN_Y + 12, $000000FF)
@@ -311,74 +350,86 @@ PRI DrawDynamicStats()
   FormatNumber(frame_count)
   gfx.DrawText(STATS_VALUE_X, STATS_FRAME_Y, @text_buf, $FFFFFFFF)  ' White
 
-PRI FormatNumber(value) | i, digit, started
-  '' Convert integer value to zero-terminated string in text_buf
-  '' @param value - integer to convert (0-99999)
+PRI FormatNumber(numValue) | i, digit, started
+' Convert an integer value to a zero-terminated decimal string in text_buf.
+'
+' @param numValue - Integer to convert (0..99999)
+
+' Local Variables:
+' @local i - Current digit position in text_buf
+' @local digit - Current decimal digit
+' @local started - Reserved leading-zero suppression flag (unused)
 
   ' Handle zero specially
-  if value == 0
+  if numValue == 0
     text_buf[0] := "0"
     text_buf[1] := 0
-    return
+  else
+    ' Build digits from right to left, then reverse
+    i := 0
+    repeat while numValue > 0 and i < 10
+      digit := numValue // 10
+      text_buf[i++] := "0" + digit
+      numValue /= 10
 
-  ' Build digits from right to left, then reverse
-  i := 0
-  repeat while value > 0 and i < 10
-    digit := value // 10
-    text_buf[i++] := "0" + digit
-    value /= 10
+    ' Null terminate
+    text_buf[i] := 0
 
-  ' Null terminate
-  text_buf[i] := 0
+    ' Reverse the string in place
+    ReverseString(@text_buf, i)
 
-  ' Reverse the string in place
-  ReverseString(@text_buf, i)
+PRI ReverseString(pStr, len) | i, j, swapByte
+' Reverse a string in place.
+'
+' @param pStr - Hub pointer to the string buffer
+' @param len - Length of the string in bytes (not including the null terminator)
 
-PRI ReverseString(pStr, len) | i, j, temp
-  '' Reverse a string in place
-  '' @param pStr - pointer to string
-  '' @param len - length of string (not including null)
+' Local Variables:
+' @local i - Left-walking index
+' @local j - Right-walking index
+' @local swapByte - Temporary byte used during the swap
 
   i := 0
   j := len - 1
   repeat while i < j
-    temp := BYTE[pStr][i]
+    swapByte := BYTE[pStr][i]
     BYTE[pStr][i] := BYTE[pStr][j]
-    BYTE[pStr][j] := temp
+    BYTE[pStr][j] := swapByte
     i++
     j--
 
-PRI field_to_color(fieldVal) : color | r, g, b, intensity, linear
-  '' Convert magnetic field value to display color using perceptually uniform gradient
-  '' @param fieldVal - 16-bit sensor reading
-  '' @returns color in RRGGBBAA format (24-bit color, 256 levels per channel)
-  ''
-  '' Uses gamma-corrected intensity for smooth perceptual gradient.
-  '' See DOCs/Visualization-Theory-of-Operations.md for details.
-  ''
-  '' FIX (2025-12-26): Removed gray_fade to eliminate banding artifact.
-  '' FIX (2025-12-26): Use symmetric COLOR_RANGE for equal red/green intensity.
-  '' Values beyond COLOR_RANGE from baseline saturate to max intensity.
+PRI field_to_color(fieldVal) : color | redCh, greenCh, blueCh, intensity, linear
+' Convert magnetic field value to a display color using a perceptually uniform gradient.
+'
+' @param fieldVal - 16-bit sensor reading
+' @returns color - RRGGBBAA packed color (24-bit color, 256 levels per channel)
+
+' Local Variables:
+' @local redCh - Red channel value 0..255
+' @local greenCh - Green channel value 0..255
+' @local blueCh - Blue channel value 0..255
+' @local intensity - Gamma-corrected color intensity
+' @local linear - Linear pre-gamma intensity value
 
   ' Clamp to full ADC range
   fieldVal := SENSOR_MIN #> fieldVal <# SENSOR_MAX
 
-  if fieldVal < SENSOR_MID
+  if fieldVal < sensor.SENSOR_MID
     ' Negative field: Red increases from gray background
-    linear := ((SENSOR_MID - fieldVal) * 255) / COLOR_RANGE
+    linear := ((sensor.SENSOR_MID - fieldVal) * 255) / COLOR_RANGE
     linear := linear <# 255               ' Clamp if beyond expected range (saturate to max)
     intensity := (linear * linear) / 255  ' Gamma correction ~2.0
-    r := (GRAY_BASE + intensity) <# 255   ' Red increases from gray
-    g := GRAY_BASE
-    b := GRAY_BASE
+    redCh := (GRAY_BASE + intensity) <# 255   ' Red increases from gray
+    greenCh := GRAY_BASE
+    blueCh := GRAY_BASE
   else
     ' Positive field: Green increases from gray background
-    linear := ((fieldVal - SENSOR_MID) * 255) / COLOR_RANGE
+    linear := ((fieldVal - sensor.SENSOR_MID) * 255) / COLOR_RANGE
     linear := linear <# 255               ' Clamp if beyond expected range (saturate to max)
     intensity := (linear * linear) / 255  ' Gamma correction ~2.0
-    r := GRAY_BASE
-    g := (GRAY_BASE + intensity) <# 255   ' Green increases from gray
-    b := GRAY_BASE
+    redCh := GRAY_BASE
+    greenCh := (GRAY_BASE + intensity) <# 255   ' Green increases from gray
+    blueCh := GRAY_BASE
 
   ' Pack as RRGGBBAA (alpha = FF for fully opaque)
-  color := (r << 24) | (g << 16) | (b << 8) | $FF
+  color := (redCh << 24) | (greenCh << 16) | (blueCh << 8) | $FF

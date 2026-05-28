@@ -1,11 +1,17 @@
 '' =================================================================================================
+''
 ''   File....... test_pin_binary.spin2
-''   Purpose.... Binary counter on pins - identify which physical wire is which
-''   Author..... Stephen M Moraco
+''   Purpose.... Drive a binary counter on the tile pins to identify which physical wire is which
+''   Authors.... Stephen M Moraco
+''               -- Copyright (c) 2025 Iron Sheep Productions, LLC
+''               -- see below for terms of use
+''   E-mail..... stephen@ironsheep.biz
 ''   Started.... Jan 2025
+''   Updated.... Oct 2025
+''
 '' =================================================================================================
 
-CON
+CON ' ---- Pin Assignments ----
     _clkfreq = 200_000_000
 
     TILE_PIN_GROUP = 8
@@ -17,7 +23,20 @@ CON
     PIN_CLRb = 3    ' Bit 3 of counter
     PIN_SCLK = 4    ' Bit 4 of counter
 
-VAR
+    ' Counter exercise
+    COUNTER_MAX     = 31     ' 5-bit counter top value
+    REPEAT_PASSES   = 3      ' Number of full 0..COUNTER_MAX sweeps
+    STEP_HOLD_MS    = 200    ' Hold per count value
+    PULSE_HOLD_MS   = 1000   ' Initial CS-high/low identification pulse
+
+    ' Per-bit masks for counter-to-pin extraction
+    BIT0 = $01
+    BIT1 = $02
+    BIT2 = $04
+    BIT3 = $08
+    BIT4 = $10
+
+VAR ' ---- Test State ----
     LONG abs_pin_cs
     LONG abs_pin_cclk
     LONG abs_pin_miso
@@ -25,6 +44,11 @@ VAR
     LONG abs_pin_sclk
 
 PUB main() | count
+'' Drive a binary counter on the tile pins to identify which physical wire is which.
+''
+
+' Local Variables:
+' @local count - Counter index sweeping 0..COUNTER_MAX
 
     debug("================================================================================")
     debug("Binary Counter Test - Identify Physical Pins")
@@ -60,46 +84,46 @@ PUB main() | count
     pinl(abs_pin_miso)
     pinl(abs_pin_clrb)
     pinl(abs_pin_sclk)
-    waitms(1000)
+    waitms(PULSE_HOLD_MS)
 
     debug("Setting CS LOW for 1 second...")
     pinl(abs_pin_cs)
-    waitms(1000)
+    waitms(PULSE_HOLD_MS)
 
     debug(" ")
     debug("Starting binary counter 0-31, repeating 3 times...")
     debug("Each count held for 200ms")
     debug(" ")
 
-    repeat 3
-        repeat count from 0 to 31
+    repeat REPEAT_PASSES
+        repeat count from 0 to COUNTER_MAX
             ' Output count as 5-bit binary
-            if (count & $01)
+            if (count & BIT0)
                 pinh(abs_pin_cs)
             else
                 pinl(abs_pin_cs)
 
-            if (count & $02)
+            if (count & BIT1)
                 pinh(abs_pin_cclk)
             else
                 pinl(abs_pin_cclk)
 
-            if (count & $04)
+            if (count & BIT2)
                 pinh(abs_pin_miso)
             else
                 pinl(abs_pin_miso)
 
-            if (count & $08)
+            if (count & BIT3)
                 pinh(abs_pin_clrb)
             else
                 pinl(abs_pin_clrb)
 
-            if (count & $10)
+            if (count & BIT4)
                 pinh(abs_pin_sclk)
             else
                 pinl(abs_pin_sclk)
 
-            waitms(200)
+            waitms(STEP_HOLD_MS)
 
     ' Set all low at end
     pinl(abs_pin_cs)

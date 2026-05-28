@@ -1,87 +1,115 @@
-'' test_framerate.spin2 - Benchmark OLED Frame Rate
-'' Measures actual FPS for normal vs optimized drawing
+'' =================================================================================================
+''
+''   File....... test_framerate.spin2
+''   Purpose.... Benchmark OLED frame rate comparing normal vs optimized drawing paths
+''   Authors.... Stephen M Moraco
+''               -- Copyright (c) 2025 Iron Sheep Productions, LLC
+''               -- see below for terms of use
+''   E-mail..... stephen@ironsheep.biz
+''   Started.... Oct 2025
+''   Updated.... Oct 2025
+''
+'' =================================================================================================
 
-CON
+CON ' ---- Clock Setup ----
   _clkfreq = 250_000_000
 
-OBJ
+  ' Sensor grid (8x8 test frame)
+  GRID_SIZE         = 8
+  SENSORS_PER_FRAME = GRID_SIZE * GRID_SIZE   ' 64 cells per frame
+
+  ' Test pattern + benchmark
+  GRADIENT_STEP     = 16                                ' Per-cell gradient step
+  GRADIENT_MAX      = (SENSORS_PER_FRAME - 1) * GRADIENT_STEP  ' 1008 = top of linear gradient
+  PATTERN_INCREMENT = 10                                ' Per-frame drift in continuous mode
+  PATTERN_MASK      = $3FF                              ' Wrap pattern to 10 bits
+  BENCHMARK_FRAMES  = 100                               ' Frames per benchmark pass
+  MS_PER_SECOND     = 1000                              ' Milliseconds in one second
+  HOLD_MS           = 2000                              ' Pause between benchmarks
+
+OBJ ' ---- Subsystem Objects ----
   oled : "isp_oled_driver"
 
-VAR
-  long sensor_values[64]
+VAR ' ---- Benchmark State ----
+  long sensor_values[SENSORS_PER_FRAME]
   long start_time, end_time, elapsed_ms, fps
 
 PUB main() | idx, frames
+'' Benchmark OLED frame rate comparing normal vs optimized drawing paths.
+''
+
+' Local Variables:
+' @local idx - Cell index into the 8x8 sensor array
+' @local frames - Frame counter for the active benchmark pass
 
   debug("Frame Rate Benchmark", 13, 10)
   debug("===================", 13, 10)
 
   ' Initialize OLED at 20MHz
-  if oled.start(0)
-    debug("OLED initialized at 20 MHz SPI", 13, 10)
-  else
+  if not oled.start(0)
     debug("OLED init failed!", 13, 10)
-    return
+  else
+    debug("OLED initialized at 20 MHz SPI", 13, 10)
 
-  ' Create test pattern
-  repeat idx from 0 to 63
-    sensor_values[idx] := idx * 16
+    ' Create test pattern
+    repeat idx from 0 to SENSORS_PER_FRAME - 1
+      sensor_values[idx] := idx * GRADIENT_STEP
 
-  debug(13, 10, "Testing NORMAL method (64 rectangles)...", 13, 10)
+    debug(13, 10, "Testing NORMAL method (64 rectangles)...", 13, 10)
 
-  ' Benchmark normal method
-  frames := 100
-  start_time := getms()
+    ' Benchmark normal method
+    frames := BENCHMARK_FRAMES
+    start_time := getms()
 
-  repeat frames
-    oled.draw_grid_8x8(@sensor_values, 0, 1008)
+    repeat frames
+      oled.draw_grid_8x8(@sensor_values, 0, GRADIENT_MAX)
 
-  end_time := getms()
-  elapsed_ms := end_time - start_time
-  fps := (frames * 1000) / elapsed_ms
+    end_time := getms()
+    elapsed_ms := end_time - start_time
+    fps := (frames * MS_PER_SECOND) / elapsed_ms
 
-  debug("  ", udec(frames), " frames in ", udec(elapsed_ms), " ms", 13, 10)
-  debug("  Average FPS: ", udec(fps), 13, 10)
-  debug("  Frame time: ", udec(elapsed_ms / frames), " ms", 13, 10)
+    debug("  ", udec(frames), " frames in ", udec(elapsed_ms), " ms", 13, 10)
+    debug("  Average FPS: ", udec(fps), 13, 10)
+    debug("  Frame time: ", udec(elapsed_ms / frames), " ms", 13, 10)
 
-  waitms(2000)
+    waitms(HOLD_MS)
 
-  debug(13, 10, "Testing FAST method (single stream)...", 13, 10)
+    debug(13, 10, "Testing FAST method (single stream)...", 13, 10)
 
-  ' Benchmark fast method
-  frames := 100
-  start_time := getms()
+    ' Benchmark fast method
+    frames := BENCHMARK_FRAMES
+    start_time := getms()
 
-  repeat frames
-    oled.draw_grid_8x8_fast(@sensor_values, 0, 1008)
+    repeat frames
+      oled.draw_grid_8x8_fast(@sensor_values, 0, GRADIENT_MAX)
 
-  end_time := getms()
-  elapsed_ms := end_time - start_time
-  fps := (frames * 1000) / elapsed_ms
+    end_time := getms()
+    elapsed_ms := end_time - start_time
+    fps := (frames * MS_PER_SECOND) / elapsed_ms
 
-  debug("  ", udec(frames), " frames in ", udec(elapsed_ms), " ms", 13, 10)
-  debug("  Average FPS: ", udec(fps), 13, 10)
-  debug("  Frame time: ", udec(elapsed_ms / frames), " ms", 13, 10)
+    debug("  ", udec(frames), " frames in ", udec(elapsed_ms), " ms", 13, 10)
+    debug("  Average FPS: ", udec(fps), 13, 10)
+    debug("  Frame time: ", udec(elapsed_ms / frames), " ms", 13, 10)
 
-  waitms(2000)
+    waitms(HOLD_MS)
 
-  debug(13, 10, "Continuous display at max rate...", 13, 10)
+    debug(13, 10, "Continuous display at max rate...", 13, 10)
 
-  ' Run continuous loop showing FPS
-  frames := 0
-  start_time := getms()
+    ' Run continuous loop showing FPS
+    frames := 0
+    start_time := getms()
 
-  repeat
-    oled.draw_grid_8x8_fast(@sensor_values, 0, 1008)
-    frames++
+    repeat
+      oled.draw_grid_8x8_fast(@sensor_values, 0, GRADIENT_MAX)
+      frames++
 
-    ' Update FPS every second
-    if (getms() - start_time) >= 1000
-      fps := frames
-      debug("FPS: ", udec(fps), 13, 10)
-      frames := 0
-      start_time := getms()
+      ' Update FPS every second
+      if (getms() - start_time) >= MS_PER_SECOND
+        fps := frames
+        debug("FPS: ", udec(fps), 13, 10)
+        frames := 0
+        start_time := getms()
 
-      ' Change pattern slightly
-      repeat idx from 0 to 63
-        sensor_values[idx] := (sensor_values[idx] + 10) & $3FF
+        ' Change pattern slightly
+        repeat idx from 0 to SENSORS_PER_FRAME - 1
+          sensor_values[idx] := (sensor_values[idx] + PATTERN_INCREMENT) & PATTERN_MASK

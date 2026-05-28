@@ -1,5 +1,15 @@
-'' isp_oled_driver.spin2 - Low-level OLED Display Driver
-'' Hardware interface for 128x128 SPI OLED display
+'' =================================================================================================
+''
+''   File....... isp_oled_driver_bitbang.spin2
+''   Purpose.... Bit-banged low-level driver for 128x128 SPI OLED display (early prototype variant)
+''   Authors.... Stephen M Moraco
+''               -- Copyright (c) 2025 Iron Sheep Productions, LLC
+''               -- see below for terms of use
+''   E-mail..... stephen@ironsheep.biz
+''   Started.... Oct 2025
+''   Updated.... Oct 2025
+''
+'' =================================================================================================
 ''
 '' Pin connections (Pin Group 16, non-consecutive):
 ''   P16: MOSI - SPI Data
@@ -8,7 +18,7 @@
 ''   P22: DC   - Data/Command
 ''   P23: RST  - Reset
 
-CON
+CON ' ---- Pins and SSD1351 Commands ----
   ' Pin numbers from README (testing if LA probes were swapped)
   PIN_MOSI = 16  ' P16 - DIN (MOSI) per README
   PIN_SCLK = 18  ' P18 - CLK (SCLK) per README
@@ -22,6 +32,9 @@ CON
   ' Display dimensions
   WIDTH  = 128
   HEIGHT = 128
+
+  ' Bit-banged SPI
+  SPI_BITS_PER_BYTE = 8
 
   ' SSD1351 OLED commands (from datasheet Table 9-1)
   CMD_SET_COLUMN      = $15  ' Set Column Address
@@ -53,16 +66,18 @@ CON
   CMD_MUX_RATIO       = $CA  ' Set MUX Ratio
   CMD_COMMAND_LOCK    = $FD  ' Set Command Lock
 
-VAR
+VAR ' ---- Driver State ----
   long  initialized
 
 PUB null()
-  '' Not a top-level object
+'' Not a top-level object.
+''
 
 PUB start(pin_base) : ok
-  '' Initialize the OLED display using bit-banged SPI
-  '' @param pin_base - ignored, pins are fixed at P16-P23
-  '' @returns TRUE if successful
+'' Initialize the OLED display using bit-banged SPI.
+''
+'' @param pin_base - Ignored; pins are fixed at P16-P23
+'' @returns ok - TRUE on success
 
   debug("OLED Driver: Starting initialization (BIT-BANG MODE)...", 13, 10)
   debug("  Pin assignments: MOSI=P", udec(PIN_MOSI), " SCLK=P", udec(PIN_SCLK))
@@ -87,18 +102,19 @@ PUB start(pin_base) : ok
 
   initialized := TRUE
   debug("OLED Driver: Initialization complete!", 13, 10)
-  return TRUE
+  ok := TRUE
 
 PUB stop()
-  '' Shutdown the OLED display
+'' Shut down the OLED display, turning the panel off.
+''
 
   if initialized
     display_off()
     initialized := FALSE
 
 PUB reset()
-  '' Hardware reset the display
-  '' Per datasheet: reset pulse must be at least 2us, then wait 300ms
+'' Pulse the hardware reset line per the SSD1351 datasheet timing.
+''
 
   pinlow(PIN_RST)
   waitms(10)  ' 10ms reset pulse
@@ -106,8 +122,8 @@ PUB reset()
   waitms(300)  ' Wait 300ms for VCC to stabilize per datasheet
 
 PUB init_display()
-  '' Initialize SSD1351 OLED with proper configuration sequence
-  '' Based on SSD1351 datasheet
+'' Initialize the SSD1351 OLED with the documented configuration sequence.
+''
 
   debug("    Init step 1: Unlock (FD 12)", 13, 10)
   write_cmd_data1(CMD_COMMAND_LOCK, $12)  ' Unlock basic commands
@@ -170,7 +186,8 @@ PUB init_display()
   debug("    All 19 init steps complete!", 13, 10)
 
 PUB clear()
-  '' Clear the entire display
+'' Clear the entire display to black.
+''
 
   debug("  OLED clear: Setting window and writing black pixels...", 13, 10)
   set_window(0, 0, WIDTH-1, HEIGHT-1)
@@ -187,8 +204,9 @@ PUB clear()
   debug("  OLED clear: Complete (", udec(WIDTH * HEIGHT * 2), " bytes)", 13, 10)
 
 PUB fill_screen(color)
-  '' Fill entire screen with specified color
-  '' @param color - RGB565 color value (16-bit)
+'' Fill the entire screen with the specified RGB565 color.
+''
+'' @param color - RGB565 16-bit color value
 
   set_window(0, 0, WIDTH-1, HEIGHT-1)
 
@@ -202,28 +220,40 @@ PUB fill_screen(color)
   write_data_end()
 
 PUB display_on()
-  '' Turn display on
+'' Turn the display on.
+''
 
   write_command(CMD_DISPLAY_ON)
 
 PUB display_off()
-  '' Turn display off
+'' Turn the display off.
+''
 
   write_command(CMD_DISPLAY_OFF)
 
 PUB set_window(x1, y1, x2, y2)
-  '' Set drawing window
-  '' @param x1, y1 - top-left corner
-  '' @param x2, y2 - bottom-right corner
+'' Set the drawing window (column and row ranges) on the display.
+''
+'' @param x1 - Top-left column
+'' @param y1 - Top-left row
+'' @param x2 - Bottom-right column
+'' @param y2 - Bottom-right row
 
   write_cmd_data2(CMD_SET_COLUMN, x1, x2)
   write_cmd_data2(CMD_SET_ROW, y1, y2)
 
 PUB draw_bitmap(xpos, ypos, bwidth, bheight, bitmap_ptr) | pixel_count, idx
-  '' Draw bitmap at specified position
-  '' @param xpos, ypos - top-left position
-  '' @param bwidth, bheight - bitmap dimensions
-  '' @param bitmap_ptr - pointer to RGB565 bitmap data
+'' Draw an RGB565 bitmap at the specified position.
+''
+'' @param xpos - Top-left X position
+'' @param ypos - Top-left Y position
+'' @param bwidth - Bitmap width in pixels
+'' @param bheight - Bitmap height in pixels
+'' @param bitmap_ptr - Hub pointer to RGB565 bitmap data
+
+' Local Variables:
+' @local pixel_count - Total pixels in the bitmap
+' @local idx - Byte index into the bitmap
 
   set_window(xpos, ypos, xpos + bwidth - 1, ypos + bheight - 1)
 
@@ -235,9 +265,11 @@ PUB draw_bitmap(xpos, ypos, bwidth, bheight, bitmap_ptr) | pixel_count, idx
     write_data(byte[bitmap_ptr][idx])
 
 PUB draw_pixel(px, py, color)
-  '' Draw a single pixel
-  '' @param px, py - pixel position
-  '' @param color - RGB565 color value
+'' Draw a single pixel at the specified position.
+''
+'' @param px - Pixel X position
+'' @param py - Pixel Y position
+'' @param color - RGB565 16-bit color value
 
   set_window(px, py, px, py)
 
@@ -246,51 +278,53 @@ PUB draw_pixel(px, py, color)
   write_data(color & $FF)   ' Low byte
 
 PRI write_command(cmd)
-  '' Send command byte to display
-  '' @param cmd - command byte
-  '' Note: CS is raised after command, caller must use write_data for data bytes
+' Send a single command byte to the display (CS framed around the byte).
+'
+' @param cmd - Command byte
 
   pinlow(PIN_CS)   ' Select display
   pinlow(PIN_DC)   ' Command mode
   spi_write(cmd)
   pinhigh(PIN_CS)  ' Deselect after command
 
-PRI write_data(data)
-  '' Send data byte to display
-  '' @param data - data byte
-  '' Note: For multi-byte data, CS should stay low - use write_cmd_data_start/cont/end
+PRI write_data(dataByte)
+' Send a single data byte to the display (CS framed around the byte).
+'
+' @param dataByte - Data byte to send
 
   pinlow(PIN_CS)   ' Select display
   pinhigh(PIN_DC)  ' Data mode
-  spi_write(data)
+  spi_write(dataByte)
   pinhigh(PIN_CS)  ' Deselect after data
 
 PRI write_cmd_data_start(cmd)
-  '' Start command+data transaction (keeps CS low, call write_data_cont for data)
-  '' @param cmd - command byte
+' Start a command-then-data transaction (CS stays low until write_data_end).
+'
+' @param cmd - Command byte
 
   pinlow(PIN_CS)   ' Select display for entire transaction
   pinlow(PIN_DC)   ' Command mode
   spi_write(cmd)
   pinhigh(PIN_DC)  ' Switch to data mode for subsequent bytes
 
-PRI write_data_cont(data)
-  '' Send data byte in continuous transaction (CS stays low)
-  '' @param data - data byte
-  '' Must be called after write_cmd_data_start
+PRI write_data_cont(dataByte)
+' Send a data byte in a continuous transaction; CS must already be low.
+'
+' @param dataByte - Data byte to send
 
-  spi_write(data)
+  spi_write(dataByte)
 
 PRI write_data_end()
-  '' End continuous data transaction
-  '' Must be called after write_cmd_data_start/write_data_cont
+' End a continuous data transaction by raising CS.
+'
 
   pinhigh(PIN_CS)  ' Deselect after transaction
 
 PRI write_cmd_data1(cmd, data1)
-  '' Send command with one data byte (keeps CS low for entire transaction)
-  '' @param cmd - command byte
-  '' @param data1 - data byte
+' Send a command with one data byte in a single CS-framed transaction.
+'
+' @param cmd - Command byte
+' @param data1 - Data byte to follow the command
 
   pinlow(PIN_CS)   ' Select display for entire transaction
 
@@ -303,9 +337,11 @@ PRI write_cmd_data1(cmd, data1)
   pinhigh(PIN_CS)  ' Deselect after transaction
 
 PRI write_cmd_data2(cmd, data1, data2)
-  '' Send command with two data bytes (keeps CS low for entire transaction)
-  '' @param cmd - command byte
-  '' @param data1, data2 - data bytes
+' Send a command with two data bytes in a single CS-framed transaction.
+'
+' @param cmd - Command byte
+' @param data1 - First data byte
+' @param data2 - Second data byte
 
   pinlow(PIN_CS)   ' Select display for entire transaction
 
@@ -319,9 +355,12 @@ PRI write_cmd_data2(cmd, data1, data2)
   pinhigh(PIN_CS)  ' Deselect after transaction
 
 PRI write_cmd_data3(cmd, data1, data2, data3)
-  '' Send command with three data bytes (keeps CS low for entire transaction)
-  '' @param cmd - command byte
-  '' @param data1, data2, data3 - data bytes
+' Send a command with three data bytes in a single CS-framed transaction.
+'
+' @param cmd - Command byte
+' @param data1 - First data byte
+' @param data2 - Second data byte
+' @param data3 - Third data byte
 
   pinlow(PIN_CS)   ' Select display for entire transaction
 
@@ -335,17 +374,20 @@ PRI write_cmd_data3(cmd, data1, data2, data3)
 
   pinhigh(PIN_CS)  ' Deselect after transaction
 
-PRI spi_write(value) | bit_mask
-  '' Send byte via bit-banged SPI (MSB first, Mode 0)
-  '' @param value - byte to send
-  '' Mode 0: CPOL=0 (clock idle low), CPHA=0 (sample on rising edge)
+PRI spi_write(spiByte) | bit_mask
+' Send one byte via bit-banged SPI (MSB first, Mode 0).
+'
+' @param spiByte - Byte to send
+
+' Local Variables:
+' @local bit_mask - Walking bit mask used to extract each bit MSB-first
 
   ' Send 8 bits, MSB first
   bit_mask := $80  ' Start with MSB
 
-  repeat 8
+  repeat SPI_BITS_PER_BYTE
     ' Set data bit on MOSI (while clock is low)
-    if (value & bit_mask)
+    if (spiByte & bit_mask)
       pinhigh(PIN_MOSI)
     else
       pinlow(PIN_MOSI)

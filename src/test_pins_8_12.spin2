@@ -1,14 +1,46 @@
 '' =================================================================================================
+''
 ''   File....... test_pins_8_12.spin2
-''   Purpose.... Binary counter on P8-P12 for logic analyzer identification
-''   Author..... Stephen M Moraco
+''   Purpose.... Drive a binary counter on P8-P12 to identify channels on a logic analyzer
+''   Authors.... Stephen M Moraco
+''               -- Copyright (c) 2025 Iron Sheep Productions, LLC
+''               -- see below for terms of use
+''   E-mail..... stephen@ironsheep.biz
 ''   Started.... Jan 2025
+''   Updated.... Oct 2025
+''
 '' =================================================================================================
 
-CON
+CON ' ---- Clock Setup ----
     _clkfreq = 200_000_000
 
+    ' Pins under test (P8..P12 = CS, CCLK, MISO, CLRb, SCLK)
+    PIN_CS_ABS    = 8
+    PIN_CCLK_ABS  = 9
+    PIN_MISO_ABS  = 10
+    PIN_CLRB_ABS  = 11
+    PIN_SCLK_ABS  = 12
+
+    ' Counter exercise
+    COUNTER_MAX        = 31    ' 5-bit counter top value
+    REPEAT_PASSES      = 3     ' Number of full 0..COUNTER_MAX sweeps
+    STEP_HOLD_MS       = 200   ' Hold per count value
+    SMARTPIN_DISABLE_MS = 10   ' Settle pause after disabling smart-pin modes
+
+    ' Per-bit masks for counter-to-pin extraction
+    BIT0 = $01
+    BIT1 = $02
+    BIT2 = $04
+    BIT3 = $08
+    BIT4 = $10
+
 PUB main() | count, i
+'' Drive a binary counter on P8-P12 to identify channels on a logic analyzer.
+''
+
+' Local Variables:
+' @local count - Counter index sweeping 0..COUNTER_MAX
+' @local i - Unused loop placeholder
 
     debug("================================================================================")
     debug("Binary Counter Test - P8, P9, P10, P11, P12")
@@ -23,61 +55,61 @@ PUB main() | count, i
     debug(" ")
 
     ' Configure all pins as simple outputs
-    pinf(8)         ' Disable smart pin mode
-    pinf(9)
-    pinf(10)
-    pinf(11)
-    pinf(12)
+    pinf(PIN_CS_ABS)         ' Disable smart pin mode
+    pinf(PIN_CCLK_ABS)
+    pinf(PIN_MISO_ABS)
+    pinf(PIN_CLRB_ABS)
+    pinf(PIN_SCLK_ABS)
 
-    waitms(10)      ' Small delay after disabling smart pins
+    waitms(SMARTPIN_DISABLE_MS)      ' Small delay after disabling smart pins
 
     ' Set all low initially - pinh/pinl automatically set direction to output
-    pinl(8)
-    pinl(9)
-    pinl(10)
-    pinl(11)
-    pinl(12)
+    pinl(PIN_CS_ABS)
+    pinl(PIN_CCLK_ABS)
+    pinl(PIN_MISO_ABS)
+    pinl(PIN_CLRB_ABS)
+    pinl(PIN_SCLK_ABS)
 
     debug("Starting binary count 0-31, repeating 3 times...")
     debug("Each count held for 200ms")
     debug(" ")
 
-    repeat 3
-        repeat count from 0 to 31
+    repeat REPEAT_PASSES
+        repeat count from 0 to COUNTER_MAX
             ' Output count as 5-bit binary on P8-P12
-            if (count & $01)
-                pinh(8)
+            if (count & BIT0)
+                pinh(PIN_CS_ABS)
             else
-                pinl(8)
+                pinl(PIN_CS_ABS)
 
-            if (count & $02)
-                pinh(9)
+            if (count & BIT1)
+                pinh(PIN_CCLK_ABS)
             else
-                pinl(9)
+                pinl(PIN_CCLK_ABS)
 
-            if (count & $04)
-                pinh(10)
+            if (count & BIT2)
+                pinh(PIN_MISO_ABS)
             else
-                pinl(10)
+                pinl(PIN_MISO_ABS)
 
-            if (count & $08)
-                pinh(11)
+            if (count & BIT3)
+                pinh(PIN_CLRB_ABS)
             else
-                pinl(11)
+                pinl(PIN_CLRB_ABS)
 
-            if (count & $10)
-                pinh(12)
+            if (count & BIT4)
+                pinh(PIN_SCLK_ABS)
             else
-                pinl(12)
+                pinl(PIN_SCLK_ABS)
 
-            waitms(200)
+            waitms(STEP_HOLD_MS)
 
     ' Set all low at end
-    pinl(8)
-    pinl(9)
-    pinl(10)
-    pinl(11)
-    pinl(12)
+    pinl(PIN_CS_ABS)
+    pinl(PIN_CCLK_ABS)
+    pinl(PIN_MISO_ABS)
+    pinl(PIN_CLRB_ABS)
+    pinl(PIN_SCLK_ABS)
 
     debug(" ")
     debug("Counter complete.")

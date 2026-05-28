@@ -1,7 +1,7 @@
 '' =================================================================================================
 ''   File....... isp_oled_single_cog.spin2
 ''   Purpose.... Single-COG OLED driver with integrated FIFO management
-''   Author..... Stephen M Moraco
+''   Authors.... Stephen M Moraco
 ''               -- Copyright (c) 2025 Iron Sheep Productions, LLC
 ''               -- see below for terms of use
 ''   E-mail..... stephen@ironsheep.biz
@@ -27,7 +27,8 @@
 ''
 '' =================================================================================================
 
-CON
+CON ' ---- OLED Public API ----
+  {Spin2_Doc_CON}
   ' Pin offsets from base pin (non-consecutive group)
   OFFSET_MOSI = 0   ' Base + 0 = MOSI - Smart Pin SYNC_TX
   OFFSET_SCLK = 2   ' Base + 2 = SCLK - Smart Pin PULSE
@@ -48,15 +49,25 @@ CON
   ROW_OFFSET = -32     ' Shift left by 2 cells (2 * 16 pixels) - hardware characteristic
 
   ' Sensor grid configuration
-  SENSOR_GRID_SIZE = 8
+  SENSOR_GRID_SIZE  = 8
+  SENSORS_PER_FRAME = SENSOR_GRID_SIZE * SENSOR_GRID_SIZE  ' 64 cells per frame
   CELL_WIDTH  = WIDTH / SENSOR_GRID_SIZE    ' 16 pixels per cell
   CELL_HEIGHT = HEIGHT / SENSOR_GRID_SIZE   ' 16 pixels per cell
+  PIXELS_PER_CELL  = CELL_WIDTH * CELL_HEIGHT  ' 256 pixels per cell (16x16)
+
+  ' Color LUT: one entry per 12-bit display intensity index
+  COLOR_LUT_SIZE        = 4096
+  COLOR_LUT_INDEX_MAX   = COLOR_LUT_SIZE - 1
+  COLOR_LUT_CHECK_STEP  = 500       ' Periodic FIFO integrity check stride
+
+  ' Frame-rate measurement reporting cadence (used by display_frame timing)
+  TIMING_REPORT_FRAMES  = 6
 
   ' Sensor value calibration - symmetric scaling for equal red/green intensity
   ' See DOCs/MagSensor-Color-Mapping-Specification.md for details
   ' Full ADC range is 0-65535, but we use symmetric color range for balanced display
+  ' sensor.SENSOR_MID is owned by sensor (isp_tile_sensor) - reference via sensor.sensor.SENSOR_MID
   SENSOR_MIN = 0          ' ADC minimum (theoretical full negative saturation)
-  SENSOR_MID = 20500      ' Zero field baseline (observed neutral point)
   SENSOR_MAX = 65535      ' ADC maximum (theoretical full positive saturation)
   SENSOR_RANGE = 65535    ' Full ADC range for LUT scaling
   ' Use symmetric color range: same scaling for both red and green
@@ -71,9 +82,9 @@ CON
 
   ' Display orientation (based on ribbon connector position)
   ORIENTATION_0   = 0  ' Ribbon at BOTTOM (hardware default)
-  ORIENTATION_90  = 1  ' Ribbon at LEFT (display rotated 90° clockwise)
-  ORIENTATION_180 = 2  ' Ribbon at TOP (display rotated 180°)
-  ORIENTATION_270 = 3  ' Ribbon at RIGHT (display rotated 270° clockwise)
+  ORIENTATION_90  = 1  ' Ribbon at LEFT (display rotated 90 deg clockwise)
+  ORIENTATION_180 = 2  ' Ribbon at TOP (display rotated 180 deg)
+  ORIENTATION_270 = 3  ' Ribbon at RIGHT (display rotated 270 deg clockwise)
 
   DEFAULT_ORIENTATION = ORIENTATION_90  ' Ribbon LEFT (your hardware configuration)
 
@@ -102,21 +113,21 @@ CON
   CMD_MUX_RATIO       = $CA  ' Set MUX Ratio
   CMD_COMMAND_LOCK    = $FD  ' Set Command Lock
 
-  ' Multi-resolution display modes (future: 8x8 → 16x16 → 32x32 interpolation)
+  ' Multi-resolution display modes (future: 8x8 -> 16x16 -> 32x32 interpolation)
   ' Sensor data always 8x8; interpolator expands for higher resolution display
   DISPLAY_MODE_8X8  = 0   ' Direct sensor values (64 cells)
   DISPLAY_MODE_16X16 = 1  ' 2x interpolated (256 cells)
   DISPLAY_MODE_32X32 = 2  ' 4x interpolated (1024 cells)
 
-OBJ
+OBJ ' ---- Subsystem Objects ----
   fifo : "isp_frame_fifo_manager"
   stack_check : "isp_stack_check"  ' Stack overflow detection utility
   sensor : "isp_tile_sensor"       ' Sensor interface (for stuck pixel detection)
 
-CON { stack configuration }
+CON ' ---- Stack Configuration ----
   OLED_STACK_SIZE_LONGS = 128      ' Stack size for OLED display COG (increased from 64 - deep call chains)
 
-VAR
+VAR ' ---- OLED State ----
   LONG  cog_id            ' COG ID (-1 = not running)
   LONG  frame_count       ' Total frames displayed
   LONG  orientation       ' Current display orientation (0-3)
@@ -147,12 +158,12 @@ VAR
   ' Pre-computed at init based on orientation
   WORD  cell_origin_lut[64]
 
-DAT { OLED display COG stack with overflow detection }
+DAT ' ---- COG Stack ----
   ' Stack for OLED COG - placed in DAT with sentinel mark for overflow detection
   display_cog_stack   LONG    0[OLED_STACK_SIZE_LONGS]
   display_stack_mark  LONG    stack_check.DO_NOT_WRITE_MARK   ' Sentinel - overflow if overwritten
 
-DAT
+DAT ' ---- Orientation Remap Table ----
   ' Remap register values for each orientation (Corrected mapping - Nov 2025)
   ' Bit 2=0 (RGB mode) because software already converts to BGR565
   ' Mapping ensures (0,0) appears at correct corner for each ribbon position
@@ -162,15 +173,16 @@ DAT
                 BYTE  $71   ' ORIENTATION_270: Ribbon RIGHT, (0,0) at bottom-right
 
 PUB null()
-'' This is not a top-level object
-'' @returns nothing - placeholder method for non-top-level object
+'' This is not a top-level object.
+''
+
   cog_id := -1
 
-PUB init(oled_base_pin) : success
-'' Initialize OLED hardware ONLY (no background COG)
-'' Use this for driver testing with display_frame()
-'' @param oled_base_pin - base pin for OLED interface (typically 16)
-'' @returns TRUE if successful
+PUB init(oled_base_pin) : status
+'' Initialize OLED hardware only (no background COG); use with display_frame() for tests.
+''
+'' @param oled_base_pin - Base pin for the OLED SPI interface
+'' @returns status - TRUE on success
 
   cog_id := -1
   frame_count := 0
@@ -194,78 +206,83 @@ PUB init(oled_base_pin) : success
   init_cell_origin_lut()
   debug("OLED: Hardware ready", 13, 10)
 
-  return TRUE
+  status := TRUE
 
-PUB start(oled_base_pin, oled_orientation) : success
-'' Start the single-COG OLED driver with integrated FIFO management
-'' @param oled_base_pin - base pin for OLED interface (typically 16)
-'' @param oled_orientation - display orientation (0-3), use ORIENTATION_* constants
-'' @returns TRUE if successful, FALSE if failed to start
+PUB start(oled_base_pin, oled_orientation) : status
+'' Start the single-COG OLED driver with integrated FIFO management.
+''
+'' @param oled_base_pin - Base pin for the OLED SPI interface
+'' @param oled_orientation - Display orientation index (0..3); use ORIENTATION_* constants
+'' @returns status - TRUE if successful, FALSE if failed to start
 
   ' CRITICAL: Initialize cog_id first (defaults to 0, needs to be -1)
   if cog_id == 0
     cog_id := -1
 
   if cog_id >= 0
-    return TRUE  ' Already running
+    status := TRUE  ' Already running
+  else
+    ' Initialize variables
+    frame_count := 0
+    orientation := oled_orientation   ' Set orientation BEFORE launching COG
+    base_pin := oled_base_pin
 
-  ' Initialize variables
-  frame_count := 0
-  orientation := oled_orientation   ' Set orientation BEFORE launching COG
-  base_pin := oled_base_pin
+    ' Calculate pin numbers from base
+    pin_mosi := base_pin + OFFSET_MOSI
+    pin_sclk := base_pin + OFFSET_SCLK
+    pin_cs   := base_pin + OFFSET_CS
+    pin_dc   := base_pin + OFFSET_DC
+    pin_rst  := base_pin + OFFSET_RST
 
-  ' Calculate pin numbers from base
-  pin_mosi := base_pin + OFFSET_MOSI
-  pin_sclk := base_pin + OFFSET_SCLK
-  pin_cs   := base_pin + OFFSET_CS
-  pin_dc   := base_pin + OFFSET_DC
-  pin_rst  := base_pin + OFFSET_RST
+    debug("OLED Single-COG: Starting on pin group ", udec(base_pin), "...", 13, 10)
 
-  debug("OLED Single-COG: Starting on pin group ", udec(base_pin), "...", 13, 10)
+    ' Prepare stack for overflow detection
+    stack_check.prepStackForCheck(@display_cog_stack, OLED_STACK_SIZE_LONGS)
 
-  ' Prepare stack for overflow detection
-  stack_check.prepStackForCheck(@display_cog_stack, OLED_STACK_SIZE_LONGS)
+    ' Start background COG - it will initialize its own hardware
+    debug("OLED Single-COG: Launching display COG...", 13, 10)
+    cog_id := cogspin(NEWCOG, display_loop(), @display_cog_stack)
 
-  ' Start background COG - it will initialize its own hardware
-  debug("OLED Single-COG: Launching display COG...", 13, 10)
-  cog_id := cogspin(NEWCOG, display_loop(), @display_cog_stack)
-
-  if cog_id < 0
-    debug("OLED Single-COG: ERROR - COG failed to start!", 13, 10)
-    return FALSE
-
-  debug("OLED Single-COG: COG ", udec(cog_id), " started successfully", 13, 10)
-  return TRUE
+    if cog_id < 0
+      debug("OLED Single-COG: ERROR - COG failed to start!", 13, 10)
+      status := FALSE
+    else
+      debug("OLED Single-COG: COG ", udec(cog_id), " started successfully", 13, 10)
+      status := TRUE
 
 PUB stop()
-'' Stop the OLED driver and terminate background cog operation
-'' @returns nothing - stops all operations
+'' Stop the OLED driver and terminate the background cog.
+''
 
   if cog_id >= 0 and cog_id <= 7
     cogstop(cog_id)
     cog_id := -1
 
 PUB set_orientation(new_orientation)
-'' Set display orientation for panel mounting flexibility
-'' @param new_orientation - ORIENTATION_0 (0), ORIENTATION_90 (1), ORIENTATION_180 (2), or ORIENTATION_270 (3)
-'' @returns nothing - updates display orientation
+'' Set display orientation for panel mounting flexibility.
+''
+'' @param new_orientation - ORIENTATION_0/90/180/270
 
   if new_orientation >= 0 and new_orientation <= 3
     orientation := new_orientation
 
 PUB get_frame_count() : count
-'' Get total number of frames displayed
-'' @returns frame count as LONG
+'' Get the total number of frames displayed.
+''
+'' @returns count - Total frame count
 
-  return frame_count
+  count := frame_count
 
 PUB get_timing_stats(last_us_ptr, min_us_ptr, max_us_ptr, avg_us_ptr) | avg_cycles
-'' Get frame timing statistics
-'' @param last_us_ptr - pointer to receive last frame time in microseconds
-'' @param min_us_ptr - pointer to receive minimum frame time in microseconds
-'' @param max_us_ptr - pointer to receive maximum frame time in microseconds
-'' @param avg_us_ptr - pointer to receive average frame time in microseconds
-'' @returns nothing - writes statistics to provided pointers
+'' Get frame timing statistics, writing each metric to its caller-provided pointer.
+''
+'' @param last_us_ptr - Hub pointer to receive last frame time in microseconds
+'' @param min_us_ptr - Hub pointer to receive minimum frame time in microseconds
+'' @param max_us_ptr - Hub pointer to receive maximum frame time in microseconds
+'' @param avg_us_ptr - Hub pointer to receive average frame time in microseconds
+
+' Local Variables:
+' @local avg_cycles - Reserved scratch (unused; running average not yet computed)
 
   if last_us_ptr
     LONG[last_us_ptr] := last_frame_cycles / 250
@@ -277,25 +294,37 @@ PUB get_timing_stats(last_us_ptr, min_us_ptr, max_us_ptr, avg_us_ptr) | avg_cycl
     ' Note: Could add running average if needed, for now just return last
     LONG[avg_us_ptr] := last_frame_cycles / 250
 
-PUB display_frame(framePtr) | row, col, sensor_idx, value, color, x, y, px, py, start_cycles, end_cycles, elapsed_cycles
-'' Display a single frame to OLED (for testing - no FIFO, no background COG)
-'' @param framePtr - pointer to 64-WORD sensor frame buffer
-'' @returns nothing - renders frame and returns immediately
+PUB display_frame(framePtr) | row, col, sensor_idx, sensorVal, color, x, y, px, py, start_cycles, end_cycles, elapsed_cycles
+'' Display a single frame to the OLED (test path - no FIFO, no background COG).
 ''
-'' USE THIS FOR DRIVER TESTING - bypasses all FIFO/COG complexity
+'' @param framePtr - Hub pointer to the 64-WORD sensor frame buffer
+
+' Local Variables:
+' @local row - Row coordinate within the 8x8 sensor grid
+' @local col - Column coordinate within the 8x8 sensor grid
+' @local sensor_idx - Linear cell index into the frame buffer
+' @local sensorVal - Sensor value for the current cell
+' @local color - RGB565 cell color
+' @local x - Display X position of the cell top-left
+' @local y - Display Y position of the cell top-left
+' @local px - Reserved pixel X (unused)
+' @local py - Reserved pixel Y (unused)
+' @local start_cycles - CT timer value at frame start
+' @local end_cycles - CT timer value at frame end
+' @local elapsed_cycles - Elapsed cycles for the frame
 
   ' Start timing measurement
   start_cycles := GETCT()
 
   ' Render 8x8 sensor grid to 128x128 display
   ' Each sensor cell = 16x16 pixels
-  repeat row from 0 to 7
-    repeat col from 0 to 7
+  repeat row from 0 to SENSOR_GRID_SIZE - 1
+    repeat col from 0 to SENSOR_GRID_SIZE - 1
       ' Calculate sensor index in frame buffer
-      sensor_idx := (row * 8) + col
+      sensor_idx := (row * SENSOR_GRID_SIZE) + col
 
       ' Read sensor value (WORD)
-      value := WORD[framePtr][sensor_idx]
+      sensorVal := WORD[framePtr][sensor_idx]
 
       ' Check if this sensor is stuck (detected during calibration)
       ' Stuck sensors show as bright magenta to indicate non-operational
@@ -303,7 +332,7 @@ PUB display_frame(framePtr) | row, col, sensor_idx, value, color, x, y, px, py, 
         color := STUCK_PIXEL_COLOR
       else
         ' Convert sensor value to color (uses unified formula internally)
-        color := value_to_color(value, SENSOR_MIN, SENSOR_MAX)
+        color := value_to_color(sensorVal, SENSOR_MIN, SENSOR_MAX)
 
       ' Calculate pixel position with orientation-specific coordinate transformation
       transform_coordinates(row, col, @x, @y)
@@ -318,7 +347,7 @@ PUB display_frame(framePtr) | row, col, sensor_idx, value, color, x, y, px, py, 
 
       ' Send pixels in row-major order (row by row, not column by column)
       ' Optimize: send color bytes with minimal waiting
-      repeat 256  ' 16x16 pixels, unrolled loop
+      repeat PIXELS_PER_CELL  ' 16x16 pixels, unrolled loop
         spi_write_fast(color >> 8)
         spi_write_fast(color & $FF)
 
@@ -343,8 +372,8 @@ PUB display_frame(framePtr) | row, col, sensor_idx, value, color, x, y, px, py, 
 
   total_frames_timed++
 
-  ' Report timing after 6th frame (for test programs that only display 6 frames)
-  if total_frames_timed == 6
+  ' Report timing after Nth frame (for test programs that only display N frames)
+  if total_frames_timed == TIMING_REPORT_FRAMES
     ' Calculate timing in microseconds and frames per second
     ' At 250 MHz: 1 cycle = 4 ns, so cycles / 250 = microseconds
     debug("OLED: Frame timing summary (6 frames)", 13, 10)
@@ -353,11 +382,14 @@ PUB display_frame(framePtr) | row, col, sensor_idx, value, color, x, y, px, py, 
     debug("  Max: ", udec(max_frame_cycles / 250), " us = ", udec(250_000_000 / max_frame_cycles), " fps", 13, 10)
 
 PUB display_frame_fast(framePtr) | start_cycles, end_cycles, elapsed_cycles
-'' Display a frame using optimized two-phase approach:
-''   Phase 1: Pre-render sensor data to 128x128 pixel buffer (Spin2)
-''   Phase 2: Stream entire buffer to display via PASM with events
-'' @param framePtr - pointer to 64-WORD sensor frame buffer
-'' @returns nothing - renders frame and returns immediately
+'' Display a frame via the optimized two-phase pre-render + PASM stream path.
+''
+'' @param framePtr - Hub pointer to the 64-WORD sensor frame buffer
+
+' Local Variables:
+' @local start_cycles - CT timer value at frame start
+' @local end_cycles - CT timer value at frame end
+' @local elapsed_cycles - Elapsed cycles for the frame
 
   ' Start timing measurement
   start_cycles := GETCT()
@@ -400,12 +432,22 @@ PUB display_frame_fast(framePtr) | start_cycles, end_cycles, elapsed_cycles
   total_frames_timed++
 
 PRI render_to_pixel_buffer(framePtr) | frame_ptr, lut_ptr, origin_lut_ptr, buf_ptr, cell_count, row_stride, sensor_val, color_val, cell_origin, row_count, row_ptr
-'' Pre-render sensor frame to 128x128 pixel buffer with all transformations
-'' @param framePtr - pointer to 64-WORD sensor frame buffer
-'' @returns nothing - fills pixel_buffer with RGB565 data ready for streaming
-''
-'' PASM optimized: Uses pre-computed cell origin LUT and color LUT
-'' Parameterized for future 32x32 support (change CELL_WIDTH/HEIGHT and LUT size)
+' Pre-render the sensor frame into the 128x128 pixel buffer via inline PASM.
+'
+' @param framePtr - Hub pointer to the 64-WORD sensor frame buffer
+
+' Local Variables:
+' @local frame_ptr - Local copy of framePtr for inline PASM
+' @local lut_ptr - Hub pointer to the color LUT
+' @local origin_lut_ptr - Hub pointer to the cell-origin LUT
+' @local buf_ptr - Hub pointer to the pixel buffer
+' @local cell_count - Number of cells to process (64)
+' @local row_stride - Bytes per pixel-buffer row (128*2)
+' @local sensor_val - Working sensor value / LUT index
+' @local color_val - RGB565 color for the current cell
+' @local cell_origin - Hub byte address of the current cell's top-left pixel
+' @local row_count - Per-cell row counter for the inner loop
+' @local row_ptr - Walking byte pointer through the current row
 
   frame_ptr := framePtr
   lut_ptr := @color_lut
@@ -525,12 +567,18 @@ PRI render_to_pixel_buffer(framePtr) | frame_ptr, lut_ptr, origin_lut_ptr, buf_p
   END
 
 PRI get_cell_origin(row, col, px_ptr, py_ptr) | temp_row, temp_col, px, py
-'' Calculate pixel buffer origin for a sensor cell based on orientation
-'' @param row - sensor row (0-7)
-'' @param col - sensor column (0-7)
-'' @param px_ptr - pointer to receive x pixel coordinate
-'' @param py_ptr - pointer to receive y pixel coordinate
-'' @returns nothing - writes coordinates to pointers
+' Calculate pixel-buffer origin for a sensor cell based on orientation.
+'
+' @param row - Sensor row (0..7)
+' @param col - Sensor column (0..7)
+' @param px_ptr - Hub pointer to receive the X pixel coordinate
+' @param py_ptr - Hub pointer to receive the Y pixel coordinate
+
+' Local Variables:
+' @local temp_row - Stage-1 transformed row index
+' @local temp_col - Stage-1 transformed column index
+' @local px - Computed X pixel coordinate
+' @local py - Computed Y pixel coordinate
 
   ' Stage 1: Transform from sensor layout to display-normal layout
   ' Sensor data appears rotated 90 left and horizontally mirrored
@@ -563,10 +611,18 @@ PRI get_cell_origin(row, col, px_ptr, py_ptr) | temp_row, temp_col, px, py
   LONG[py_ptr] := py
 
 PRI stream_pixel_buffer() | buf_ptr, pixel_count, mosi_pin, sclk_pin, cs_pin, dc_pin, pixel_val, byte_val
-'' Stream entire pixel buffer to OLED via inline PASM with events
-'' Uses waitse1 for efficient waiting instead of polling
-'' Minimizes gap: akpin+wypin immediately after waitse1
-'' @returns nothing - transmits all 32,768 bytes to display
+' Stream the entire pixel buffer to the OLED via inline PASM with events.
+'
+
+' Local Variables:
+' @local buf_ptr - Hub pointer to the pixel buffer
+' @local pixel_count - Total pixels to stream (16384)
+' @local mosi_pin - MOSI pin number
+' @local sclk_pin - SCLK pin number
+' @local cs_pin - Chip-select pin number
+' @local dc_pin - Data/command pin number
+' @local pixel_val - Current 16-bit pixel value
+' @local byte_val - Current byte staged for the MOSI shifter
 
   ' Copy pin numbers to local variables for PASM access
   buf_ptr := @pixel_buffer
@@ -625,9 +681,12 @@ PRI stream_pixel_buffer() | buf_ptr, pixel_count, mosi_pin, sclk_pin, cs_pin, dc
 
   END
 
-PRI init_hardware() | clk_period, temp, i
-'' Initialize OLED hardware (GPIO pins, Smart Pins, display controller)
-'' @returns nothing - performs hardware setup
+PRI init_hardware() | clk_period
+' Initialize OLED hardware (GPIO pins, Smart Pins, display controller).
+'
+
+' Local Variables:
+' @local clk_period - SCLK period in sysclks for the SPI pulse generator
 
   debug("OLED Single-COG: Initializing hardware...", 13, 10)
 
@@ -662,73 +721,86 @@ PRI init_hardware() | clk_period, temp, i
 
   debug("  Hardware initialization complete", 13, 10)
 
-PRI init_color_lut() | i, sensor_val, r, g, b, color, start_ms, corruption_idx, intensity, linear
-'' Build color lookup table mapping 12-bit LUT indices to RGB565 colors
-'' LUT index maps to full ADC range: index 0 = ADC 0, index 4095 = ADC 65535
-'' Uses perceptually uniform gradient with gamma correction
-'' Color gradient: Red (negative) -> Dark Gray (neutral) -> Green (positive)
-'' Matches HDMI color scheme for consistent display
-''
-'' FIX (2025-12-26): Removed gray_fade to eliminate banding artifact.
-'' See DOCs/Visualization-Theory-of-Operations.md for details.
+PRI init_color_lut() | i, sensor_val, redCh, greenCh, blueCh, color, start_ms, corruption_idx, intensity, linear
+' Build the 4096-entry color LUT mapping 12-bit indices to RGB565 colors.
+'
+
+' Local Variables:
+' @local i - LUT index 0..COLOR_LUT_INDEX_MAX
+' @local sensor_val - Sensor value derived from the index
+' @local redCh - Red channel value 0..255
+' @local greenCh - Green channel value 0..255
+' @local blueCh - Blue channel value 0..255
+' @local color - Packed BGR565 color
+' @local start_ms - Millisecond timestamp at LUT build start
+' @local corruption_idx - FIFO freeList corruption index (-1 if clean)
+' @local intensity - Gamma-corrected color intensity
+' @local linear - Linear pre-gamma intensity value
 
   debug("  Building color LUT (4096 entries, gamma-corrected)...", 13, 10)
-  debug("  color_lut addr=", uhex_long(@color_lut), " size=", udec(4096*2), " bytes", 13, 10)
-  debug("  Baseline at LUT index: ", udec((SENSOR_MID * 4095) / SENSOR_RANGE), 13, 10)
+  debug("  color_lut addr=", uhex_long(@color_lut), " size=", udec(COLOR_LUT_SIZE*2), " bytes", 13, 10)
+  debug("  Baseline at LUT index: ", udec((sensor.SENSOR_MID * COLOR_LUT_INDEX_MAX) / SENSOR_RANGE), 13, 10)
   start_ms := getms()
 
-  repeat i from 0 to 4095
-    ' WATCHPOINT: Check FIFO integrity every 500 iterations
-    if (i // 500) == 0
+  repeat i from 0 to COLOR_LUT_INDEX_MAX
+    ' WATCHPOINT: Check FIFO integrity every COLOR_LUT_CHECK_STEP iterations
+    if (i // COLOR_LUT_CHECK_STEP) == 0
       corruption_idx := fifo.checkFreeListIntegrity()
       if corruption_idx >= 0
         debug("*** OLED LUT: FIFO CORRUPT at i=", udec(i), " freeList[", udec(corruption_idx), "] ***", 13, 10)
 
     ' Convert LUT index back to sensor value (0-65535)
     ' index 0 = sensor 0, index 4095 = sensor 65535
-    sensor_val := (i * SENSOR_MAX) / 4095
+    sensor_val := (i * SENSOR_MAX) / COLOR_LUT_INDEX_MAX
 
     ' Apply perceptually uniform color formula with gamma correction
     ' Uses symmetric COLOR_RANGE for equal red/green intensity
     ' Gamma ~2.0 approximation: gamma = (linear * linear) / 255
-    if sensor_val < SENSOR_MID
+    if sensor_val < sensor.SENSOR_MID
       ' Negative field: Red increases from gray background
-      linear := ((SENSOR_MID - sensor_val) * 255) / COLOR_RANGE
+      linear := ((sensor.SENSOR_MID - sensor_val) * 255) / COLOR_RANGE
       linear := linear <# 255               ' Clamp if beyond expected range (saturate to max)
       intensity := (linear * linear) / 255  ' Gamma correction ~2.0
-      r := GRAY_BASE + intensity            ' Red increases from gray
-      g := GRAY_BASE
-      b := GRAY_BASE
+      redCh := GRAY_BASE + intensity        ' Red increases from gray
+      greenCh := GRAY_BASE
+      blueCh := GRAY_BASE
     else
       ' Positive field: Green increases from gray background
-      linear := ((sensor_val - SENSOR_MID) * 255) / COLOR_RANGE
+      linear := ((sensor_val - sensor.SENSOR_MID) * 255) / COLOR_RANGE
       linear := linear <# 255               ' Clamp if beyond expected range (saturate to max)
       intensity := (linear * linear) / 255  ' Gamma correction ~2.0
-      r := GRAY_BASE
-      g := GRAY_BASE + intensity            ' Green increases from gray
-      b := GRAY_BASE
+      redCh := GRAY_BASE
+      greenCh := GRAY_BASE + intensity      ' Green increases from gray
+      blueCh := GRAY_BASE
 
     ' Clamp values to valid range (shouldn't be needed but safety)
-    r := 0 #> r <# 255
-    g := 0 #> g <# 255
-    b := 0 #> b <# 255
+    redCh := 0 #> redCh <# 255
+    greenCh := 0 #> greenCh <# 255
+    blueCh := 0 #> blueCh <# 255
 
     ' Convert 8-bit RGB to 5-6-5 BGR565 format (SSD1351 expects BGR)
-    color := ((b >> 3) << 11) | ((g >> 2) << 5) | (r >> 3)
+    color := ((blueCh >> 3) << 11) | ((greenCh >> 2) << 5) | (redCh >> 3)
     color_lut[i] := color
 
   debug("  Color LUT ready (", udec(getms() - start_ms), " ms)", 13, 10)
 
 PRI init_cell_origin_lut() | row, col, sensor_idx, px, py, pixel_offset
-'' Build cell origin lookup table for fast PASM rendering
-'' Pre-computes pixel buffer offset for each sensor cell's top-left corner
-'' This allows PASM render to skip orientation math per-frame
+' Build the cell-origin LUT mapping each sensor cell to its pixel-buffer offset.
+'
+
+' Local Variables:
+' @local row - Sensor row index (0..7)
+' @local col - Sensor column index (0..7)
+' @local sensor_idx - Linear cell index into the LUT
+' @local px - Cell origin X pixel coordinate
+' @local py - Cell origin Y pixel coordinate
+' @local pixel_offset - Computed pixel-buffer WORD offset
 
   debug("  Building cell origin LUT (64 entries)...", 13, 10)
 
-  repeat row from 0 to 7
-    repeat col from 0 to 7
-      sensor_idx := (row * 8) + col
+  repeat row from 0 to SENSOR_GRID_SIZE - 1
+    repeat col from 0 to SENSOR_GRID_SIZE - 1
+      sensor_idx := (row * SENSOR_GRID_SIZE) + col
 
       ' Calculate pixel coordinates using existing orientation logic
       get_cell_origin(row, col, @px, @py)
@@ -740,8 +812,8 @@ PRI init_cell_origin_lut() | row, col, sensor_idx, px, py, pixel_offset
   debug("  Cell origin LUT ready", 13, 10)
 
 PRI init_display()
-'' Initialize SSD1351 OLED controller with optimized settings
-'' @returns nothing - sends initialization command sequence
+' Initialize the SSD1351 OLED controller with the configured settings.
+'
 
   debug("  init_display: Starting command sequence...", 13, 10)
 
@@ -835,29 +907,35 @@ PRI init_display()
   debug("  init_display: Complete", 13, 10)
 
 PRI send_command(cmd)
-'' Send command byte to OLED controller (COPIED FROM WORKING DRIVER)
-'' @param cmd - command byte
+' Send a single command byte to the OLED controller (CS framed around the byte).
+'
+' @param cmd - Command byte
 
   PINLOW(pin_cs)   ' Select display
   PINLOW(pin_dc)   ' Command mode
   spi_write(cmd)
   PINHIGH(pin_cs)  ' Deselect after command
 
-PRI send_data(data)
-'' Send data byte to OLED controller (COPIED FROM WORKING DRIVER)
-'' @param data - data byte
+PRI send_data(dataByte)
+' Send a single data byte to the OLED controller (CS framed around the byte).
+'
+' @param dataByte - Data byte to send
 
   PINLOW(pin_cs)   ' Select display
   PINHIGH(pin_dc)  ' Data mode
-  spi_write(data)
+  spi_write(dataByte)
   PINHIGH(pin_cs)  ' Deselect after data
 
-PRI spi_write(value) | reversed
-'' Send byte via Smart Pin SPI using inline REV instruction
-'' @param value - byte to send
+PRI spi_write(spiByte) | reversed
+' Send one byte via Smart Pin SPI using an inline REV bit-reverse.
+'
+' @param spiByte - Byte to send
+
+' Local Variables:
+' @local reversed - Bit-reversed value loaded into the MOSI shifter
 
   ' Bit-reverse the value inline (replaces LUT lookup)
-  reversed := (value & $FF) << 24
+  reversed := (spiByte & $FF) << 24
   reversed REV= 31
 
   ' Load bit-reversed value
@@ -869,16 +947,19 @@ PRI spi_write(value) | reversed
   ' Wait for transmission complete
   repeat until PINR(pin_sclk)
 
-PRI spi_write_fast(value) | reversed
-'' Send byte via Smart Pin SPI - OPTIMIZED (no wait between consecutive bytes)
-'' @param value - byte to send
-'' NOTE: Caller must wait for final transmission to complete
+PRI spi_write_fast(spiByte) | reversed
+' Optimized SPI byte send that returns before the byte finishes (pipelined).
+'
+' @param spiByte - Byte to send
+
+' Local Variables:
+' @local reversed - Bit-reversed value loaded into the MOSI shifter
 
   ' Wait for previous transmission to complete before loading new data
   repeat until PINR(pin_sclk)
 
   ' Bit-reverse the value inline (replaces LUT lookup)
-  reversed := (value & $FF) << 24
+  reversed := (spiByte & $FF) << 24
   reversed REV= 31
 
   ' Load bit-reversed value
@@ -890,12 +971,12 @@ PRI spi_write_fast(value) | reversed
   ' Return immediately without waiting - allows pipelining
 
 PRI set_window(x1, y1, x2, y2)
-'' Set active drawing window on OLED display
-'' @param x1 - starting column (0-127)
-'' @param y1 - starting row (0-127)
-'' @param x2 - ending column (0-127)
-'' @param y2 - ending row (0-127)
-'' @returns nothing - configures drawing area
+' Set the active drawing window on the OLED display (offsets applied).
+'
+' @param x1 - Starting column (0..127)
+' @param y1 - Starting row (0..127)
+' @param x2 - Ending column (0..127)
+' @param y2 - Ending row (0..127)
 
   send_command(CMD_SET_COLUMN)
   send_data(x1 + COLUMN_OFFSET)
@@ -908,12 +989,12 @@ PRI set_window(x1, y1, x2, y2)
   send_command(CMD_WRITE_RAM)
 
 PRI set_window_raw(x1, y1, x2, y2)
-'' Set active drawing window without applying offsets
-'' Used for full-screen streaming where pixel buffer is pre-rendered in display order
-'' @param x1 - starting column (0-127)
-'' @param y1 - starting row (0-127)
-'' @param x2 - ending column (0-127)
-'' @param y2 - ending row (0-127)
+' Set the active drawing window without applying offsets (full-screen streaming).
+'
+' @param x1 - Starting column (0..127)
+' @param y1 - Starting row (0..127)
+' @param x2 - Ending column (0..127)
+' @param y2 - Ending row (0..127)
 
   send_command(CMD_SET_COLUMN)
   send_data(x1)
@@ -926,22 +1007,24 @@ PRI set_window_raw(x1, y1, x2, y2)
   send_command(CMD_WRITE_RAM)
 
 PRI transform_coordinates(row, col, x_ptr, y_ptr) | x, y, temp_row, temp_col
-'' Transform buffer coordinates (row, col) to display coordinates (x, y) based on orientation
-'' @param row - buffer row (0-7)
-'' @param col - buffer column (0-7)
-'' @param x_ptr - pointer to x coordinate output
-'' @param y_ptr - pointer to y coordinate output
-'' @returns nothing - writes x, y to pointers
-''
-'' Two-stage transformation:
-''   Stage 1: Sensor layout to display layout (rotate 90° right + un-mirror)
-''   Stage 2: Orientation-specific positioning based on ribbon location
+' Transform buffer coordinates (row, col) to display coordinates (x, y) per orientation.
+'
+' @param row - Buffer row (0..7)
+' @param col - Buffer column (0..7)
+' @param x_ptr - Hub pointer to receive the X coordinate
+' @param y_ptr - Hub pointer to receive the Y coordinate
+
+' Local Variables:
+' @local x - Computed X display coordinate
+' @local y - Computed Y display coordinate
+' @local temp_row - Stage-1 transformed row index
+' @local temp_col - Stage-1 transformed column index
 
   ' STAGE 1: Transform from sensor data layout to display-normal layout
-  ' Sensor data appears rotated 90° left and horizontally mirrored relative to display
-  ' So we rotate 90° right and un-mirror to normalize
-  temp_row := col          ' Rotate 90° right: old col becomes new row (no inversion)
-  temp_col := row          ' Rotate 90° right: old row becomes new col (no inversion)
+  ' Sensor data appears rotated 90 deg left and horizontally mirrored relative to display
+  ' So we rotate 90 deg right and un-mirror to normalize
+  temp_row := col          ' Rotate 90 deg right: old col becomes new row (no inversion)
+  temp_col := row          ' Rotate 90 deg right: old row becomes new col (no inversion)
 
   ' STAGE 2: Apply orientation-specific transformations
   ' These position the normalized data correctly based on ribbon location
@@ -970,52 +1053,57 @@ PRI transform_coordinates(row, col, x_ptr, y_ptr) | x, y, temp_row, temp_col
   LONG[x_ptr] := x
   LONG[y_ptr] := y
 
-PRI value_to_color(value, min_val, max_val) : color | r, g, b, intensity, linear
-'' Convert sensor value to RGB565 color using perceptually uniform gradient
-'' @param value - sensor value (0-65535)
-'' @param min_val - minimum expected value (unused, kept for API compatibility)
-'' @param max_val - maximum expected value (unused, kept for API compatibility)
-'' @returns RGB565 color (16-bit)
-''
-'' Uses gamma-corrected intensity for smooth perceptual gradient.
-'' See DOCs/Visualization-Theory-of-Operations.md for details.
-''
-'' FIX (2025-12-26): Removed gray_fade to eliminate banding artifact.
-'' FIX (2025-12-26): Use symmetric COLOR_RANGE for equal red/green intensity.
+PRI value_to_color(sensorVal, min_val, max_val) : color | redCh, greenCh, blueCh, intensity, linear
+' Convert a sensor value to a BGR565 color using a perceptually uniform gradient.
+'
+' @param sensorVal - Sensor value (0..65535)
+' @param min_val - Minimum expected value (unused; retained for API compatibility)
+' @param max_val - Maximum expected value (unused; retained for API compatibility)
+' @returns color - 16-bit BGR565 color
+
+' Local Variables:
+' @local redCh - Red channel value 0..255
+' @local greenCh - Green channel value 0..255
+' @local blueCh - Blue channel value 0..255
+' @local intensity - Gamma-corrected color intensity
+' @local linear - Linear pre-gamma intensity value
 
   ' Clamp to valid ADC range
-  value := SENSOR_MIN #> value <# SENSOR_MAX
+  sensorVal := SENSOR_MIN #> sensorVal <# SENSOR_MAX
 
   ' Apply perceptually uniform color formula with gamma correction
   ' Uses symmetric COLOR_RANGE for equal red/green intensity
-  if value < SENSOR_MID
+  if sensorVal < sensor.SENSOR_MID
     ' Negative field: Red increases from gray background
-    linear := ((SENSOR_MID - value) * 255) / COLOR_RANGE
+    linear := ((sensor.SENSOR_MID - sensorVal) * 255) / COLOR_RANGE
     linear := linear <# 255               ' Clamp if beyond expected range (saturate to max)
     intensity := (linear * linear) / 255  ' Gamma correction ~2.0
-    r := GRAY_BASE + intensity            ' Red increases from gray
-    g := GRAY_BASE
-    b := GRAY_BASE
+    redCh := GRAY_BASE + intensity        ' Red increases from gray
+    greenCh := GRAY_BASE
+    blueCh := GRAY_BASE
   else
     ' Positive field: Green increases from gray background
-    linear := ((value - SENSOR_MID) * 255) / COLOR_RANGE
+    linear := ((sensorVal - sensor.SENSOR_MID) * 255) / COLOR_RANGE
     linear := linear <# 255               ' Clamp if beyond expected range (saturate to max)
     intensity := (linear * linear) / 255  ' Gamma correction ~2.0
-    r := GRAY_BASE
-    g := GRAY_BASE + intensity            ' Green increases from gray
-    b := GRAY_BASE
+    redCh := GRAY_BASE
+    greenCh := GRAY_BASE + intensity      ' Green increases from gray
+    blueCh := GRAY_BASE
 
   ' Clamp to valid range
-  r := 0 #> r <# 255
-  g := 0 #> g <# 255
-  b := 0 #> b <# 255
+  redCh := 0 #> redCh <# 255
+  greenCh := 0 #> greenCh <# 255
+  blueCh := 0 #> blueCh <# 255
 
   ' Convert 8-bit RGB to 5-6-5 BGR565 format (SSD1351 expects BGR, not RGB)
-  color := ((b >> 3) << 11) | ((g >> 2) << 5) | (r >> 3)
+  color := ((blueCh >> 3) << 11) | ((greenCh >> 2) << 5) | (redCh >> 3)
 
 PRI display_loop() | framePtr
-'' Background COG display loop - dequeues frames and renders to OLED
-'' Runs in dedicated COG, integrates FIFO management and display rendering
+' Background COG display loop - dequeues frames and renders them to the OLED.
+'
+
+' Local Variables:
+' @local framePtr - Hub pointer to the frame buffer
 
   ' Background COG initializes its own hardware (owns its pins)
   debug("OLED Single-COG: Initializing hardware in background COG...", 13, 10)
@@ -1075,9 +1163,9 @@ PRI display_loop() | framePtr
     frame_count++
 
 PRI send_pixel_data(color)
-'' Send RGB565 pixel data (2 bytes) to OLED via SPI (USES WORKING SPI CODE)
-'' @param color - RGB565 color value (16-bit)
-'' @returns nothing - transmits high byte then low byte
+' Send one RGB565 pixel (high byte then low byte) within a single CS-framed window.
+'
+' @param color - RGB565 16-bit color value
 
   ' Keep CS low for both bytes (efficient multi-byte transaction)
   PINLOW(pin_cs)      ' Select display
@@ -1091,7 +1179,7 @@ PRI send_pixel_data(color)
 
   PINHIGH(pin_cs)     ' Deselect after both bytes
 
-CON { license }
+CON ' ---- License ----
 {{
 
  -------------------------------------------------------------------------------------------------

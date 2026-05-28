@@ -1,14 +1,34 @@
 '' =================================================================================================
+''
 ''   File....... test_p8_only.spin2
-''   Purpose.... Test P8 specifically - diagnose why it's not toggling
-''   Author..... Stephen M Moraco
+''   Purpose.... Standalone bring-up test that forces P8 to toggle in isolation for fault diagnosis
+''   Authors.... Stephen M Moraco
+''               -- Copyright (c) 2025 Iron Sheep Productions, LLC
+''               -- see below for terms of use
+''   E-mail..... stephen@ironsheep.biz
 ''   Started.... Jan 2025
+''   Updated.... May 2026
+''
 '' =================================================================================================
 
-CON
+CON ' ---- Clock Setup ----
     _clkfreq = 200_000_000
 
+    ' Pin and timing constants for P8 diagnostic
+    TEST_PIN          = 8                ' P8 (CS pin) under test
+    SMARTPIN_MODE_OFF = 0                ' wrpin mode 0 = disabled/simple I/O
+    TOGGLE_COUNT      = 10               ' Toggles per Spin2 method
+    PASM_TOGGLE_COUNT = 20               ' Toggles in the PASM2 method
+    SETTLE_MS         = 100              ' Settle pause after pin float
+    LEVEL_HOLD_MS     = 500              ' Hold per HIGH/LOW step
+    PASM_HALF_PERIOD  = 100_000_000      ' 0.5s @ 200 MHz (waitx in PASM)
+
 PUB main() | i
+'' Standalone bring-up test that forces P8 to toggle in isolation for fault diagnosis.
+''
+
+' Local Variables:
+' @local i - Reserved loop index (unused at top level)
 
     debug("================================================================================")
     debug("P8 Diagnostic Test - Force P8 to toggle")
@@ -21,31 +41,31 @@ PUB main() | i
     ' Try multiple methods to force P8 to work
 
     debug("Method 1: Using pinf() then pinl()/pinh()")
-    pinf(8)         ' Float/disable smart pin
-    waitms(100)
+    pinf(TEST_PIN)         ' Float/disable smart pin
+    waitms(SETTLE_MS)
 
-    repeat 10
+    repeat TOGGLE_COUNT
         debug("  P8 HIGH")
-        pinh(8)
-        waitms(500)
+        pinh(TEST_PIN)
+        waitms(LEVEL_HOLD_MS)
         debug("  P8 LOW")
-        pinl(8)
-        waitms(500)
+        pinl(TEST_PIN)
+        waitms(LEVEL_HOLD_MS)
 
     debug(" ")
     debug("Method 2: Using wrpin to explicitly set to simple output")
 
     ' Explicitly configure as simple digital output (mode 0)
-    wrpin(8, 0)     ' Mode 0 = disabled/simple I/O
-    pinh(8)         ' Set direction to output
+    wrpin(TEST_PIN, SMARTPIN_MODE_OFF)  ' Mode 0 = disabled/simple I/O
+    pinh(TEST_PIN)                      ' Set direction to output
 
-    repeat 10
+    repeat TOGGLE_COUNT
         debug("  P8 HIGH (via dirh/dirl)")
-        pinh(8)         ' Output high
-        waitms(500)
+        pinh(TEST_PIN)         ' Output high
+        waitms(LEVEL_HOLD_MS)
         debug("  P8 LOW (via dirh/dirl)")
-        pinl(8)         ' Output low
-        waitms(500)
+        pinl(TEST_PIN)         ' Output low
+        waitms(LEVEL_HOLD_MS)
 
     debug(" ")
     debug("Method 3: Using PASM to force the pin")
@@ -56,20 +76,25 @@ PUB main() | i
     debug("END_SESSION")
 
 PRI toggle_p8_pasm() | cycles
+' Toggle P8 a fixed number of times from inline PASM2.
+'
+
+' Local Variables:
+' @local cycles - PASM2 down-counter for djnz
 
     debug("Using PASM to toggle P8 20 times...")
 
-    cycles := 20
+    cycles := PASM_TOGGLE_COUNT
 
     org
         ' Configure P8 as output
-        drvh    #8              ' Drive P8 high (also sets direction to output)
+        drvh    #TEST_PIN              ' Drive P8 high (also sets direction to output)
 
 .loop
-        drvh    #8              ' Drive high
-        waitx   ##100_000_000   ' Wait 0.5s at 200MHz
-        drvl    #8              ' Drive low
-        waitx   ##100_000_000   ' Wait 0.5s
+        drvh    #TEST_PIN              ' Drive high
+        waitx   ##PASM_HALF_PERIOD     ' Wait 0.5s at 200MHz
+        drvl    #TEST_PIN              ' Drive low
+        waitx   ##PASM_HALF_PERIOD     ' Wait 0.5s
 
         djnz    cycles, #.loop
     end

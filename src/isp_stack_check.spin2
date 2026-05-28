@@ -1,9 +1,9 @@
 '' =================================================================================================
 ''
 ''   File....... isp_stack_check.spin2
-''   Purpose.... Utility Object Providing Stack-overflow testing
-''
-''   Authors.... Stephen M. Moraco
+''   Purpose.... Utility object providing stack-overflow detection via sentinel marks
+''   Authors.... Stephen M Moraco
+''               -- Copyright (c) 2025 Iron Sheep Productions, LLC
 ''               -- see below for terms of use
 ''   E-mail..... stephen@ironsheep.biz
 ''   Started.... Sep 2022
@@ -11,14 +11,15 @@
 ''
 '' =================================================================================================
 
-CON { ----- TEST Support ----- }
+CON ' ---- Stack Check Public API ----
+  {Spin2_Doc_CON}
 
   DO_NOT_WRITE_MARK = $addee5e5
   NOT_WRITTEN_MARK = $a5a50df0
 
   #0, TST_UNKNOWN, TST_PASS, TST_FAIL
 
-DAT
+DAT ' ---- Stack Check State ----
     rsltPass        BYTE    "pass",0
     rsltFail        BYTE    "FAIL",0
 
@@ -29,22 +30,35 @@ DAT
 
 PUB null()
 '' This is not a top level object
+''
 
 PUB prepStackForCheck(pStack, nStackLongCt)
-'' Reset all failure indicators
+'' Reset all failure indicators and seed the stack with sentinel values.
+''
+'' @param pStack - Hub pointer to the stack to instrument
+'' @param nStackLongCt - Stack size in longs
+
     pEndStackMark := @LONG[pStack][nStackLongCt]
     longfill(pStack, NOT_WRITTEN_MARK, nStackLongCt)
     LONG[pEndStackMark] := DO_NOT_WRITE_MARK
 
 PUB checkStack(pStack, nStackLongCt)
-'' Ensure didn't exceed stack size
+'' Ensure didn't exceed stack size; halt if the end sentinel was overwritten.
+''
+'' @param pStack - Hub pointer to the stack to check
+'' @param nStackLongCt - Stack size in longs
+
     pEndStackMark := @LONG[pStack][nStackLongCt]
     if LONG[pEndStackMark] <> DO_NOT_WRITE_MARK
         debug("^^^ STACK Overflow! Depth greater than ", udec(nStackLongCt),  " longs")
         lockupForAnly()
 
 PUB reportStackUse(pStack, nStackLongCt)
-'' Write stack usage to debug()
+'' Write stack usage (highest depth touched) to debug().
+''
+'' @param pStack - Hub pointer to the stack to inspect
+'' @param nStackLongCt - Stack size in longs
+
     nStkChkUsed := 0
     repeat nStkChkIdx from 0 to nStackLongCt - 1
         if LONG[pStack][nStkChkIdx] <> NOT_WRITTEN_MARK
@@ -54,7 +68,13 @@ PUB reportStackUse(pStack, nStackLongCt)
     debug("^^^ STACK used ", udec(nStkChkUsed), " of ", udec(nStackLongCt))
 
 PUB testReport(pStack, nStackLongCt, pTestId, bPassFail)
-'' Write test pass/fail to debug()
+'' Write test pass/fail to debug() along with stack usage; halt on failure.
+''
+'' @param pStack - Hub pointer to the stack to report on
+'' @param nStackLongCt - Stack size in longs
+'' @param pTestId - Hub pointer to a zero-terminated test-id string
+'' @param bPassFail - Test result (TST_PASS or TST_FAIL)
+
     pResult := (bPassFail == TST_PASS) ? @rsltPass : @rsltFail
     debug("+++ ---------")
     debug("+++ TEST [", zstr_(pTestId), "] - ", zstr_(pResult))
@@ -66,11 +86,26 @@ PUB testReport(pStack, nStackLongCt, pTestId, bPassFail)
         lockupForAnly()
 
 PUB dumpStack(pStack, nStackLongCt)
-'' Dump stack memory
+'' Dump stack memory as hex rows.
+''
+'' @param pStack - Hub pointer to the stack to dump
+'' @param nStackLongCt - Stack size in longs
+
     dbgMemDump(@"TASK Stack", pStack, (nStackLongCt + 1) * 4)
 
 PUB dbgMemDump(pMessage, pBytes, lenBytes) | rowCount, rowLen, pCurrByte, lastRowByteCount, bytesSoFar
-'' Dump rows of hex values with address preceeding
+'' Dump rows of hex values with address preceeding.
+''
+'' @param pMessage - Hub pointer to a zero-terminated label string (or 0 to skip the label)
+'' @param pBytes - Hub pointer to the bytes to dump
+'' @param lenBytes - Number of bytes to dump
+
+' Local Variables:
+' @local rowCount - Count of full 16-byte rows
+' @local rowLen - Unused length placeholder
+' @local pCurrByte - Walking pointer through the byte region
+' @local lastRowByteCount - Byte count of the trailing partial row
+' @local bytesSoFar - Bytes already emitted
 
     if pMessage
         debug("** ", zstr_(pMessage), ":")
@@ -92,17 +127,23 @@ PUB dbgMemDump(pMessage, pBytes, lenBytes) | rowCount, rowLen, pCurrByte, lastRo
         dbgMemDumpRow(pCurrByte, lastRowByteCount)
 
 PRI dbgMemDumpRow(pBytes, lenBytes)
-' emit address followed by bytes
+' Emit one row: address followed by hex bytes.
+'
+' @param pBytes - Hub pointer to the row bytes
+' @param lenBytes - Number of bytes in this row
+
     debug(" ", uhex_long_(pBytes), ": ", uhex_byte_array_(pBytes, lenBytes))
 
 PRI lockupForAnly()
-' tell that we are halting then halt (effictivly)
+' Announce halt then spin forever for post-mortem inspection.
+'
+
     debug("---- FAIL - stopping here for Analysis of above ^^^")
     repeat      ' hold here for now
 
 
 
-CON { license }
+CON ' ---- License ----
 {{
 
  -------------------------------------------------------------------------------------------------

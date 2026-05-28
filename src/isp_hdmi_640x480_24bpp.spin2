@@ -1,17 +1,23 @@
-'************************************************
-'*  ISP HDMI 640x480 32bpp Driver (RRGGBBAA)   *
-'*  Iron Sheep Productions, LLC                *
-'*  Based on original HDMI driver by RJA       *
-'*  Modified for proper VGA 640x480 @ 60Hz     *
-'*  Uses PSRAM driver                          *
-'************************************************
+'' =================================================================================================
+''
+''   File....... isp_hdmi_640x480_24bpp.spin2
+''   Purpose.... PSRAM-backed HDMI driver providing standard VGA 640x480 @ 60Hz output in 32bpp RRGGBBAA
+''   Authors.... Stephen M Moraco
+''               -- Copyright (c) 2025 Iron Sheep Productions, LLC
+''               -- see below for terms of use
+''   E-mail..... stephen@ironsheep.biz
+''   Started.... Sep 2025
+''   Updated.... Nov 2025
+''
+'' =================================================================================================
 '
+' Based on original HDMI driver by RJA.
 ' Standard VGA 640x480 @ 60Hz timing:
 '   Horizontal: 640 visible + 16 front + 96 sync + 48 back = 800 total
 '   Vertical:   480 visible + 10 front + 2 sync + 33 back = 525 total
 '   Pixel clock: 25.175 MHz (achieved with 250 MHz P2 clock / 10)
 
-CON
+CON ' ---- VGA Timing ----
 
   xpix          = 640           ' visible pixels
   ypix          = 480           ' visible lines
@@ -33,7 +39,7 @@ CON
   pin_cfg       = %10111_1000_0100_10_00000_0   'bit-dac pins for HDMI
 
 
-VAR
+VAR ' ---- Driver State ----
   cog           'cog status
 
   setup[0]      'setup set by start()
@@ -47,8 +53,12 @@ VAR
 
 
 PUB start(hdmi_base_pin, psram_command_ptr, psram_screen_base) : okay
-
-'' Start HDMI driver cog
+'' Start the HDMI driver cog with the given pin group and PSRAM framebuffer.
+''
+'' @param hdmi_base_pin - Base pin of the HDMI 8-pin group
+'' @param psram_command_ptr - Hub pointer to the PSRAM driver command/mailbox base
+'' @param psram_screen_base - PSRAM byte address of the framebuffer base
+'' @returns okay - 1..8 = cog id + 1 (success), 0 on failure
 
   stop()
 
@@ -64,23 +74,29 @@ PUB start(hdmi_base_pin, psram_command_ptr, psram_screen_base) : okay
   longfill(@pix, $FF0000FF, xpix*2)  ' Fill both line buffers with red
   debug("HDMI buffer pre-filled", 13, 10)
 
-  return cog := coginit(COGEXEC_NEW, @driver, @setup) + 1
+  cog := coginit(COGEXEC_NEW, @driver, @setup) + 1
+  okay := cog
 
 
 PUB set_screen_base(psram_screen_base)
+'' Update the PSRAM screen base address used by the running driver.
+''
+'' @param psram_screen_base - New PSRAM byte address for the framebuffer base
 
   ram_bas := psram_screen_base
 
 
 PUB wait_new_screen()
+'' Block until the driver signals it has started a new screen.
+''
 
   new_flg~
   repeat until new_flg
 
 
 PUB stop()
-
-'' Stop HDMI driver cog
+'' Stop the HDMI driver cog and release the pin group.
+''
 
   if cog
     cogstop(cog~ - 1)
@@ -89,7 +105,8 @@ PUB stop()
 '
 ' HDMI Driver
 '
-DAT             org
+DAT ' ---- HDMI Driver PASM ----
+                org
 
 driver          setq    #4-1                    'get setup
                 rdlong  setup_,ptra

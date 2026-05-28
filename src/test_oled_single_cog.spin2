@@ -1,7 +1,8 @@
 '' =================================================================================================
+''
 ''   File....... test_oled_single_cog.spin2
-''   Purpose.... Test program for single-COG OLED driver
-''   Author..... Stephen M Moraco
+''   Purpose.... Exercises the single-COG OLED driver via a sequence of six test patterns
+''   Authors.... Stephen M Moraco
 ''               -- Copyright (c) 2025 Iron Sheep Productions, LLC
 ''               -- see below for terms of use
 ''   E-mail..... stephen@ironsheep.biz
@@ -20,24 +21,43 @@
 ''
 '' =================================================================================================
 
-CON
+CON ' ---- Test Configuration ----
   _CLKFREQ = 250_000_000  ' 250 MHz system clock
 
   ' Pin assignments
   OLED_BASE_PIN = 16      ' OLED on P16-P23
 
+  ' Sensor grid configuration (8x8 test frame)
+  GRID_SIZE         = 8
+  SENSORS_PER_FRAME = GRID_SIZE * GRID_SIZE   ' 64 cells per frame
+  GRID_INDEX_MAX    = GRID_SIZE - 1           ' Last row/col index
+
   ' Test pattern values (12-bit sensor range)
   MIN_VAL = 0
   MAX_VAL = 4095
   MID_VAL = 2048
+  PATTERN_HOT       = 3000        ' "Warm" marker (TR corner)
+  PATTERN_WARM      = 3500        ' Center 2x2 marker
+  PATTERN_COOL      = 1000        ' "Cool" marker (BR corner)
 
-OBJ
+  ' Pattern sequence
+  PATTERN_COUNT     = 6           ' Number of test patterns
+  PATTERN_HOLD_SEC  = 10          ' Seconds per pattern
+  US_PER_SECOND     = 1_000_000   ' Microseconds in one second
+  STARTUP_DELAY_MS  = 2000        ' Pause before first pattern
+
+OBJ ' ---- Subsystem Objects ----
   oled : "isp_oled_single_cog"
 
-VAR
-  WORD  test_frame[64]  ' Test frame buffer (8x8 sensors)
+VAR ' ---- Test State ----
+  WORD  test_frame[SENSORS_PER_FRAME]  ' Test frame buffer (8x8 sensors)
 
 PUB main() | pattern_num
+'' Exercise the single-COG OLED driver via a cycling sequence of six test patterns.
+''
+
+' Local Variables:
+' @local pattern_num - 1-based index into the cycling pattern sequence
 
   debug("=== OLED MULTI-FRAME TEST ===", 13, 10)
   debug("Testing frame update capability with 6 distinct patterns", 13, 10)
@@ -48,138 +68,174 @@ PUB main() | pattern_num
   debug("Initializing OLED hardware...", 13, 10)
   if not oled.init(OLED_BASE_PIN)
     debug("ERROR: OLED hardware init failed!", 13, 10)
-    return
-  debug("OLED hardware initialized", 13, 10)
-  debug(" ", 13, 10)
-
-  ' Display startup message
-  debug("Starting pattern sequence in 2 seconds...", 13, 10)
-  WAITMS(2000)
-  debug(" ", 13, 10)
-
-  ' Cycle through 6 test patterns forever
-  pattern_num := 1
-  repeat
-    case pattern_num
-      1:
-        debug("Pattern 1: Corner Markers (TL=red, TR=yellow, BL=green, BR=blue)", 13, 10)
-        generate_corner_pattern()
-
-      2:
-        debug("Pattern 2: Horizontal Gradient (left=min, right=max)", 13, 10)
-        generate_horizontal_gradient()
-
-      3:
-        debug("Pattern 3: Vertical Gradient (top=min, bottom=max)", 13, 10)
-        generate_vertical_gradient()
-
-      4:
-        debug("Pattern 4: Checkerboard (alternating min/max)", 13, 10)
-        generate_checkerboard()
-
-      5:
-        debug("Pattern 5: Center Cross (bright cross on dark background)", 13, 10)
-        generate_center_cross()
-
-      6:
-        debug("Pattern 6: Diagonal Gradient (TL to BR)", 13, 10)
-        generate_diagonal_gradient()
-
-    ' Display the frame
-    debug("  Displaying frame...", 13, 10)
-    oled.display_frame(@test_frame)
-    debug("  Frame displayed successfully", 13, 10)
-
-    ' Wait 10 seconds before next pattern (use loop to avoid overflow)
-    debug("  Waiting 10 seconds...", 13, 10)
-    repeat 10
-      WAITUS(1_000_000)  ' Wait 1 second at a time (safer for large values)
-    debug("  Done waiting", 13, 10)
+  else
+    debug("OLED hardware initialized", 13, 10)
     debug(" ", 13, 10)
 
-    ' Move to next pattern (cycle 1-6)
-    pattern_num++
-    if pattern_num > 6
-      pattern_num := 1
-      debug("--- Restarting pattern sequence ---", 13, 10)
+    ' Display startup message
+    debug("Starting pattern sequence in 2 seconds...", 13, 10)
+    WAITMS(STARTUP_DELAY_MS)
+    debug(" ", 13, 10)
+
+    ' Cycle through 6 test patterns forever
+    pattern_num := 1
+    repeat
+      case pattern_num
+        1:
+          debug("Pattern 1: Corner Markers (TL=red, TR=yellow, BL=green, BR=blue)", 13, 10)
+          generate_corner_pattern()
+
+        2:
+          debug("Pattern 2: Horizontal Gradient (left=min, right=max)", 13, 10)
+          generate_horizontal_gradient()
+
+        3:
+          debug("Pattern 3: Vertical Gradient (top=min, bottom=max)", 13, 10)
+          generate_vertical_gradient()
+
+        4:
+          debug("Pattern 4: Checkerboard (alternating min/max)", 13, 10)
+          generate_checkerboard()
+
+        5:
+          debug("Pattern 5: Center Cross (bright cross on dark background)", 13, 10)
+          generate_center_cross()
+
+        6:
+          debug("Pattern 6: Diagonal Gradient (TL to BR)", 13, 10)
+          generate_diagonal_gradient()
+
+      ' Display the frame
+      debug("  Displaying frame...", 13, 10)
+      oled.display_frame(@test_frame)
+      debug("  Frame displayed successfully", 13, 10)
+
+      ' Wait PATTERN_HOLD_SEC seconds before next pattern (use loop to avoid overflow)
+      debug("  Waiting 10 seconds...", 13, 10)
+      repeat PATTERN_HOLD_SEC
+        WAITUS(US_PER_SECOND)  ' Wait 1 second at a time (safer for large values)
+      debug("  Done waiting", 13, 10)
       debug(" ", 13, 10)
 
+      ' Move to next pattern (cycle 1-PATTERN_COUNT)
+      pattern_num++
+      if pattern_num > PATTERN_COUNT
+        pattern_num := 1
+        debug("--- Restarting pattern sequence ---", 13, 10)
+        debug(" ", 13, 10)
+
 PRI generate_corner_pattern() | i
-'' Generate test pattern with distinct corner markers
-'' TL=4095, TR=3000, BL=2048, BR=1000, center=2048
+' Generate a test pattern with distinct corner markers and a center 2x2 block.
+'
+
+' Local Variables:
+' @local i - Reserved index (unused in current implementation)
 
   ' Fill with mid value
-  WORDFILL(@test_frame, MID_VAL, 64)
+  WORDFILL(@test_frame, MID_VAL, SENSORS_PER_FRAME)
 
   ' Set corners
-  test_frame[0]  := MAX_VAL  ' TL (row 0, col 0)
-  test_frame[7]  := 3000     ' TR (row 0, col 7)
-  test_frame[56] := MID_VAL  ' BL (row 7, col 0)
-  test_frame[63] := 1000     ' BR (row 7, col 7)
+  test_frame[0]  := MAX_VAL       ' TL (row 0, col 0)
+  test_frame[7]  := PATTERN_HOT   ' TR (row 0, col 7)
+  test_frame[56] := MID_VAL       ' BL (row 7, col 0)
+  test_frame[63] := PATTERN_COOL  ' BR (row 7, col 7)
 
   ' Center marker
-  test_frame[27] := 3500  ' Row 3, col 3
-  test_frame[28] := 3500  ' Row 3, col 4
-  test_frame[35] := 3500  ' Row 4, col 3
-  test_frame[36] := 3500  ' Row 4, col 4
+  test_frame[27] := PATTERN_WARM  ' Row 3, col 3
+  test_frame[28] := PATTERN_WARM  ' Row 3, col 4
+  test_frame[35] := PATTERN_WARM  ' Row 4, col 3
+  test_frame[36] := PATTERN_WARM  ' Row 4, col 4
 
-PRI generate_horizontal_gradient() | col, row, idx, value
-'' Generate horizontal gradient from left (min) to right (max)
+PRI generate_horizontal_gradient() | col, row, idx, sensorVal
+' Generate a horizontal gradient from left (min) to right (max).
+'
 
-  repeat row from 0 to 7
-    repeat col from 0 to 7
-      idx := (row * 8) + col
-      value := MIN_VAL + ((col * (MAX_VAL - MIN_VAL)) / 7)
-      test_frame[idx] := value
+' Local Variables:
+' @local col - Column coordinate (0..GRID_INDEX_MAX)
+' @local row - Row coordinate (0..GRID_INDEX_MAX)
+' @local idx - Linear cell index into the test frame
+' @local sensorVal - Computed sensor value for the current cell
 
-PRI generate_vertical_gradient() | col, row, idx, value
-'' Generate vertical gradient from top (min) to bottom (max)
+  repeat row from 0 to GRID_INDEX_MAX
+    repeat col from 0 to GRID_INDEX_MAX
+      idx := (row * GRID_SIZE) + col
+      sensorVal := MIN_VAL + ((col * (MAX_VAL - MIN_VAL)) / GRID_INDEX_MAX)
+      test_frame[idx] := sensorVal
 
-  repeat row from 0 to 7
-    repeat col from 0 to 7
-      idx := (row * 8) + col
-      value := MIN_VAL + ((row * (MAX_VAL - MIN_VAL)) / 7)
-      test_frame[idx] := value
+PRI generate_vertical_gradient() | col, row, idx, sensorVal
+' Generate a vertical gradient from top (min) to bottom (max).
+'
+
+' Local Variables:
+' @local col - Column coordinate (0..GRID_INDEX_MAX)
+' @local row - Row coordinate (0..GRID_INDEX_MAX)
+' @local idx - Linear cell index into the test frame
+' @local sensorVal - Computed sensor value for the current cell
+
+  repeat row from 0 to GRID_INDEX_MAX
+    repeat col from 0 to GRID_INDEX_MAX
+      idx := (row * GRID_SIZE) + col
+      sensorVal := MIN_VAL + ((row * (MAX_VAL - MIN_VAL)) / GRID_INDEX_MAX)
+      test_frame[idx] := sensorVal
 
 PRI generate_checkerboard() | col, row, idx
-'' Generate checkerboard pattern with alternating min/max values
+' Generate a checkerboard pattern alternating min/max values.
+'
 
-  repeat row from 0 to 7
-    repeat col from 0 to 7
-      idx := (row * 8) + col
+' Local Variables:
+' @local col - Column coordinate (0..GRID_INDEX_MAX)
+' @local row - Row coordinate (0..GRID_INDEX_MAX)
+' @local idx - Linear cell index into the test frame
+
+  repeat row from 0 to GRID_INDEX_MAX
+    repeat col from 0 to GRID_INDEX_MAX
+      idx := (row * GRID_SIZE) + col
       if ((row + col) & 1) == 0
         test_frame[idx] := MIN_VAL
       else
         test_frame[idx] := MAX_VAL
 
 PRI generate_center_cross() | col, row, idx
-'' Generate center cross pattern (cross=max, background=min)
+' Generate a center-cross pattern (cross=max, background=min).
+'
+
+' Local Variables:
+' @local col - Column coordinate (0..GRID_INDEX_MAX)
+' @local row - Row coordinate (0..GRID_INDEX_MAX)
+' @local idx - Reserved cell index (unused in current implementation)
 
   ' Fill background with min
-  WORDFILL(@test_frame, MIN_VAL, 64)
+  WORDFILL(@test_frame, MIN_VAL, SENSORS_PER_FRAME)
 
   ' Horizontal bar (row 3 and 4)
-  repeat col from 0 to 7
-    test_frame[(3 * 8) + col] := MAX_VAL
-    test_frame[(4 * 8) + col] := MAX_VAL
+  repeat col from 0 to GRID_INDEX_MAX
+    test_frame[(3 * GRID_SIZE) + col] := MAX_VAL
+    test_frame[(4 * GRID_SIZE) + col] := MAX_VAL
 
   ' Vertical bar (col 3 and 4)
-  repeat row from 0 to 7
-    test_frame[(row * 8) + 3] := MAX_VAL
-    test_frame[(row * 8) + 4] := MAX_VAL
+  repeat row from 0 to GRID_INDEX_MAX
+    test_frame[(row * GRID_SIZE) + 3] := MAX_VAL
+    test_frame[(row * GRID_SIZE) + 4] := MAX_VAL
 
-PRI generate_diagonal_gradient() | col, row, idx, value
-'' Generate diagonal gradient from top-left (min) to bottom-right (max)
+PRI generate_diagonal_gradient() | col, row, idx, sensorVal
+' Generate a diagonal gradient from top-left (min) to bottom-right (max).
+'
 
-  repeat row from 0 to 7
-    repeat col from 0 to 7
-      idx := (row * 8) + col
+' Local Variables:
+' @local col - Column coordinate (0..GRID_INDEX_MAX)
+' @local row - Row coordinate (0..GRID_INDEX_MAX)
+' @local idx - Linear cell index into the test frame
+' @local sensorVal - Computed sensor value for the current cell
+
+  repeat row from 0 to GRID_INDEX_MAX
+    repeat col from 0 to GRID_INDEX_MAX
+      idx := (row * GRID_SIZE) + col
       ' Distance from TL corner (0,0) to current position
       ' Maximum distance is 14 (7+7 at bottom-right)
-      value := MIN_VAL + (((row + col) * (MAX_VAL - MIN_VAL)) / 14)
-      test_frame[idx] := value
+      sensorVal := MIN_VAL + (((row + col) * (MAX_VAL - MIN_VAL)) / (2 * GRID_INDEX_MAX))
+      test_frame[idx] := sensorVal
 
-CON { license }
+CON ' ---- License ----
 {{
 
  -------------------------------------------------------------------------------------------------

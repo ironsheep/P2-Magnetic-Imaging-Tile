@@ -1,31 +1,53 @@
-'************************************************
-'*  ISP PSRAM Graphics Driver                  *
-'*  Iron Sheep Productions, LLC                *
-'*  Magnetic Tile Viewer Graphics Engine       *
-'*  Based on original PsramGraphics by RJA     *
-'************************************************
+'' =================================================================================================
+''
+''   File....... isp_psram_graphics.spin2
+''   Purpose.... PSRAM-backed graphics engine for the magnetic tile viewer (rectangles, grid cells)
+''   Authors.... Stephen M Moraco
+''               -- Copyright (c) 2025 Iron Sheep Productions, LLC
+''               -- see below for terms of use
+''   E-mail..... stephen@ironsheep.biz
+''   Started.... Sep 2025
+''   Updated.... Dec 2025
+''
+'' =================================================================================================
 '
+' Based on original PsramGraphics by RJA.
 ' Provides efficient graphics operations for magnetic tile display:
 '   - Fast filled rectangle drawing
 '   - Optimized for 8x8 sensor grid visualization
 '   - Direct PSRAM writing for real-time updates
 
-CON
+CON ' ---- Map Dimensions ----
   mapx = 640'960
   mapy = 480'540
 
-OBJ
+  ' Sensor grid (8x8 = number of cell lines drawn by DrawSensorGrid)
+  SENSOR_GRID_SIZE = 8
+
+  ' SendCommand mailbox payload size (12 argument longs after the command long)
+  SEND_CMD_ARG_LONGS = 12
+
+  ' Demo loop iteration counts
+  DEMO_LINES_COUNT     = 500   ' show_lines: lines per pattern
+  DEMO_BURST_OUTER     = 64    ' show_burst: outer rotation steps
+  DEMO_BURST_INNER     = 64    ' show_burst: inner ray steps
+  DEMO_DETAIL_STEPS    = 513   ' show_detail: line sweep iterations
+
+  ' Brightness reduction
+  PERCENT_FULL_SCALE   = 100   ' 100% brightness scaling denominator
+
+OBJ ' ---- Subsystem Objects ----
 
   psram : "PSRAM_driver_RJA_Platform_1b"    ' PSRAM memory driver
   hdmi  : "isp_hdmi_640x480_24bpp"           ' ISP HDMI driver with correct VGA timing
   fonts : "isp_hub75_fonts"                  ' Bitmap font library
 
-DAT
+DAT ' ---- Shared Hardware State ----
   ' Shared hardware configuration (all COGs use same hardware)
   hdmi_pin_group    long    0               ' HDMI base pin (shared)
   hardware_started  long    0               ' Flag: 0=not started, 1=hardware initialized
 
-VAR
+VAR ' ---- Graphics State ----
   long cog
   long Command[13] 'mailbox for assembly driver, first long is the command#, which gets set last
   long psram_ptr                             ' Per-COG PSRAM mailbox pointer
@@ -34,63 +56,78 @@ VAR
   long current_font                          ' Current font selection
 
 PUB init(hdmi_base_pin)
-'' Initialize PSRAM graphics hardware (call once from main COG)
-'' @param hdmi_base_pin - base pin for HDMI output (typically 0 for pin group 0: P0-P7)
+'' Initialize PSRAM graphics hardware (call once from main COG).
+''
+'' @param hdmi_base_pin - Base pin for HDMI output (typically 0 for pin group P0-P7)
 
-  if hardware_started
-    return  ' Already initialized
+  if not hardware_started
+    ' Store pin group in DAT (shared across all COG instances)
+    hdmi_pin_group := hdmi_base_pin
 
-  ' Store pin group in DAT (shared across all COG instances)
-  hdmi_pin_group := hdmi_base_pin
+    ' Start PSRAM driver (shared hardware)
+    psram.start()
+    debug("PSRAM ptr: ", UHEX_LONG(psram.pointer()), 13, 10)
 
-  ' Start PSRAM driver (shared hardware)
-  psram.start()
-  debug("PSRAM ptr: ", UHEX_LONG(psram.pointer()), 13, 10)
+    ' Start HDMI video driver (shared hardware)
+    hdmi.start(hdmi_base_pin, psram.pointer(), 0)
+    debug("HDMI started: base_pin=", UDEC(hdmi_base_pin), " screen_base=0", 13, 10)
 
-  ' Start HDMI video driver (shared hardware)
-  hdmi.start(hdmi_base_pin, psram.pointer(), 0)
-  debug("HDMI started: base_pin=", UDEC(hdmi_base_pin), " screen_base=0", 13, 10)
+    ' Mark hardware as initialized
+    hardware_started := 1
 
-  ' Mark hardware as initialized
-  hardware_started := 1
-
-  ' Initialize default font
-  current_font := fonts.TEXT_FONT_5x7_DITH_DCNDR  ' 5x7 dithered with descenders
+    ' Initialize default font
+    current_font := fonts.TEXT_FONT_5x7_DITH_DCNDR  ' 5x7 dithered with descenders
 
 PUB start()
-'' Initialize graphics for calling COG (call from each COG that uses graphics)
-'' Must call init() first from main COG before any COG calls start()
+'' Initialize per-COG graphics state for the calling COG (call after init()).
+''
 
   if not hardware_started
     debug("ERROR: Graphics hardware not initialized! Call init() first.", 13, 10)
-    return
+  else
+    ' Calculate this COG's PSRAM mailbox pointer
+    psram_ptr := psram.pointer() + cogid() * 12
+    debug("COG ", udec(cogid()), " PSRAM cmd ptr: ", UHEX_LONG(psram_ptr), 13, 10)
 
-  ' Calculate this COG's PSRAM mailbox pointer
-  psram_ptr := psram.pointer() + cogid() * 12
-  debug("COG ", udec(cogid()), " PSRAM cmd ptr: ", UHEX_LONG(psram_ptr), 13, 10)
+    'configure assembly
+    array_mid_ptr := @frac_array + frac_array_mid
+    smooth_pixel_ptr := @smooth_pixel
 
-  'configure assembly
-  array_mid_ptr := @frac_array + frac_array_mid
-  smooth_pixel_ptr := @smooth_pixel
+    'plot_pPsram := psram_ptr
+    plot_pPixel := @pixel
+    plot_mapbase := 0
+    plot_mapx := mapx
+    plot_mapy := mapy
 
-  'plot_pPsram := psram_ptr
-  plot_pPixel := @pixel
-  plot_mapbase := 0
-  plot_mapx := mapx
-  plot_mapy := mapy
+    ' Note: No driver COG or test code needed - PSRAM and HDMI drivers already started by init()
 
-  ' Note: No driver COG or test code needed - PSRAM and HDMI drivers already started by init()
+PUB Stop()
+'' Stop the graphics driver cog if one is running.
+''
 
-PUB Stop()  'Stop driver cog
   if cog>0
     cogstop(cog-1)
     cog:=0
 
 PUB SmoothPixel(x_, y_, color_, alpha)
+'' Queue a smooth (sub-pixel, alpha-blended) pixel command to the graphics driver.
+''
+'' @param x_ - Sub-pixel X coordinate (8.8 fixed point)
+'' @param y_ - Sub-pixel Y coordinate (8.8 fixed point)
+'' @param color_ - RRGGBBAA pixel color
+'' @param alpha - Alpha-blend value (0..255)
 
   SendCommand(smooth_pixel_,@x_)
 
 PUB SmoothLine(x1_, y1_, x2_, y2_, diameter_, color_)
+'' Queue a smooth (sub-pixel, anti-aliased) line command to the graphics driver.
+''
+'' @param x1_ - Start X (8.8 fixed point)
+'' @param y1_ - Start Y (8.8 fixed point)
+'' @param x2_ - End X (8.8 fixed point)
+'' @param y2_ - End Y (8.8 fixed point)
+'' @param diameter_ - Line diameter in 8.8 fixed point
+'' @param color_ - RRGGBBAA line color
 
   SendCommand(smooth_line_,@x1_)
 
@@ -99,109 +136,152 @@ PUB SmoothLine(x1_, y1_, x2_, y2_, diameter_, color_)
 '' =====================================
 
 PUB FillRect(rx1, ry1, rx2, ry2, rcolor) | ry, rx, psram_addr, row_start, row_end
-'' Fill a rectangle with solid color
-'' Much faster than individual pixels for sensor grid display
+'' Fill a rectangle with a solid RRGGBBAA color, clipping to the screen.
+''
+'' @param rx1 - Rectangle left edge
+'' @param ry1 - Rectangle top edge
+'' @param rx2 - Rectangle right edge
+'' @param ry2 - Rectangle bottom edge
+'' @param rcolor - RRGGBBAA fill color
+
+' Local Variables:
+' @local ry - Working row coordinate
+' @local rx - Reserved column coordinate (unused)
+' @local psram_addr - PSRAM destination address for the current row
+' @local row_start - Reserved row-start placeholder (unused)
+' @local row_end - Reserved row-end placeholder (unused)
 
   ' CRITICAL: Validate psram_ptr before use (guard against corruption)
   if psram_ptr == 0
     debug("FillRect ERROR: psram_ptr is NULL! Call start() first.", 13, 10)
-    return
+  else
+    ' Ensure coordinates are in order
+    if rx1 > rx2
+      rx1, rx2 := rx2, rx1
+    if ry1 > ry2
+      ry1, ry2 := ry2, ry1
 
-  ' Ensure coordinates are in order
-  if rx1 > rx2
-    rx1, rx2 := rx2, rx1
-  if ry1 > ry2
-    ry1, ry2 := ry2, ry1
+    ' Clip to screen boundaries
+    rx1 := 0 #> rx1 <# (mapx-1)
+    rx2 := 0 #> rx2 <# (mapx-1)
+    ry1 := 0 #> ry1 <# (mapy-1)
+    ry2 := 0 #> ry2 <# (mapy-1)
 
-  ' Clip to screen boundaries
-  rx1 := 0 #> rx1 <# (mapx-1)
-  rx2 := 0 #> rx2 <# (mapx-1)
-  ry1 := 0 #> ry1 <# (mapy-1)
-  ry2 := 0 #> ry2 <# (mapy-1)
+    ' Fill the row buffer with the color
+    longfill(@row[rx1], rcolor, rx2-rx1+1)
 
-  ' Fill the row buffer with the color
-  longfill(@row[rx1], rcolor, rx2-rx1+1)
-
-  ' Write that row to each line of the rectangle
-  repeat ry from ry1 to ry2
-    psram_addr := ry * mapx + rx1
-    long[psram_ptr][0] := @row[rx1]      ' HUB source
-    long[psram_ptr][1] := psram_addr     ' PSRAM destination
-    long[psram_ptr][2] := -(rx2-rx1+1)   ' Negative = HUB to PSRAM
-    repeat while long[psram_ptr][2]      ' Wait for completion
+    ' Write that row to each line of the rectangle
+    repeat ry from ry1 to ry2
+      psram_addr := ry * mapx + rx1
+      long[psram_ptr][0] := @row[rx1]      ' HUB source
+      long[psram_ptr][1] := psram_addr     ' PSRAM destination
+      long[psram_ptr][2] := -(rx2-rx1+1)   ' Negative = HUB to PSRAM
+      repeat while long[psram_ptr][2]      ' Wait for completion
 
 PUB DrawHLine(lx1, lx2, ly, lcolor)
-'' Draw a horizontal line - optimized version
+'' Draw a horizontal line, optimized for single-row PSRAM writes.
+''
+'' @param lx1 - Left X coordinate
+'' @param lx2 - Right X coordinate
+'' @param ly - Y coordinate
+'' @param lcolor - RRGGBBAA line color
 
   ' Guard against corrupted psram_ptr
-  if psram_ptr == 0
-    return
+  if psram_ptr <> 0
+    if lx1 > lx2
+      lx1, lx2 := lx2, lx1
 
-  if lx1 > lx2
-    lx1, lx2 := lx2, lx1
+    lx1 := 0 #> lx1 <# (mapx-1)
+    lx2 := 0 #> lx2 <# (mapx-1)
+    ly := 0 #> ly <# (mapy-1)
 
-  lx1 := 0 #> lx1 <# (mapx-1)
-  lx2 := 0 #> lx2 <# (mapx-1)
-  ly := 0 #> ly <# (mapy-1)
-
-  longfill(@row[lx1], lcolor, lx2-lx1+1)
-  long[psram_ptr][0] := @row[lx1]
-  long[psram_ptr][1] := ly * mapx + lx1
-  long[psram_ptr][2] := -(lx2-lx1+1)
-  repeat while long[psram_ptr][2]
-
-PUB DrawVLine(vx, vy1, vy2, vcolor) | vy
-'' Draw a vertical line
-
-  ' Guard against corrupted psram_ptr
-  if psram_ptr == 0
-    return
-
-  if vy1 > vy2
-    vy1, vy2 := vy2, vy1
-
-  vx := 0 #> vx <# (mapx-1)
-  vy1 := 0 #> vy1 <# (mapy-1)
-  vy2 := 0 #> vy2 <# (mapy-1)
-
-  repeat vy from vy1 to vy2
-    long[psram_ptr][0] := @vcolor
-    long[psram_ptr][1] := vy * mapx + vx
-    long[psram_ptr][2] := -1
+    longfill(@row[lx1], lcolor, lx2-lx1+1)
+    long[psram_ptr][0] := @row[lx1]
+    long[psram_ptr][1] := ly * mapx + lx1
+    long[psram_ptr][2] := -(lx2-lx1+1)
     repeat while long[psram_ptr][2]
 
+PUB DrawVLine(vx, vy1, vy2, vcolor) | vy
+'' Draw a vertical line one pixel at a time via the PSRAM command interface.
+''
+'' @param vx - X coordinate
+'' @param vy1 - Top Y coordinate
+'' @param vy2 - Bottom Y coordinate
+'' @param vcolor - RRGGBBAA line color
+
+' Local Variables:
+' @local vy - Working Y coordinate
+
+  ' Guard against corrupted psram_ptr
+  if psram_ptr <> 0
+    if vy1 > vy2
+      vy1, vy2 := vy2, vy1
+
+    vx := 0 #> vx <# (mapx-1)
+    vy1 := 0 #> vy1 <# (mapy-1)
+    vy2 := 0 #> vy2 <# (mapy-1)
+
+    repeat vy from vy1 to vy2
+      long[psram_ptr][0] := @vcolor
+      long[psram_ptr][1] := vy * mapx + vx
+      long[psram_ptr][2] := -1
+      repeat while long[psram_ptr][2]
+
 PUB DrawBox(bx1, by1, bx2, by2, bcolor)
-'' Draw a box outline using optimized line drawing
+'' Draw a box outline using optimized line drawing.
+''
+'' @param bx1 - Left X coordinate
+'' @param by1 - Top Y coordinate
+'' @param bx2 - Right X coordinate
+'' @param by2 - Bottom Y coordinate
+'' @param bcolor - RRGGBBAA line color
 
   DrawHLine(bx1, bx2, by1, bcolor)  ' Top
   DrawHLine(bx1, bx2, by2, bcolor)  ' Bottom
   DrawVLine(bx1, by1, by2, bcolor)  ' Left
   DrawVLine(bx2, by1, by2, bcolor)  ' Right
 
-PUB DrawSensorGrid(base_x, base_y, cell_size, gap) | r, c, gx, gy
-'' Draw the 8x8 sensor grid outline
-'' base_x, base_y: top-left corner of grid
-'' cell_size: size of each sensor cell in pixels
-'' gap: gap between cells
+PUB DrawSensorGrid(base_x, base_y, cell_size, gap) | rowIdx, colIdx, gx, gy
+'' Draw the 8x8 sensor grid outline as a 9x9 grid of horizontal and vertical lines.
+''
+'' @param base_x - Top-left X corner of the grid
+'' @param base_y - Top-left Y corner of the grid
+'' @param cell_size - Size of each sensor cell in pixels
+'' @param gap - Pixel gap between cells
+
+' Local Variables:
+' @local rowIdx - Row line index 0..SENSOR_GRID_SIZE
+' @local colIdx - Column line index 0..SENSOR_GRID_SIZE
+' @local gx - Grid line X coordinate
+' @local gy - Grid line Y coordinate
 
   debug("DrawSensorGrid: (", UDEC(base_x), ",", UDEC(base_y), ") cell=", UDEC(cell_size), " gap=", UDEC(gap), 13, 10)
 
   ' Draw horizontal lines (9 lines for 8 cells)
-  repeat r from 0 to 8
-    gy := base_y + r * (cell_size + gap)
-    DrawHLine(base_x, base_x + 8*(cell_size+gap), gy, $FFFFFFFF)  ' White RRGGBBAA
+  repeat rowIdx from 0 to SENSOR_GRID_SIZE
+    gy := base_y + rowIdx * (cell_size + gap)
+    DrawHLine(base_x, base_x + SENSOR_GRID_SIZE*(cell_size+gap), gy, $FFFFFFFF)  ' White RRGGBBAA
 
   ' Draw vertical lines (9 lines for 8 cells)
-  repeat c from 0 to 8
-    gx := base_x + c * (cell_size + gap)
-    DrawVLine(gx, base_y, base_y + 8*(cell_size+gap), $FFFFFFFF)  ' White RRGGBBAA
+  repeat colIdx from 0 to SENSOR_GRID_SIZE
+    gx := base_x + colIdx * (cell_size + gap)
+    DrawVLine(gx, base_y, base_y + SENSOR_GRID_SIZE*(cell_size+gap), $FFFFFFFF)  ' White RRGGBBAA
 
   debug("DrawSensorGrid done", 13, 10)
 
 PUB FillSensorCell(cell_row, cell_col, base_x, base_y, cell_size, gap, cell_color) | stride
-'' Fill a single sensor cell with color
-'' For magnetic field visualization
-'' Uses 4-pixel inset from grid lines, properly centered in cell
+'' Fill a single sensor cell with a color, inset 4 pixels from grid lines.
+''
+'' @param cell_row - Cell row (0..7)
+'' @param cell_col - Cell column (0..7)
+'' @param base_x - Top-left X corner of the grid
+'' @param base_y - Top-left Y corner of the grid
+'' @param cell_size - Size of each sensor cell in pixels
+'' @param gap - Pixel gap between cells
+'' @param cell_color - RRGGBBAA fill color
+
+' Local Variables:
+' @local stride - Sum of cell_size and gap
 
   ' Cell interior is between grid lines: (cell_size+gap) pixels apart
   ' Use symmetric inset of 4 pixels from each interior edge for perfect centering
@@ -217,65 +297,85 @@ PUB FillSensorCell(cell_row, cell_col, base_x, base_y, cell_size, gap, cell_colo
 '' =====================================
 
 PUB SetFont(font_id)
-'' Set the current font for text rendering
-'' @param font_id - font selection from isp_hub75_fonts constants
-''   TEXT_FONT_5x7 (default), TEXT_FONT_8x8A, TEXT_FONT_8x8B
+'' Set the current font for subsequent text rendering.
+''
+'' @param font_id - Font selection constant from isp_hub75_fonts
 
   current_font := font_id
 
 PUB DrawChar(xPos, yPos, ch, clr) | pCharBitmap, charWidth, charHeight, rowOffset, colOffset, bitOffset, rowBits, pixClr, pixVal, dimClr
-'' Draw a single character at pixel coordinates
-'' @param xPos, yPos - top-left pixel position
-'' @param ch - ASCII character to draw
-'' @param clr - color in RRGGBBAA format
+'' Draw a single character at pixel coordinates using the current font.
+''
+'' @param xPos - Top-left X pixel position
+'' @param yPos - Top-left Y pixel position
+'' @param ch - ASCII character code to draw
+'' @param clr - RRGGBBAA color
+
+' Local Variables:
+' @local pCharBitmap - Hub pointer to the glyph bitmap (or 0 if missing)
+' @local charWidth - Font glyph width in pixels
+' @local charHeight - Font glyph height in pixels
+' @local rowOffset - Glyph row index
+' @local colOffset - Glyph column index
+' @local bitOffset - Bit offset within a row word/byte
+' @local rowBits - Current row's packed bits
+' @local pixClr - Color for the current pixel
+' @local pixVal - 1- or 2-bit pixel value extracted from the bitmap
+' @local dimClr - Dimmed (50%) variant of clr for dithered fonts
 
   ' Get character bitmap from font library
   pCharBitmap := fonts.getCharAddrForFont(current_font, ch)
-  if pCharBitmap == 0
-    return  ' Character not available
+  if pCharBitmap <> 0
+    ' Get font dimensions
+    charWidth, charHeight := fonts.getGeometryOfFont(current_font)
 
-  ' Get font dimensions
-  charWidth, charHeight := fonts.getGeometryOfFont(current_font)
+    ' Render character bitmap
+    if fonts.isDitheredFont(current_font)
+      ' Dithered font (2-bit per pixel for anti-aliasing)
+      dimClr := ReduceBrightness(clr, 50)  ' 50% brightness for gray level
 
-  ' Render character bitmap
-  if fonts.isDitheredFont(current_font)
-    ' Dithered font (2-bit per pixel for anti-aliasing)
-    dimClr := ReduceBrightness(clr, 50)  ' 50% brightness for gray level
+      repeat rowOffset from 0 to charHeight - 1
+        rowBits := WORD[pCharBitmap][rowOffset]  ' Read WORD for dithered fonts
+        repeat colOffset from 0 to charWidth - 1
+          bitOffset := colOffset * 2  ' 2 bits per pixel
+          pixVal := (rowBits >> (14 - bitOffset)) & 3  ' Extract 2-bit value from correct position
 
-    repeat rowOffset from 0 to charHeight - 1
-      rowBits := WORD[pCharBitmap][rowOffset]  ' Read WORD for dithered fonts
-      repeat colOffset from 0 to charWidth - 1
-        bitOffset := colOffset * 2  ' 2 bits per pixel
-        pixVal := (rowBits >> (14 - bitOffset)) & 3  ' Extract 2-bit value from correct position
+          ' Map pixel value to color:
+          '   3 = full color
+          '   1 = dimmed color (50%)
+          '   0,2 = black (background)
+          if pixVal == 3
+            pixClr := clr
+          elseif pixVal == 1
+            pixClr := dimClr
+          else
+            pixClr := $00000000  ' Transparent/black
 
-        ' Map pixel value to color:
-        '   3 = full color
-        '   1 = dimmed color (50%)
-        '   0,2 = black (background)
-        if pixVal == 3
-          pixClr := clr
-        elseif pixVal == 1
-          pixClr := dimClr
-        else
-          pixClr := $00000000  ' Transparent/black
-
-        if pixVal <> 0 && pixVal <> 2
-          FillRect(xPos + colOffset, yPos + rowOffset, xPos + colOffset, yPos + rowOffset, pixClr)
-  else
-    ' Standard 1-bit per pixel font
-    repeat rowOffset from 0 to charHeight - 1
-      rowBits := BYTE[pCharBitmap][rowOffset]
-      repeat colOffset from 0 to charWidth - 1
-        bitOffset := (charWidth - 1) - colOffset  ' Scan bits right-to-left
-        if (rowBits & (1 << bitOffset)) > 0
-          ' Bit is set - draw pixel
-          FillRect(xPos + colOffset, yPos + rowOffset, xPos + colOffset, yPos + rowOffset, clr)
+          if pixVal <> 0 && pixVal <> 2
+            FillRect(xPos + colOffset, yPos + rowOffset, xPos + colOffset, yPos + rowOffset, pixClr)
+    else
+      ' Standard 1-bit per pixel font
+      repeat rowOffset from 0 to charHeight - 1
+        rowBits := BYTE[pCharBitmap][rowOffset]
+        repeat colOffset from 0 to charWidth - 1
+          bitOffset := (charWidth - 1) - colOffset  ' Scan bits right-to-left
+          if (rowBits & (1 << bitOffset)) > 0
+            ' Bit is set - draw pixel
+            FillRect(xPos + colOffset, yPos + rowOffset, xPos + colOffset, yPos + rowOffset, clr)
 
 PUB DrawText(textX, textY, pString, clr) | char, xPos, charWidth, charHeight
-'' Draw a string of text at pixel coordinates
-'' @param textX, textY - top-left pixel position
-'' @param pString - pointer to zero-terminated string
-'' @param clr - color in RRGGBBAA format
+'' Draw a zero-terminated string at pixel coordinates using the current font.
+''
+'' @param textX - Top-left X pixel position
+'' @param textY - Top-left Y pixel position
+'' @param pString - Hub pointer to a zero-terminated string
+'' @param clr - RRGGBBAA color
+
+' Local Variables:
+' @local char - Current ASCII character
+' @local xPos - Running X position for the current glyph
+' @local charWidth - Font glyph width in pixels
+' @local charHeight - Font glyph height in pixels
 
   ' Get font dimensions
   charWidth, charHeight := fonts.getGeometryOfFont(current_font)
@@ -290,11 +390,20 @@ PUB DrawText(textX, textY, pString, clr) | char, xPos, charWidth, charHeight
     xPos += charWidth + 1  ' Character width plus 1-pixel spacing
 
 PUB DrawTextCentered(centerX, textY, pString, clr) | textWidth, charWidth, charHeight, stringLen, startX, pTemp
-'' Draw centered text (horizontally centered at centerX)
-'' @param centerX - horizontal center position
-'' @param textY - top pixel position
-'' @param pString - pointer to zero-terminated string
-'' @param clr - color in RRGGBBAA format
+'' Draw text horizontally centered at the specified X position.
+''
+'' @param centerX - Horizontal center position
+'' @param textY - Top-left Y pixel position
+'' @param pString - Hub pointer to a zero-terminated string
+'' @param clr - RRGGBBAA color
+
+' Local Variables:
+' @local textWidth - Computed pixel width of the rendered string
+' @local charWidth - Font glyph width in pixels
+' @local charHeight - Font glyph height in pixels
+' @local stringLen - Length of the string in characters
+' @local startX - Computed top-left X position for the rendered string
+' @local pTemp - Walking pointer used to measure string length
 
   ' Get font dimensions
   charWidth, charHeight := fonts.getGeometryOfFont(current_font)
@@ -314,32 +423,53 @@ PUB DrawTextCentered(centerX, textY, pString, clr) | textWidth, charWidth, charH
   ' Draw the text
   DrawText(startX, textY, pString, clr)
 
-PRI ReduceBrightness(rgbColor, percent) : dimmedColor | r, g, b, a
-'' Reduce the brightness of a color by the given percentage
-'' @param rgbColor - color in RRGGBBAA format
-'' @param percent - brightness percentage (0-100, where 50 = 50% brightness)
-'' @returns dimmed color in same RRGGBBAA format
+PUB cls(clr)
+'' Clear the entire framebuffer (screen base 0) to a single RRGGBBAA color.
+''
+'' @param clr - RRGGBBAA fill color
+
+   clear_screen(0,clr)
+
+PRI ReduceBrightness(rgbColor, percent) : dimmedColor | redCh, greenCh, blueCh, alphaCh
+' Reduce the brightness of a color by the given percentage (alpha preserved).
+'
+' @param rgbColor - Source RRGGBBAA color
+' @param percent - Brightness percentage (0..100; 50 = 50% brightness)
+' @returns dimmedColor - Dimmed RRGGBBAA color
+
+' Local Variables:
+' @local redCh - Source red channel
+' @local greenCh - Source green channel
+' @local blueCh - Source blue channel
+' @local alphaCh - Source alpha channel (preserved)
 
   ' Extract RGBA components
-  r := (rgbColor >> 24) & $FF
-  g := (rgbColor >> 16) & $FF
-  b := (rgbColor >> 8) & $FF
-  a := rgbColor & $FF
+  redCh := (rgbColor >> 24) & $FF
+  greenCh := (rgbColor >> 16) & $FF
+  blueCh := (rgbColor >> 8) & $FF
+  alphaCh := rgbColor & $FF
 
   ' Scale RGB by percentage
-  r := (r * percent) / 100
-  g := (g * percent) / 100
-  b := (b * percent) / 100
+  redCh := (redCh * percent) / PERCENT_FULL_SCALE
+  greenCh := (greenCh * percent) / PERCENT_FULL_SCALE
+  blueCh := (blueCh * percent) / PERCENT_FULL_SCALE
 
   ' Reassemble color
-  dimmedColor := (r << 24) | (g << 16) | (b << 8) | a
+  dimmedColor := (redCh << 24) | (greenCh << 16) | (blueCh << 8) | alphaCh
 
 PRI SendCommand(cmd,pArgs)|i
+' Push a command and its 12-long argument block to the graphics-driver mailbox.
+'
+' @param cmd - Command code
+' @param pArgs - Hub pointer to a 12-long argument block
+
+' Local Variables:
+' @local i - Argument index 0..SEND_CMD_ARG_LONGS-1
 
   'wait for previous command to complete
   repeat until  Command[0]==0
 
-  repeat i from 0 to 11  'replace this with longmove
+  repeat i from 0 to SEND_CMD_ARG_LONGS - 1  'replace this with longmove
     Command[i+1]:=long[pArgs][i]
 
   Command[0]:=cmd
@@ -349,10 +479,12 @@ PRI SendCommand(cmd,pArgs)|i
 
 
 PRI show_lines()
+' Demo: draw a fixed count of random smooth lines on a single screen.
+'
 
   single_screen()
 
-  repeat 500
+  repeat DEMO_LINES_COUNT
     smoothline( ...
         getrnd() +// (mapx-40)<<8 + 20<<8, ...
         getrnd() +// (mapy-40)<<8 + 20<<8, ...
@@ -366,13 +498,24 @@ PRI show_lines()
 
 
 PRI show_burst() | rnd, i, j, vx, vy, ox, oy
+' Demo: draw rotating burst patterns of smooth lines with double-buffering.
+'
+
+' Local Variables:
+' @local rnd - Pseudo-random color seed
+' @local i - Inner ray index
+' @local j - Outer rotation index
+' @local vx - Per-step X delta
+' @local vy - Per-step Y delta
+' @local ox - X scaling offset
+' @local oy - Y scaling offset
 
   ox := mapx/2-10
   oy := mapy/2-10
-  repeat j from 0 to 63 '64 with j
+  repeat j from 0 to DEMO_BURST_OUTER - 1 '64 with j
     flip_screen()
     rnd~~
-    repeat i from 0 to 63'64 with i
+    repeat i from 0 to DEMO_BURST_INNER - 1 '64 with i
       vx := qcos(ox<<8, i << 7 + j, 8192)
       vy := qsin(oy<<8, i << 7 + j, 8192)
       SmoothLine((mapx/2)<<8, (mapy/2)<<8, (mapx/2)<<8 + vx, (mapy/2)<<8 + vy, $180, ??rnd | $FF)
@@ -380,11 +523,19 @@ PRI show_burst() | rnd, i, j, vx, vy, ox, oy
 
 
 PRI show_detail() | i, vx, vy, oy
+' Demo: high-detail smooth-line sweep using the 8x8 sub-pixel plotter.
+'
+
+' Local Variables:
+' @local i - Step index / temporary pixel-pointer selector
+' @local vx - Per-step X delta
+' @local vy - Per-step Y delta
+' @local oy - Unused vertical offset placeholder
 
   i:=2
   SendCommand(Set_PixelPtr_, @i) '2==smooth_pixel8x8
 
-  repeat i from 0 to 512 '513 with i
+  repeat i from 0 to DEMO_DETAIL_STEPS - 1 '513 with i
     vx := qcos($1000, i, 512)
     vy := qsin($1000, i, 512)
     SmoothLine((mapx/2)<<5 + vx, (mapy/2-14)<<5 + vy, (mapx/2)<<5 - vx, (mapy/2-14)<<5 - vy, $18_00, $FF5000FF)
@@ -399,14 +550,17 @@ PRI show_detail() | i, vx, vy, oy
 
 
 PRI single_screen()
+' Switch the HDMI driver to a single (non-flipped) screen and clear it to black.
+'
 
     MapBase:=0
     hdmi.set_screen_base(MapBase)
     SendCommand(Set_MapBase_,@MapBase)
     clear_screen(MapBase,0)
-    return
 
 PRI flip_screen()
+' Flip between the two double-buffered framebuffers and clear the new back buffer.
+'
 
     hdmi.set_screen_base(MapBase)         'reg[plot_mapbase]-->MapBase
     hdmi.wait_new_screen()
@@ -415,34 +569,36 @@ PRI flip_screen()
     clear_screen(MapBase,0)
     SendCommand(Set_MapBase_,@MapBase)
 
-PUB cls(clr)
-   clear_screen(0,clr)
-
-
 PRI clear_screen(ptr,clr) | i
+' Fill the framebuffer rooted at ptr with the specified color, line-by-line.
+'
+' @param ptr - PSRAM base address of the framebuffer to clear
+' @param clr - RRGGBBAA fill color
+
+' Local Variables:
+' @local i - Current scanline index
 
   ' Guard against corrupted psram_ptr
   if psram_ptr == 0
     debug("clear_screen ERROR: psram_ptr is NULL!", 13, 10)
-    return
+  else
+    debug("Clear: psram_base=", UDEC(ptr), " color=", UHEX_LONG(clr), 13, 10)
+    longfill(@row[0],clr,mapx)         '(Destination, Value, Count)
 
-  debug("Clear: psram_base=", UDEC(ptr), " color=", UHEX_LONG(clr), 13, 10)
-  longfill(@row[0],clr,mapx)         '(Destination, Value, Count)
+    repeat i from 0 to mapy 'mapy with i
+      long[psram_ptr][0] := @row[0] '$80000
+      long[psram_ptr][1] := i * mapx + ptr
+      long[psram_ptr][2] := -mapx
+      repeat while long[psram_ptr][2]
+      if (i // 120) == 0
+        debug("  line ", UDEC(i), 13, 10)
 
-  repeat i from 0 to mapy 'mapy with i
-    long[psram_ptr][0] := @row[0] '$80000
-    long[psram_ptr][1] := i * mapx + ptr
-    long[psram_ptr][2] := -mapx
-    repeat while long[psram_ptr][2]
-    if (i // 120) == 0
-      debug("  line ", UDEC(i), 13, 10)
-
-  debug("Clear done", 13, 10)
-
+    debug("Clear done", 13, 10)
 
 
 
-CON
+
+CON ' ---- Smooth Line Constants ----
 
   maxr                  = 32
 
@@ -454,7 +610,7 @@ CON
   frac_array_mid        = array_words * ((1 + maxr) + 0             ) * 2{bytes}
 
 
-VAR
+VAR ' ---- Smooth Line Buffers ----
 
   long pixel[8]
   word frac_array[frac_array_size]
@@ -473,12 +629,12 @@ PUB SmoothPixel(x_, y_, color_, alpha)
 }
 
 
-CON 'enumerated graphics commands
+CON ' ---- Graphics Command Codes ----
   #1,smooth_pixel_,Smooth_Line_,Set_MapBase_,Set_PixelPtr_
 
 
 
-DAT   ''GraphicsEntry    Assembly Graphics Driver Entry
+DAT ' ---- Graphics Driver Entry ----
 orgh
               org
 GraphicsEntry
@@ -528,7 +684,7 @@ garg9         long      0
 garg10        long      0
 
 
-DAT '_smooth_pixel
+DAT ' ---- _smooth_pixel ----
 _smooth_pixel
               mov       plot_x, garg1    'replace with setq?
               mov       plot_y, garg2
@@ -537,7 +693,7 @@ _smooth_pixel
               call      #smooth_pixel
               jmp       #GELoop
 
-DAT '_smooth_line
+DAT ' ---- _smooth_line ----
 _smooth_line
 
               mov       x1, garg1    'replace with setq?
@@ -549,12 +705,12 @@ _smooth_line
               call      #smooth_line
               jmp       #GELoop
 
-DAT '_set_mapbase
+DAT ' ---- _set_mapbase ----
 _set_mapbase
               mov       plot_mapbase, garg1
               jmp       #GELoop
 
-DAT '_set_pixelptr
+DAT ' ---- _set_pixelptr ----
 _set_pixelptr
               'mov       smooth_pixel_ptr, garg1
               cmp       garg1,#1 wcz
@@ -565,7 +721,7 @@ _set_pixelptr
 
 '
 '
-DAT ' Smooth line - initial calcs
+DAT ' ---- Smooth Line ----
 '
 smooth_line     mov     pa,##$10080             'bias and center 8-bit-fractional coordinates within pixels
                 add     x1,pa
@@ -936,7 +1092,7 @@ smooth_line     mov     pa,##$10080             'bias and center 8-bit-fractiona
 
 '
 '
-DAT ' Smooth pixel plot
+DAT ' ---- Smooth Pixel ----
 '
 
 smooth_pixel    cmp     plot_x,plot_mapx wc     'if pixel off map, done
@@ -983,7 +1139,7 @@ smooth_pixel    cmp     plot_x,plot_mapx wc     'if pixel off map, done
         _ret_   wrlong  pa,ptrb[2]
 '
 '
-DAT ' smooth_pixel8x8 - Smooth pixel plot - 8x8 pixels
+DAT ' ---- Smooth Pixel 8x8 ----
 '
 
 
@@ -1039,7 +1195,7 @@ smooth_pixel8x8 shl     plot_x,#3
 
 
 
-DAT  'smooth_line registers
+DAT ' ---- Smooth Line Registers ----
 
 x1              long 0
 y1              long 0

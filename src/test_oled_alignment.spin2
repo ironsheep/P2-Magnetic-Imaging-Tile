@@ -1,8 +1,13 @@
 '' =================================================================================================
+''
 ''   File....... test_oled_alignment.spin2
-''   Purpose.... Diagnostic test to determine OLED display alignment
-''   Author..... Claude Code
+''   Purpose.... Diagnostic test displaying corner and edge patterns to identify OLED display shift
+''   Authors.... Stephen M Moraco
+''               -- Copyright (c) 2025 Iron Sheep Productions, LLC
+''               -- see below for terms of use
+''   E-mail..... stephen@ironsheep.biz
 ''   Started.... Nov 2025
+''   Updated.... Nov 2025
 ''
 '' =================================================================================================
 ''
@@ -14,24 +19,41 @@
 ''
 '' =================================================================================================
 
-CON
+CON ' ---- Test Configuration ----
   _CLKFREQ = 250_000_000  ' 250 MHz system clock
 
   ' Pin assignments
   OLED_BASE_PIN = 16      ' OLED on P16-P23
 
-  ' Test pattern values (sensor values that map to specific colors)
-  VALUE_BLUE = 0       ' Min value = BLUE
-  VALUE_GREEN = 2048   ' Mid value = GREEN
-  VALUE_RED = 4095     ' Max value = RED
+  ' Sensor grid (8x8 test frame)
+  GRID_SIZE         = 8
+  SENSORS_PER_FRAME = GRID_SIZE * GRID_SIZE    ' 64 cells per frame
+  GRID_INDEX_MAX    = SENSORS_PER_FRAME - 1    ' Last linear index
 
-OBJ
+  ' Test pattern values (sensor values that map to specific colors)
+  VALUE_BLUE   = 0       ' Min value = BLUE
+  VALUE_GREEN  = 2048    ' Mid value = GREEN
+  VALUE_RED    = 4095    ' Max value = RED
+  VALUE_YELLOW = 3500    ' Maps to YELLOW marker
+  VALUE_CYAN   = 1500    ' Maps to CYAN background
+
+  ' Pattern sequence
+  PATTERN_COUNT       = 4              ' Number of diagnostic patterns
+  PATTERN_HOLD_SEC    = 7              ' Seconds per pattern
+  US_PER_SECOND       = 1_000_000      ' Microseconds in one second
+
+OBJ ' ---- Subsystem Objects ----
   oled : "isp_oled_single_cog"
 
-VAR
-  WORD  test_frame[64]  ' Test frame buffer (8x8 sensors)
+VAR ' ---- Test State ----
+  WORD  test_frame[SENSORS_PER_FRAME]  ' Test frame buffer (8x8 sensors)
 
 PUB main() | pattern_num
+'' Diagnostic test displaying corner and edge patterns to identify OLED display shift.
+''
+
+' Local Variables:
+' @local pattern_num - 1-based index into the cycling pattern sequence
 
   debug("=== OLED ALIGNMENT DIAGNOSTIC ===", 13, 10)
   debug("This test displays specific patterns to identify display shift", 13, 10)
@@ -41,89 +63,93 @@ PUB main() | pattern_num
   debug("Initializing OLED hardware...", 13, 10)
   if not oled.init(OLED_BASE_PIN)
     debug("ERROR: OLED hardware init failed!", 13, 10)
-    return
-  debug("OLED hardware initialized", 13, 10)
-  debug(" ", 13, 10)
-
-  debug("Starting pattern sequence (7 seconds each)...", 13, 10)
-  debug(" ", 13, 10)
-
-  ' Cycle through diagnostic patterns
-  pattern_num := 1
-  repeat
-    case pattern_num
-      1:
-        debug("Pattern 1: ALL BLUE (to verify solid fill works)", 13, 10)
-        debug("  ALL 64 cells = BLUE", 13, 10)
-        generate_all_blue()
-
-      2:
-        debug("Pattern 2: ALL RED (to verify solid fill works)", 13, 10)
-        debug("  ALL 64 cells = RED", 13, 10)
-        generate_all_red()
-
-      3:
-        debug("Pattern 3: GRADIENT (buffer[0]=0, [1]=64, [2]=128, etc.)", 13, 10)
-        debug("  Sequential values to see buffer mapping", 13, 10)
-        debug("  BLUE->GREEN->RED gradient", 13, 10)
-        generate_gradient()
-
-      4:
-        debug("Pattern 4: CORNER MARKERS with (0,0) INDICATOR", 13, 10)
-        debug("  buffer[0]=RED (TL), [7]=YELLOW (TR), [56]=GREEN (BL), [63]=BLUE (BR)", 13, 10)
-        debug("  buffer[9]=RED (diagonal from 0,0 - marks origin)", 13, 10)
-        generate_corner_markers()
-
-    ' Display the frame
-    debug("  Displaying frame...", 13, 10)
-    oled.display_frame(@test_frame)
-    debug("  Frame displayed", 13, 10)
+  else
+    debug("OLED hardware initialized", 13, 10)
     debug(" ", 13, 10)
 
-    ' Wait 7 seconds
-    repeat 7
-      WAITUS(1_000_000)
+    debug("Starting pattern sequence (7 seconds each)...", 13, 10)
+    debug(" ", 13, 10)
 
-    ' Move to next pattern
-    pattern_num++
-    if pattern_num > 4
-      pattern_num := 1
-      debug("--- Restarting pattern sequence ---", 13, 10)
+    ' Cycle through diagnostic patterns
+    pattern_num := 1
+    repeat
+      case pattern_num
+        1:
+          debug("Pattern 1: ALL BLUE (to verify solid fill works)", 13, 10)
+          debug("  ALL 64 cells = BLUE", 13, 10)
+          generate_all_blue()
+
+        2:
+          debug("Pattern 2: ALL RED (to verify solid fill works)", 13, 10)
+          debug("  ALL 64 cells = RED", 13, 10)
+          generate_all_red()
+
+        3:
+          debug("Pattern 3: GRADIENT (buffer[0]=0, [1]=64, [2]=128, etc.)", 13, 10)
+          debug("  Sequential values to see buffer mapping", 13, 10)
+          debug("  BLUE->GREEN->RED gradient", 13, 10)
+          generate_gradient()
+
+        4:
+          debug("Pattern 4: CORNER MARKERS with (0,0) INDICATOR", 13, 10)
+          debug("  buffer[0]=RED (TL), [7]=YELLOW (TR), [56]=GREEN (BL), [63]=BLUE (BR)", 13, 10)
+          debug("  buffer[9]=RED (diagonal from 0,0 - marks origin)", 13, 10)
+          generate_corner_markers()
+
+      ' Display the frame
+      debug("  Displaying frame...", 13, 10)
+      oled.display_frame(@test_frame)
+      debug("  Frame displayed", 13, 10)
       debug(" ", 13, 10)
 
-PRI generate_all_blue()
-'' Fill entire buffer with BLUE
+      ' Wait PATTERN_HOLD_SEC seconds
+      repeat PATTERN_HOLD_SEC
+        WAITUS(US_PER_SECOND)
 
-  WORDFILL(@test_frame, VALUE_BLUE, 64)
+      ' Move to next pattern
+      pattern_num++
+      if pattern_num > PATTERN_COUNT
+        pattern_num := 1
+        debug("--- Restarting pattern sequence ---", 13, 10)
+        debug(" ", 13, 10)
+
+PRI generate_all_blue()
+' Fill the entire frame buffer with the BLUE test value.
+'
+
+  WORDFILL(@test_frame, VALUE_BLUE, SENSORS_PER_FRAME)
 
 PRI generate_all_red()
-'' Fill entire buffer with RED
+' Fill the entire frame buffer with the RED test value.
+'
 
-  WORDFILL(@test_frame, VALUE_RED, 64)
+  WORDFILL(@test_frame, VALUE_RED, SENSORS_PER_FRAME)
 
-PRI generate_gradient() | i, value
-'' Sequential gradient from BLUE to RED
-'' Shows how buffer indices map to physical positions
+PRI generate_gradient() | i, sensorVal
+' Build a sequential gradient from BLUE to RED so buffer-to-pixel mapping is visible.
+'
 
-  repeat i from 0 to 63
-    ' Map index 0-63 to value 0-4095
-    value := (i * 4095) / 63
-    test_frame[i] := value
+' Local Variables:
+' @local i - Linear cell index into the test frame
+' @local sensorVal - Scaled sensor value for the current cell
+
+  repeat i from 0 to GRID_INDEX_MAX
+    ' Map linear index to value 0-VALUE_RED
+    sensorVal := (i * VALUE_RED) / GRID_INDEX_MAX
+    test_frame[i] := sensorVal
 
 PRI generate_corner_markers()
-'' Four corner markers to identify coordinate mapping
-'' TL=RED, TR=YELLOW, BL=GREEN, BR=BLUE (on cyan background)
-'' Plus diagonal indicator: (1,1) = RED to point to origin at (0,0)
-'' This reveals how buffer indices map to physical positions
+' Place four corner markers plus a diagonal indicator to identify coordinate mapping.
+'
 
-  WORDFILL(@test_frame, 1500, 64)  ' Cyan background (between blue and green)
+  WORDFILL(@test_frame, VALUE_CYAN, SENSORS_PER_FRAME)  ' Cyan background (between blue and green)
   test_frame[0]  := VALUE_RED     ' Top-left corner (row 0, col 0) - ORIGIN
   test_frame[9]  := VALUE_RED     ' Diagonal indicator (row 1, col 1) - points to origin
-  test_frame[7]  := 3500          ' Top-right corner (row 0, col 7) - YELLOW
+  test_frame[7]  := VALUE_YELLOW  ' Top-right corner (row 0, col 7) - YELLOW
   test_frame[56] := VALUE_GREEN   ' Bottom-left corner (row 7, col 0)
   test_frame[63] := VALUE_BLUE    ' Bottom-right corner (row 7, col 7)
 
-CON { license }
+CON ' ---- License ----
 {{
  -------------------------------------------------------------------------------------------------
   MIT License
