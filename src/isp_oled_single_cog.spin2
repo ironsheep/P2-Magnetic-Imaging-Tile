@@ -39,6 +39,20 @@ CON ' ---- OLED Public API ----
   ' SPI timing
   SPI_FREQ = 20_000_000   ' 20 MHz SPI clock (maximum per datasheet)
 
+  ' SCLK rate measurement burst length (long enough for stable timing,
+  ' short enough that CT does not need to roll over).
+  SCLK_MEASURE_PULSES = 1024
+
+  ' Continuous-mode frame-stream parameters (32-bit SYNC_TX, full-frame SCLK burst)
+  FRAME_LONGS        = (WIDTH * HEIGHT * 2) / 4    ' 8192 longs per full frame
+  FRAME_BLOCK_COUNT  = (WIDTH * HEIGHT * 2) / 64   ' 512 64-byte FIFO blocks
+  TOTAL_FRAME_PULSES = WIDTH * HEIGHT * 16         ' 262144 SCLK pulses per frame
+
+  ' SYNC_TX X-register values
+  ' Bit 5 = mode (0 = continuous, 1 = start-stop); bits 4:0 = (bit_count - 1)
+  XCFG_SYNC_TX_CONT_32   = %0_11111   ' Continuous, 32 bits per shift
+  XCFG_SYNC_TX_STARTSTOP = %1_00111   ' Start-stop, 8 bits per shift
+
   ' Display dimensions
   WIDTH  = 128
   HEIGHT = 128
@@ -409,9 +423,11 @@ PUB display_frame_fast(framePtr) | start_cycles, end_cycles, elapsed_cycles
     debug("  pixel_buffer[1] = ", uhex(WORD[@pixel_buffer][1]), 13, 10)
     debug("  pixel_buffer[128] = ", uhex(WORD[@pixel_buffer][128]), 13, 10)
 
-  ' Phase 2: Set full-screen window and stream all pixels via PASM
-  ' Apply hardware offset (ROW_OFFSET compensates for SSD1351 RAM-to-pixel mapping)
-  set_window(0, 0, WIDTH - 1, HEIGHT - 1)
+  ' Phase 2: Set full-screen window and stream all pixels via PASM.
+  ' The pre-rendered pixel_buffer already has cells placed at their final
+  ' panel coordinates via cell_origin_lut[], so the window goes raw — applying
+  ' ROW_OFFSET here would wrap to a malformed (0,-32)..(127,95) window.
+  set_window_raw(0, 0, WIDTH - 1, HEIGHT - 1)
   stream_pixel_buffer()
 
   ' End timing measurement and update statistics
@@ -610,75 +626,91 @@ PRI get_cell_origin(row, col, px_ptr, py_ptr) | temp_row, temp_col, px, py
   LONG[px_ptr] := px
   LONG[py_ptr] := py
 
-PRI stream_pixel_buffer() | buf_ptr, pixel_count, mosi_pin, sclk_pin, cs_pin, dc_pin, pixel_val, byte_val
-' Stream the entire pixel buffer to the OLED via inline PASM with events.
+PRI stream_pixel_buffer() | buf_ptr, mosi_pin, sclk_pin, cs_pin, dc_pin, mode, data, longs_left
+' Stream the entire pixel buffer via continuous-mode 32-bit SYNC_TX.
 '
+' Reconfigures MOSI from start-stop 8-bit to continuous 32-bit for the duration
+' of the frame, pre-loads SCLK with the full-frame pulse count (262,144 cycles),
+' and keeps the SYNC_TX buffer fed one long at a time. After the burst, MOSI is
+' restored to start-stop 8-bit so the existing command path keeps working.
+'
+' Bit transform per long: rflong gives [px1_hi:px1_lo:px0_hi:px0_lo] from hub.
+' ROR #16 swaps pixel halves; REV bit-reverses all 32 bits. Net result: LSB-first
+' shifting from the SYNC_TX produces wire order px0_hi(MSB-first) -> px1_lo(LSB),
+' which is what the SSD1351 expects.
 
 ' Local Variables:
-' @local buf_ptr - Hub pointer to the pixel buffer
-' @local pixel_count - Total pixels to stream (16384)
-' @local mosi_pin - MOSI pin number
-' @local sclk_pin - SCLK pin number
+' @local buf_ptr - Hub pointer to the pixel buffer (FIFO source)
+' @local mosi_pin - MOSI pin number (P_SYNC_TX)
+' @local sclk_pin - SCLK pin number (P_PULSE)
 ' @local cs_pin - Chip-select pin number
 ' @local dc_pin - Data/command pin number
-' @local pixel_val - Current 16-bit pixel value
-' @local byte_val - Current byte staged for the MOSI shifter
+' @local mode - Cached WRPIN mode bits (P_OE | P_SYNC_TX | clock routing)
+' @local data - Working 32-bit value: hub long, byte-swapped, bit-reversed
+' @local longs_left - Remaining longs to load after priming
 
-  ' Copy pin numbers to local variables for PASM access
-  buf_ptr := @pixel_buffer
-  pixel_count := 16384
-  mosi_pin := pin_mosi
-  sclk_pin := pin_sclk
-  cs_pin := pin_cs
-  dc_pin := pin_dc
+  buf_ptr    := @pixel_buffer
+  mosi_pin   := pin_mosi
+  sclk_pin   := pin_sclk
+  cs_pin     := pin_cs
+  dc_pin     := pin_dc
+  mode       := P_OE | P_SYNC_TX | ((pin_sclk - pin_mosi) & %111) << 24
+  longs_left := FRAME_LONGS - 2     ' Two longs are primed before the stream loop
 
-  ' Stream all pixels using inline PASM
   ORG
-        ' Configure event for SCLK IN flag rise (P_PULSE clocks complete)
-        ' Event encoding: %01 = positive edge, pin number in lower 6 bits
-        mov     pa, sclk_pin
-        or      pa, #%01_000000
-        setse1  pa
+        ' --- Reconfigure MOSI: start-stop 8-bit -> continuous 32-bit ---
+        dirl    mosi_pin
+        wrpin   mode, mosi_pin
+        wxpin   #XCFG_SYNC_TX_CONT_32, mosi_pin
+        dirh    mosi_pin
 
-        ' Assert CS and DC for data mode
-        drvl    cs_pin                  ' CS low - select display
-        drvh    dc_pin                  ' DC high - data mode
+        ' --- Set up FIFO for streaming reads from pixel_buffer ---
+        rdfast  ##FRAME_BLOCK_COUNT, buf_ptr
 
-        ' Set up pixel counter and buffer pointer
-        mov     ptra, buf_ptr
-        mov     pb, pixel_count
+        ' --- Assert CS / set DC to data mode ---
+        drvl    cs_pin
+        drvh    dc_pin
 
-.pixel_loop
-        ' Read next RGB565 pixel from buffer
-        rdword  pixel_val, ptra++
+        ' --- Prime shifter and buffer with first two longs ---
+        rflong  data
+        ror     data, #16
+        rev     data
+        wypin   data, mosi_pin                ' Long 1 -> shifter (buffer empties, IN rises)
 
-        ' === Prepare and send high byte ===
-        mov     byte_val, pixel_val
-        shr     byte_val, #8
-        shl     byte_val, #24
-        rev     byte_val
-        wypin   byte_val, mosi_pin
+        rflong  data
+        ror     data, #16
+        rev     data
+        wypin   data, mosi_pin                ' Long 2 -> buffer (IN clears)
+
+        ' --- Kick SCLK with the full-frame pulse count ---
+        mov     pa, ##TOTAL_FRAME_PULSES
+        wypin   pa, sclk_pin
+
+        ' --- Stream loop: prefetch + wait IN flag + load buffer ---
+.stream_loop
+        rflong  data                          ' Prefetch while shifter is busy
+        ror     data, #16
+        rev     data
+.wait_buf
+        testp   mosi_pin    wc                ' IN high == SYNC_TX buffer empty
+  if_nc jmp     #.wait_buf
+        wypin   data, mosi_pin                ' Load next long into buffer
+        djnz    longs_left, #.stream_loop
+
+        ' --- Wait for SCLK to finish all 262,144 pulses ---
+.wait_sclk_done
+        testp   sclk_pin    wc                ' IN high == Y reached 0
+  if_nc jmp     #.wait_sclk_done
         akpin   sclk_pin
-        wypin   #8, sclk_pin
-        waitse1
 
-        ' === Prepare and send low byte ===
-        ' Minimize gap: start next transfer IMMEDIATELY after waitse1
-        mov     byte_val, pixel_val
-        and     byte_val, #$FF
-        shl     byte_val, #24
-        rev     byte_val
-        wypin   byte_val, mosi_pin
-        akpin   sclk_pin
-        wypin   #8, sclk_pin
-        waitse1
+        ' --- Deassert CS ---
+        drvh    cs_pin
 
-        ' Loop until all pixels sent
-        djnz    pb, #.pixel_loop
-
-        ' Deassert CS
-        drvh    cs_pin                  ' CS high - deselect display
-
+        ' --- Restore MOSI to start-stop 8-bit for subsequent command writes ---
+        dirl    mosi_pin
+        wrpin   mode, mosi_pin
+        wxpin   #XCFG_SYNC_TX_STARTSTOP, mosi_pin
+        dirh    mosi_pin
   END
 
 PRI init_hardware() | clk_period
@@ -707,6 +739,10 @@ PRI init_hardware() | clk_period
   ' Add clock pin offset in bits 24-26
   PINSTART(pin_mosi, P_OE | P_SYNC_TX | ((pin_sclk - pin_mosi) & %111) << 24, %1_00000 | 7, 0)
 
+  ' One-shot diagnostic: confirm the configured SCLK rate matches reality.
+  ' CS is held high (line above) so the display ignores any junk MOSI bits
+  ' generated during the burst. Reported value should match SPI_FREQ closely.
+  measure_sclk_rate()
 
   ' Hardware reset sequence
   debug("  Performing hardware reset...", 13, 10)
@@ -720,6 +756,32 @@ PRI init_hardware() | clk_period
   init_display()
 
   debug("  Hardware initialization complete", 13, 10)
+
+PRI measure_sclk_rate() | start_ct, end_ct, elapsed, measured_hz
+' Measure actual SCLK frequency by timing a known pulse burst.
+'
+' Issues SCLK_MEASURE_PULSES clock pulses through the P_PULSE smart pin,
+' waits for the IN flag (pulse count exhausted), and reports the measured
+' SCLK rate so we can confirm the configured SPI_FREQ matches reality.
+
+' Local Variables:
+' @local start_ct - CT timer value at start of burst
+' @local end_ct - CT timer value when IN flag rises
+' @local elapsed - Elapsed system clock ticks for the burst
+' @local measured_hz - Computed SCLK frequency in Hz
+
+  AKPIN(pin_sclk)                       ' Clear any stale IN flag
+  start_ct := GETCT()
+  WYPIN(pin_sclk, SCLK_MEASURE_PULSES)  ' Generate known pulse count
+  repeat until PINR(pin_sclk)           ' Wait until Y reaches 0
+  end_ct := GETCT()
+  AKPIN(pin_sclk)                       ' Clear IN flag for next user
+
+  elapsed := end_ct - start_ct
+  measured_hz := (CLKFREQ / elapsed) * SCLK_MEASURE_PULSES
+
+  debug("  SCLK measure: ", udec(SCLK_MEASURE_PULSES), " pulses took ", udec(elapsed), " ticks")
+  debug(" -> ", udec(measured_hz), " Hz (configured ", udec(SPI_FREQ), " Hz)", 13, 10)
 
 PRI init_color_lut() | i, sensor_val, redCh, greenCh, blueCh, color, start_ms, corruption_idx, intensity, linear
 ' Build the 4096-entry color LUT mapping 12-bit indices to RGB565 colors.
@@ -1153,8 +1215,9 @@ PRI display_loop() | framePtr
       WAITMS(5)
       next
 
-    ' Display frame using cell-by-cell method (display_frame_fast has offset issues)
-    display_frame(framePtr)
+    ' Display frame using the pre-render + full-screen stream fast path.
+    ' Per-cell windowing (display_frame) is retained for diagnostic use.
+    display_frame_fast(framePtr)
 
     ' Release frame back to pool
     fifo.releaseFrame(framePtr)

@@ -408,6 +408,24 @@ Every `.spin2` file MUST begin with this minimal top-to-bottom order:
 
 For small files, this minimal layout is sufficient — one `CON`, one `DAT`, one `VAR`, then methods. For larger files, additional `CON`, `DAT`, and `VAR` blocks may appear later in the file when they are closely associated with a specific group of methods (see Rule 3.4). The initial layout establishes the file's foundation; later blocks provide locality for subsystem-specific state and constants.
 
+### 3.1.1 When to Use the `{Spin2_v##}` Directive
+
+The `{Spin2_v##}` directive declares the minimum pnut-ts compiler version a file requires. Apply these rules:
+
+1. **If a file uses a feature introduced at version N**, the directive MUST be `{Spin2_v##}` where `##` is N or later.
+2. **If a file uses multiple versioned features**, the directive MUST be the highest minimum version required across all features used.
+3. **If a file uses no versioned features**, no directive is required and one MUST NOT be added.
+
+A pin higher than necessary is misleading — it suggests the file uses features it does not. A missing pin where one is required causes compile failure. Both are silent style issues this rule prevents.
+
+**Authoritative source for feature-to-version mappings:** the P2 Knowledge Base (P2KB) lists the Spin2 version (and PASM2 version where applicable) that introduced every feature. Query P2KB before adding or removing a directive — `p2kb_get("<feature name>")` — and use the version it reports. When the answer is not in P2KB or is ambiguous, check the current pnut-ts release notes.
+
+**Known feature-version mappings** (extend as encountered):
+
+| Feature | Minimum directive |
+|---|---|
+| Typed pointers (`^BYTE`, `^WORD`, `^LONG`, `^structName`) | `{Spin2_v45}` |
+
 ### 3.2 PUB Before PRI
 
 All PUB methods MUST appear before all PRI methods. A reader MUST be able to see the complete public API without scrolling past implementation details.
