@@ -3,4 +3,4 @@
 export PATH="~/.local/bin:$PATH"
 
 alias lsf='ls -F'
-alias myclaude='claude --dangerously-skip-permissions --verbose --mcp-config /opt/container-tools/etc/mcp.json'
+alias myclaude='claude --dangerously-skip-permissions --verbose'
