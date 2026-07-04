@@ -1,21 +1,15 @@
 # Derived dev image for P2-Magnetic-Imaging-Tile.
 #
 # Bakes the network-heavy installs that previously ran in postCreateCommand on
-# EVERY container create (apt packages + pnut-ts compiler + Claude CLI) into
-# cached layers, so rebuilds are cheap and offline.
+# EVERY container create (pnut-ts compiler + Claude CLI) into cached layers, so
+# rebuilds are cheap and offline.
 #
 # NOTE: pnut-ts binary baked here is linux-arm64 (Apple Silicon host). Re-point
 # the COPY/zip name if building on an x64 host.
+#
+# No apt packages are installed: the base image already provides unzip/curl, and
+# image-tools-mcp no longer needs libtesseract5 at runtime (removed 2026-07-04).
 FROM mcr.microsoft.com/devcontainers/javascript-node:24-bookworm
-
-# --- apt packages (was: rm yarn.list + apt install in postCreateCommand) -----
-# The base image ships a stale Yarn repo with an expired GPG key that breaks
-# `apt-get update`; remove it first. libtesseract5 is required by image-tools-mcp.
-RUN rm -f /etc/apt/sources.list.d/yarn.list \
-    && apt-get update && export DEBIAN_FRONTEND=noninteractive \
-    && apt-get install -y --no-install-recommends libtesseract5 \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
 
 # --- pnut-ts compiler (was: unzip + cp in postCreateCommand) -----------------
 COPY pnut-ts-linux-arm64-015500.zip /tmp/pnut-ts.zip
