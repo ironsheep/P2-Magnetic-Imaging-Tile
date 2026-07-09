@@ -20,13 +20,27 @@ The SparkFun Magnetic Imaging Tile V3 is an 8×8 array of Hall effect sensors ca
 
 ### Primary Components
 
-- **[SparkFun Magnetic Imaging Tile V3](DOCs/Magnetic-Tile-Hardware.md)** - 8×8 Hall effect sensor array
-- **[Waveshare 1.5" RGB OLED Module](DOCs/OLED-Display-Hardware.md)** - 128×128 pixel display
-- **Propeller 2 Development Board** - Main controller
+- **[SparkFun Magnetic Imaging Tile V3](DOCs/Hardware/MagSensor-Tile-Hardware.md)** - 8×8 Hall effect sensor array
+- **[Waveshare 1.5" RGB OLED Module](DOCs/Hardware/OLED-Display-Hardware.md)** - 128×128 pixel primary display
+- **[HDMI Display via P2 Digital Video Out add-on](DOCs/Hardware/HDMI-Display-Hardware.md)** - 640×480 @ 60 Hz secondary display
+- **Propeller 2 Edge Module (P2-EC32MB, 32 MB PSRAM)** - Main controller + HDMI framebuffer
 
 ### Quick Reference
 
 #### HDMI Connection (Pin Group 0: P0-P7)
+
+Output via the P2 Digital Video Out add-on — 8 pins in bit-DAC mode forming 4 TMDS differential pairs (640×480 @ 60 Hz).
+
+| Pin | HDMI Signal | Description                      |
+| --- | ----------- | -------------------------------- |
+| P0  | DATA2-      | TMDS Data Channel 2 (negative)   |
+| P1  | DATA2+      | TMDS Data Channel 2 (positive)   |
+| P2  | DATA1-      | TMDS Data Channel 1 (negative)   |
+| P3  | DATA1+      | TMDS Data Channel 1 (positive)   |
+| P4  | DATA0-      | TMDS Data Channel 0 (negative)   |
+| P5  | DATA0+      | TMDS Data Channel 0 (positive)   |
+| P6  | CLK-        | TMDS Clock Channel (negative)    |
+| P7  | CLK+        | TMDS Clock Channel (positive)    |
 
 #### PSRAM Connection (P2 Edge 32MB - DIRB Pins 8-23 → P40-P55)
 
@@ -42,11 +56,11 @@ The SparkFun Magnetic Imaging Tile V3 is an 8×8 array of Hall effect sensors ca
 
 | Pin      | Function | Wire Color | LA Ch Color   | Description                |
 | -------- | -------- | ---------- | ------------- | -------------------------- |
-| P8 (+0)  | CS       | VIOLET     | 00 0-0 YELLOW | AD7940 Chip Select         |
+| P8 (+0)  | CS       | VIOLET     | 00 0-0 YELLOW | AD7680 Chip Select         |
 | P9 (+1)  | CCLK     | WHITE      | 05 1-1 BROWN  | Counter Clock (sensor mux) |
-| P10 (+2) | MISO     | BLUE       | 01 0-1 GREEN  | AD7940 Data Input          |
+| P10 (+2) | MISO     | BLUE       | 01 0-1 GREEN  | AD7680 Data Input          |
 | P11 (+3) | CLRb     | GRAY       | 04 1-0 GRAY   | Counter Clear (sensor mux) |
-| P12 (+4) | SCLK     | GREEN      | 02 0-2 BLUE   | AD7940 SPI Clock           |
+| P12 (+4) | SCLK     | GREEN      | 02 0-2 BLUE   | AD7680 SPI Clock           |
 | P14 (+6) | AOUT     | YELLOW     |               | Analog Input (optional)    |
 | GND      | Ground   | BLACK      |               | Ground connection          |
 | 3.3V     | VCC      | RED        |               | Power supply               |
@@ -65,15 +79,16 @@ The SparkFun Magnetic Imaging Tile V3 is an 8×8 array of Hall effect sensors ca
 
 For detailed hardware specifications, see:
 
-- [Magnetic Tile Hardware Documentation](DOCs/Magnetic-Tile-Hardware.md)
-- [OLED Display Hardware Documentation](DOCs/OLED-Display-Hardware.md)
+- [Magnetic Tile Hardware Documentation](DOCs/Hardware/MagSensor-Tile-Hardware.md)
+- [OLED Display Hardware Documentation](DOCs/Hardware/OLED-Display-Hardware.md)
+- [HDMI Display Hardware Documentation](DOCs/Hardware/HDMI-Display-Hardware.md)
 
 ## Features
 
 ### Data Acquisition
 
 - **Low-Cost Design**: Minimal hardware components for cost-effective implementation
-- **Dual ADC Support**: P2 internal ADC and external AD7940 14-bit ADC for performance comparison
+- **Dual ADC Support**: P2 internal ADC and external AD7680 16-bit ADC for performance comparison
 - **Maximum Frame Rate Testing**: Benchmark P2 performance limits with this sensor configuration
 - **Frame Buffering**: Extensive buffering using P2's 512KB Hub RAM
 
@@ -157,8 +172,8 @@ Detailed technical documentation is available in the `DOCs/` directory:
 
 ### Technical Datasheets
 
-- **[Hardware Schematics](DOCs/Magnetic_Imaging_Tile_Schematic_V10.pdf)** - Circuit diagrams
-- **[IC Datasheet](DOCs/AD7680.pdf)** - AD7940 ADC specifications
+- **[Hardware Schematics](DOCs/Hardware-PDFs/Magnetic_Imaging_Tile_Schematic_V10.pdf)** - Circuit diagrams
+- **[IC Datasheet](DOCs/Hardware-PDFs/AD7680.pdf)** - AD7680 ADC specifications
 
 ## Applications
 
