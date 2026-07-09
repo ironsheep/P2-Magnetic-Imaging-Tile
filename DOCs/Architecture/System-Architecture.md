@@ -1,4 +1,12 @@
 # System Architecture
+
+> **Status — Superseded design specification (historical).** Written before the
+> current implementation; verified during the 2026-07-09 documentation
+> reconciliation to contain descriptions that no longer match the code (FIFO IDs,
+> FIFO depths, frame-pool model, and decimation ratios have all changed). Retained
+> as a design-history record. For the current, authoritative description see
+> `DOCs/System-Specification.md` and the per-subsystem
+> `DOCs/Theory-of-Operations/` documents.
 **Magnetic Imaging Tile - Complete System**
 
 ## Document Version

@@ -16,7 +16,7 @@ The OLED driver (`isp_oled_single_cog.spin2`) is a high-performance, single-COG 
 - **~18 ms** total frame time (620 us render + 17 ms SPI transfer)
 - **32 KB** pixel buffer with pre-computed lookup tables
 - **Smart Pin** SPI for hardware-assisted transmission
-- **Event-driven FIFO** with COGATN wake-up (zero jitter, zero power waste)
+- **FIFO consumer** via blocking dequeue with a short retry when the pool is empty
 
 ---
 
@@ -173,32 +173,31 @@ cell_origin := cell_origin_lut[sensor_idx]  ' Single memory read
 
 **Result:** Render time reduced from **4 ms to 620 us** (6.5x improvement).
 
-### 4. Event-Based SPI Waiting (waitse1)
+### 4. Continuous-Mode Full-Frame Streaming (SYNC_TX)
 
-**Problem:** Polling `PINR(pin_sclk)` in a tight loop wastes cycles and introduces latency.
+**Problem:** Sending the frame one byte at a time (per-byte trigger + wait) leaves
+SPI gaps and caps throughput.
 
-**Solution:** Use P2 event system to wait efficiently for Smart Pin completion.
+**Solution:** The live frame path (`stream_pixel_buffer`) reconfigures MOSI to
+continuous-mode 32-bit SYNC_TX and fires a single full-frame SCLK burst
+(`TOTAL_FRAME_PULSES` = 262,144 pulses), feeding the shifter one long at a time
+while polling the buffer-empty IN flag:
 
 ```pasm2
-' Configure event for SCLK IN flag rise
-mov     pa, sclk_pin
-or      pa, #%01_000000       ' Positive edge event
-setse1  pa
-
-.pixel_loop
-  ; Send high byte
-  wypin   byte_val, mosi_pin
-  akpin   sclk_pin            ' Clear stale IN flag
-  wypin   #8, sclk_pin        ' Trigger 8 clocks
-  waitse1                     ' Wait for completion (low-power)
-
-  ; Send low byte (immediately after waitse1)
-  ; ... same pattern ...
+' MOSI in continuous 32-bit SYNC_TX; one 262,144-pulse SCLK burst for the frame
+.long_loop
+  testp   mosi_pin      wc      ' IN high == SYNC_TX buffer empty
+  if_nc   jmp     #.long_loop
+  rflong  data                  ' next long from the pixel buffer (via hub FIFO)
+  ror     data, #16
+  rev     data                  ' MSB-first wire order
+  wypin   data, mosi_pin        ' load next long into the shifter
 ```
 
-**Key insight:** `akpin` is required to clear stale Smart Pin IN flags before each transfer.
+**Key insight:** MSB-first ordering is produced inline with `ror #16` + `rev`; there
+is no per-byte trigger and no hub bit-reversal table.
 
-**Benefit:** More efficient waiting, slightly improved gap timing.
+**Benefit:** Gapless full-frame streaming at the 20 MHz SPI ceiling.
 
 ### 5. Full-Screen Window with set_window_raw
 
@@ -262,18 +261,19 @@ wypin   byte_val, mosi_pin    ' Load into shift register
 
 ### Sensor Value to Color Conversion
 
-**Input:** 12-bit sensor value (0-4095)
-**Output:** 16-bit RGB565 color (BGR format for SSD1351)
+**Input:** 16-bit sensor value (0–65535), scaled to a 4096-entry LUT index
+**Output:** 16-bit BGR565 color (SSD1351 order)
 
-**Color Gradient:**
+**Color Map (divergent, gamma-corrected):**
 ```
-Sensor Value    Color           Meaning
-    0           Blue (000F)     Strong negative field
-  1024          Cyan            Moderate negative
-  2048          Green (07E0)    Neutral (zero field)
-  3072          Yellow          Moderate positive
-  4095          Red (F800)      Strong positive field
+Sensor Value        Color                   Meaning
+below SENSOR_MID    red rising from gray    Negative field (stronger = more red)
+  SENSOR_MID        gray (neutral base)     Zero field
+above SENSOR_MID    green rising from gray  Positive field (stronger = more green)
 ```
+Only the red or green channel rises above a fixed gray baseline (the other
+channels stay at the gray base); intensity is gamma-corrected (~gamma 2.0). Blue,
+cyan, and yellow are never produced.
 
 **RGB565 Format (BGR for SSD1351):**
 ```
@@ -360,41 +360,28 @@ The `cell_origin_lut` pre-computes these transformations for all 64 cells at ini
 
 ## Integration with System
 
-### FIFO Interface (Event-Driven)
+### FIFO Interface (blocking dequeue with retry)
 
-The OLED driver uses **event-driven dequeue** with COGATN wake-up:
+The OLED driver consumes frames with a plain blocking dequeue, retrying briefly
+when the pool is empty:
 
 ```spin2
-' Register this COG as OLED FIFO consumer at startup
-fifo.registerConsumer(FIFO_OLED, cogid())
-
 repeat
-    ' Event-driven dequeue: COG sleeps until producer sends COGATN
-    ' Zero power consumption while waiting, instant wake-up (~4 clock cycles)
-    framePtr := fifo.dequeueEventDriven(FIFO_OLED)
+    ' Blocking dequeue of the next OLED frame
+    framePtr := fifo.dequeue(fifo.FIFO_OLED)
 
     if framePtr <> 0
         ' Process frame...
-        render_frame(framePtr)
+        display_frame_fast(framePtr)
 
         ' Return frame to pool
         fifo.releaseFrame(framePtr)
-    ' else: spurious wake (race condition) - loop back
+    else
+        WAITMS(5)               ' pool empty - brief wait, then retry
 ```
 
-**Event-Driven Benefits:**
-| Aspect | Polling (Old) | Event-Driven (New) |
-|--------|---------------|-------------------|
-| Wake latency | 0-1ms | ~16 ns |
-| Jitter | High | Near-zero |
-| Power while waiting | Constant | Near-zero |
-| Lock contention | High | Minimal |
-
-**How it works:**
-1. At startup, OLED driver calls `fifo.registerConsumer(FIFO_OLED, cogid())`
-2. FIFO manager stores the COG ID
-3. When producer commits to OLED FIFO, FIFO manager sends `COGATN` to registered COG
-4. OLED driver wakes from `WAITATN` (inside `dequeueEventDriven`) and processes frame
+Note: the FIFO manager also offers an event-driven (COGATN) dequeue, which the
+**HDMI** engine uses; the OLED driver currently uses the simpler blocking form.
 
 ### Decimation Requirements
 

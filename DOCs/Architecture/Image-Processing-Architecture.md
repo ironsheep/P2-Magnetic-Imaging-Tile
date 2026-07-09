@@ -1,4 +1,13 @@
 # Image Processing COG Architecture
+
+> **Status — Forward-looking design proposal (not built).** Describes an intended
+> Processing COG with multi-frame windowing, super-resolution, and transient
+> detection — none of which is implemented (verified 2026-07-09). Present-tense
+> wording here is aspirational. The current system does simple frame decimation
+> in the main COG and renders the native 8×8 grid. This proposal overlaps the
+> planned Multi-Resolution Field Visualization sprint
+> (`DOCs/plans/MULTI-RESOLUTION-FIELD-VISUALIZATION-SPRINT-PLAN.md`); for current
+> built state see `DOCs/System-Specification.md`.
 **Magnetic Imaging Tile - Multi-Frame Processing & Super-Resolution**
 
 ## Document Version

@@ -1,4 +1,14 @@
 # OLED Driver Architecture
+
+> **Status — Superseded design specification (historical).** Written before the
+> current implementation; verified during the 2026-07-09 documentation
+> reconciliation to contain descriptions that no longer match the code (RGB565
+> bit order, a blue/cyan/green/yellow color gradient, and a per-byte 8-clock SPI
+> loop with a hub bit-reversal LUT). The shipped driver packs BGR565, uses a
+> red/gray/green divergent gamma-corrected map, and streams full frames in
+> continuous 32-bit SYNC_TX mode. For the authoritative current description see
+> `DOCs/System-Specification.md` and
+> `DOCs/Theory-of-Operations/OLED-Driver-Theory-of-Operation.md`.
 **Magnetic Imaging Tile - Display Subsystem**
 
 ## Document Version

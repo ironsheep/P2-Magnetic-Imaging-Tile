@@ -1,4 +1,9 @@
 # Object Architecture As-Built
+
+> **Note (2026-07-09 reconciliation):** Behavioral descriptions in this document
+> are current and verified. However, positional citations (file line numbers and
+> per-file line counts) are from the 2026-05-26 snapshot and have drifted as the
+> code grew — refer to the code for exact locations.
 **Magnetic Imaging Tile — what the code actually does, vs. the plan**
 
 **Companion to:** `Object-Architecture-and-Cog-Allocation.md` (v1.1, the *ideal* decomposition)

@@ -1,5 +1,13 @@
 # P2 Magnetic Field Viewer - Spin2 Object Architecture Plan
 
+> **Status — Pre-implementation planning proposal (2025-09), superseded.** This
+> early object-decomposition proposal predates the built system; proposed object
+> names, the 512×512@240fps HDMI target, and the COG map differ from what shipped
+> (verified 2026-07-09). Retained as planning history. For the current object
+> model see `Object-Architecture-and-Cog-Allocation.md`,
+> `DOCs/status-reports/Object-Architecture-As-Built.md`, and
+> `DOCs/System-Specification.md`.
+
 ## Overview
 This document defines the object-oriented architecture for the P2 Magnetic Field Viewer application, breaking down the system into clean, reusable Spin2 objects with well-defined interfaces and responsibilities.
 

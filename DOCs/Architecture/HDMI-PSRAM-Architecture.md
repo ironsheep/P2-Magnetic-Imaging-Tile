@@ -1,4 +1,14 @@
 # HDMI/PSRAM Display Architecture
+
+> **Status — Superseded design specification (historical).** Written before the
+> current implementation; verified during the 2026-07-09 documentation
+> reconciliation to contain descriptions that no longer match the code (COG
+> allocation numbers, 12-bit 0–4095 sensor range, a blocking-poll dequeue model,
+> and a "Graphics PASM Driver" COG that is never launched). The HDMI path is
+> correct in spirit (streamer/DAC/TMDS, PSRAM framebuffer) but the specifics have
+> drifted. For the authoritative current description see
+> `DOCs/System-Specification.md` and
+> `DOCs/Theory-of-Operations/HDMI-Driver-Theory-of-Operation.md`.
 **Magnetic Imaging Tile - Display Subsystem**
 
 ## Document Version

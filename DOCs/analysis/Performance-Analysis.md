@@ -4,6 +4,14 @@
 **Date:** 2025-12-26
 **System Clock:** 250 MHz
 
+> **Reconciliation note (2026-07-09):** The OLED section below predates the
+> committed 60 Hz optimization. `display_frame_fast()` (continuous-mode SYNC_TX
+> streaming) is now the **live** OLED path — not disabled — and a
+> `measure_sclk_rate()` diagnostic was added. The ~55 fps figures are the last
+> measured values *before* that rework; an on-board re-measurement against the
+> 60 fps target is still pending. Sensor (~1,370 fps) and HDMI (60 fps) figures
+> remain current.
+
 ---
 
 ## Executive Summary
@@ -354,7 +362,7 @@ The single largest inefficiency is the per-cell `set_window()` calls:
 
 This represents 4.6% of frame time, but the overhead compounds with CS/DC transitions.
 
-### Alternative: `display_frame_fast()` (Currently Disabled)
+### `display_frame_fast()` (now the live path)
 
 The codebase contains an optimized method using full-screen streaming:
 
@@ -376,11 +384,11 @@ SPI stream: 13.1 ms
 Total: ~15.1 ms = 66 fps
 ```
 
-However, comments indicate offset issues with this method:
-```spin2
-' Display frame using cell-by-cell method (display_frame_fast has offset issues)
-display_frame(framePtr)
-```
+An earlier offset issue with this method was resolved by streaming with
+`set_window_raw()` — the pre-rendered pixel buffer already places cells at their
+final panel coordinates. `display_frame_fast()` is now routed in `display_loop()`
+as the live path, with per-cell `display_frame()` retained for diagnostics.
+(Committed; on-board frame-rate re-measurement still pending.)
 
 ### Secondary Bottleneck: SPI Clock Limit
 

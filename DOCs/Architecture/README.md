@@ -1,5 +1,12 @@
 # Architecture Documentation
 
+> **Status — Partially superseded index (historical figures).** Verified during
+> the 2026-07-09 documentation reconciliation: several figures in this index are
+> stale (sensor "918 fps", dual-COG sensor, FIFO ID numbers, and "next/future"
+> phases that are already complete). The authoritative current descriptions are
+> `DOCs/System-Specification.md`, the `DOCs/Theory-of-Operations/` docs, and
+> `Object-Architecture-and-Cog-Allocation.md` (current) in this directory.
+
 This folder contains the complete architecture documentation for the P2 Magnetic Imaging Tile system.
 
 ## Document Overview

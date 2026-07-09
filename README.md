@@ -123,16 +123,22 @@ Each frame contains 64 sensor readings arranged as an 8×8 grid, processed inter
 
 ## Project Status
 
-**Current Phase**: Documentation and Planning
+**Current Phase**: Operational — real-time acquisition and dual-display visualization running on hardware.
 
-This project is currently in the initial development phase. Comprehensive documentation has been created based on the Arduino reference implementation:
+The core system is implemented and running on a P2 Edge (P2-EC32MB) board:
 
 - ✅ Hardware interface specifications
 - ✅ Communication protocol definition
 - ✅ System architecture design
-- ⏳ P2 source code implementation
-- ⏳ VGA/HDMI display system
-- ⏳ Testing and validation
+- ✅ P2 source code implementation — sensor, decimator, and both display drivers
+- ✅ Sensor acquisition — **~1,370 fps** measured (inline-PASM calibration, 3.7× over the original)
+- ✅ HDMI display — 640×480 @ 60 fps (P2 streamer, PSRAM-backed framebuffer)
+- ✅ OLED display — 128×128 SSD1351 live; 60 Hz-optimized path committed, on-board re-measurement pending
+- ⏳ Multi-resolution field exploration (8/16/32 with selectable interpolation & color modes) — **planned**, see `DOCs/plans/`
+- ⏳ Runtime mode-switch control interface — planned
+
+The project intent, current state, and roadmap are captured in
+**[System Design & Intent Specification](DOCs/System-Specification.md)**.
 
 ## Documentation
 

@@ -1,5 +1,11 @@
 # Magnetic Field Viewer - Application Architecture
 
+> **Status — Forward-looking roadmap / idea repository (mostly not built).** This
+> is a design roadmap, not a description of the shipped system (verified
+> 2026-07-09). The staged multi-COG architectures and most visualization modes are
+> proposals. Only a single visualization is built: bipolar red/green/gray field
+> coloring. For current built state see `DOCs/System-Specification.md`.
+
 ## Document Purpose
 This living document defines the software architecture for the P2 Magnetic Imaging Tile viewer application, from minimal viable product through advanced implementations. It serves as both a roadmap and idea repository for the project evolution.
 
@@ -246,7 +252,11 @@ VAR
 
 ## Visualization Modes
 
-### Implemented Modes
+### Proposed Modes (not yet built)
+
+> Only the Standard Heat Map's color mapping is implemented today — and as
+> red (negative) / green (positive) / gray (neutral), not the red/blue below.
+> Peak-hold, differential, and vector-field modes are unbuilt proposals.
 
 #### 1. Standard Heat Map
 - Linear color mapping

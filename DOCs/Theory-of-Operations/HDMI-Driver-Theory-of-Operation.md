@@ -73,11 +73,14 @@ The HDMI display system provides real-time 640×480 @ 60Hz video output for visu
 |-----|----------|--------|-------|
 | 0 | Main/Decimator | mag_tile_viewer | Frame routing, FIFO management |
 | 1 | Sensor Acquisition | isp_tile_sensor | SPI ADC, 64-sensor readout |
-| 2 | PSRAM Driver | psram_driver | Shared memory interface |
-| 3 | HDMI Signal Generator | isp_hdmi_640x480_24bpp | Video timing, streaming |
-| 4 | HDMI Display Engine | isp_hdmi_display_engine | Rendering, color mapping |
-| 5 | OLED Driver | isp_oled_single_cog | Secondary display |
+| 2 | HDMI Display Engine | isp_hdmi_display_engine | Rendering, color mapping |
+| 3 | OLED Driver | isp_oled_single_cog | Secondary display |
+| 4 | PSRAM Driver | PSRAM_driver_RJA_Platform_1b | Shared memory interface |
+| 5 | HDMI Signal Generator | isp_hdmi_640x480_24bpp | Video timing, streaming |
 | 6-7 | Available | - | Reserved for expansion |
+
+**Note:** COG IDs are assigned dynamically by launch order (`cogspin`/`coginit`),
+so exact integers can vary between builds; the table shows the logical allocation.
 
 ---
 

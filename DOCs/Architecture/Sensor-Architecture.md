@@ -1,4 +1,13 @@
 # Sensor Architecture
+
+> **Status — Superseded design specification (historical).** Written before the
+> current implementation; verified during the 2026-07-09 documentation
+> reconciliation to contain descriptions that no longer match the code (it
+> describes a dual-COG/mailbox design, bit-banged 20-clock SPI, and ~918 fps @
+> 200 MHz — none of which are current). The shipped sensor is single-COG with
+> smart-pin SPI and inline-PASM calibration at ~1,370 fps. For the authoritative
+> current description see `DOCs/System-Specification.md` and
+> `DOCs/Theory-of-Operations/MagSensor-Driver-Theory-of-Operation.md`.
 **Magnetic Imaging Tile - Sensor Acquisition Subsystem**
 
 ## Document Version

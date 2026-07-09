@@ -64,18 +64,18 @@ ADC Range:
 
 ### Color Formula
 
-The current implementation uses a two-component formula:
+The current implementation uses a single-component, gamma-corrected formula (the
+earlier `gray_fade` second component was removed):
 
 ```
+linear    = scaled distance of sensor_val from SENSOR_MID
+intensity = (linear * linear) / 255            ' gamma ~2.0
+
 For sensor_val < SENSOR_MID (negative field):
-    intensity = (SENSOR_MID - sensor_val) * 255 / NEGATIVE_RANGE
-    gray_fade = sensor_val * GRAY_BASE / NEGATIVE_RANGE
-    R = intensity, G = gray_fade, B = gray_fade
+    R = GRAY_BASE + intensity, G = GRAY_BASE, B = GRAY_BASE   ' red rises from gray
 
 For sensor_val >= SENSOR_MID (positive field):
-    intensity = (sensor_val - SENSOR_MID) * 255 / POSITIVE_RANGE
-    gray_fade = (SENSOR_MAX - sensor_val) * GRAY_BASE / POSITIVE_RANGE
-    R = gray_fade, G = intensity, B = gray_fade
+    R = GRAY_BASE, G = GRAY_BASE + intensity, B = GRAY_BASE   ' green rises from gray
 ```
 
 ---

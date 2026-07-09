@@ -1,5 +1,15 @@
 # Tile Sensor Architecture
 
+> **Status — Superseded design specification (historical).** Written before the
+> current implementation; verified during the 2026-07-09 documentation
+> reconciliation to contain descriptions that no longer match the code (AD7940
+> 14-bit ADC, bit-banged SPI as current, a 375 fps GETCT/WAITCT throttle, dual-COG
+> with mailbox handshake, and routine names that do not exist). The shipped sensor
+> uses the AD7680 16-bit ADC over smart-pin SPI, single-COG, no frame-rate
+> throttle, at ~1,370 fps. For the authoritative current description see
+> `DOCs/System-Specification.md` and
+> `DOCs/Theory-of-Operations/MagSensor-Driver-Theory-of-Operation.md`.
+
 ## Overview
 
 The tile sensor subsystem interfaces with the SparkFun Magnetic Imaging Tile V3, reading 64 Hall effect sensors arranged in an 8x8 grid. This document explains the architecture, performance requirements, and implementation progression from bit-banged SPI to Smart Pin-based solutions.

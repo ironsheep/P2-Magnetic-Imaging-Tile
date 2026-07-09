@@ -18,11 +18,13 @@ Active outstanding items for the project. Closed items get swept into the dated 
 - **Where:** `src/isp_oled_single_cog.spin2` — `display_frame_fast()` (line 384) and the `display_loop()` consumer pattern (around line 1145). Likely needs a second pixel buffer and a small stream sub-COG.
 - **Verification:** Frame timing measurements (`test_oled_performance.spin2`) show frame time approaches the 13.1 ms SPI floor.
 
-### Write the system-wide project specification
-- **What:** Author `DOCs/System-Specification.md` — a top-level architectural target describing the project as a whole: scope, performance targets, the sensor → decimation → display pipeline, the cog allocation, the data flow, and the interfaces between subsystems. This is the document that says "here is where we are heading," distinct from the per-subsystem theory-of-operations docs.
-- **Why:** The project currently has many per-subsystem documents (sensor driver, HDMI driver, OLED driver, visualization) but no single system-wide target spec. The `SPEC_DOC` slot in `.claude/skill-conventions.md` points at a stub awaiting this content.
-- **Where:** `DOCs/System-Specification.md` (currently a stub).
-- **Sources to draw from:** the theory-of-operations docs in `DOCs/Theory-of-Operations/`, the architecture docs in `DOCs/Architecture/`, and the as-built status in `DOCs/status-reports/Object-Architecture-As-Built.md`.
+### Multi-Resolution Field Visualization sprint (planned & deferred)
+- **What:** The multi-resolution field-exploration feature (8×8 / 16×16 / 32×32 with selectable interpolation kernels and color-transfer modes) is fully planned in `DOCs/plans/MULTI-RESOLUTION-FIELD-VISUALIZATION-SPRINT-PLAN.md` with a bottom-up test certification ladder and zero open questions.
+- **Status:** Planned & deferred — ready for `sprint-start` when scheduled; not yet begun.
+
+> Note: "Write the system-wide project specification" (previously listed here) is
+> **done** — `DOCs/System-Specification.md` is now the living design-intent spec
+> (2026-07-09 documentation reconciliation).
 
 ### Author CHANGELOG voicing guide
 - **What:** Write a short voicing guide for `CHANGELOG.md` entries — audience, tone, level of technical detail, what gets a bullet, what doesn't.

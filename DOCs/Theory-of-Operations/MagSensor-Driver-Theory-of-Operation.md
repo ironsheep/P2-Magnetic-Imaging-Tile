@@ -303,9 +303,15 @@ The sensor data undergoes transformation from hardware read order to display-rea
 - Performance: Eliminates multiple table lookups and runtime math
 - Debuggability: Clear mapping from hardware index to final buffer position
 
-### Current Multi-Stage Approach (Being Unified)
+### Derivation: the Multi-Stage Approach (historical)
 
-The current implementation uses three separate transformation stages. This section documents each stage to understand what they do, then shows how to combine them.
+> **Historical / derivation note:** The three-stage transformation below is the
+> *derivation history* of the mapping, not the current implementation. The shipped
+> code uses the single unified 64-entry `unified_sensor_map` table (see above)
+> plus inline calibration — the separate subtile / offset / pixel-order / rotation
+> stages described here no longer exist as runtime stages.
+
+The original implementation used three separate transformation stages. This section documents each stage to understand what they do, then shows how they were combined into the unified table.
 
 #### Transformation Layer Analysis
 
